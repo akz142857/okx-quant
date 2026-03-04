@@ -1,5 +1,21 @@
 # OKX 量化交易系统
 
+## 安装
+
+需要 Python 3.12+，使用 [uv](https://docs.astral.sh/uv/) 管理依赖。
+
+```bash
+# 安装 uv（如尚未安装）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 克隆项目并安装依赖
+git clone <repo-url> && cd okx-quant
+uv sync
+
+# 复制配置文件并填写 API Key
+cp config.yaml.example config.yaml
+```
+
 ## 快速开始
 
 ```bash
@@ -64,6 +80,22 @@ Dashboard 上看 差值 就行：
 - 差值为正（快线 > 慢线）→ 持仓中，等死叉卖出
 
 简单说：差值越接近 0 且在收窄，离买入信号就越近。
+
+### K 线周期选择
+
+| 周期 | EMA9/21 覆盖 | Adaptive 冷却 | 信号频率 | 信号质量 | 手续费影响 |
+|---|---|---|---|---|---|
+| 15m | 2.25h / 5.25h | 1 小时 | 高 | 中 | 较大 |
+| 30m | 4.5h / 10.5h | 2 小时 | 中偏高 | 中偏高 | 适中 |
+| 1H | 9h / 21h | 4 小时 | 低 | 高 | 小 |
+| 4H | 36h / 84h | 16 小时 | 很低 | 很高 | 很小 |
+
+推荐 **15m**（配合 Adaptive 策略，轮询间隔 20~30 秒）：
+
+- 小账户需要信号频率，1H 级别信号过于稀少，资金利用率低
+- Adaptive 的 `cooldown_bars=4` 在 15m 下等于 1 小时确认才切换策略，不会频繁乱切
+- Bollinger %B 和 RSI 阈值在 15m 上更容易触及，信号覆盖面好
+- 选币器已筛选出高波动币种，15m 更能捕捉这些波动
 
 ## 配置说明
 
