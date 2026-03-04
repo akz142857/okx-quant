@@ -234,8 +234,13 @@ def cmd_screen(args, cfg):
     screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
     try:
         balances = client.get_balance("USDT")
-        if balances:
-            screener_cfg.available_usdt = float(balances[0].get("availEq") or balances[0].get("availBal") or 0)
+        for item in balances:
+            for detail in item.get("details", []):
+                if detail.get("ccy") == "USDT":
+                    screener_cfg.available_usdt = float(
+                        detail.get("availEq", 0) or detail.get("availBal", 0) or 0
+                    )
+                    break
     except Exception as e:
         logger.warning("获取余额失败，跳过资金量过滤: %s", e)
 
@@ -261,8 +266,13 @@ def _run_screen(cfg, top_n: int, bar: str) -> list[str]:
     screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
     try:
         balances = client.get_balance("USDT")
-        if balances:
-            screener_cfg.available_usdt = float(balances[0].get("availEq") or balances[0].get("availBal") or 0)
+        for item in balances:
+            for detail in item.get("details", []):
+                if detail.get("ccy") == "USDT":
+                    screener_cfg.available_usdt = float(
+                        detail.get("availEq", 0) or detail.get("availBal", 0) or 0
+                    )
+                    break
     except Exception as e:
         logger.warning("获取余额失败，跳过资金量过滤: %s", e)
 
