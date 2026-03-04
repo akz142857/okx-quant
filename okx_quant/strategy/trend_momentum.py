@@ -34,15 +34,15 @@ class TrendMomentumStrategy(BaseStrategy):
             "ema_fast": 20,
             "ema_slow": 50,
             "adx_period": 14,
-            "adx_thresh": 20,
+            "adx_thresh": 15,
             "macd_fast": 12,
             "macd_slow": 26,
             "macd_signal": 9,
             "rsi_period": 14,
-            "rsi_buy_low": 40,
-            "rsi_buy_high": 70,
+            "rsi_buy_low": 35,
+            "rsi_buy_high": 75,
             "rsi_sell": 45,
-            "pullback_pct": 1.5,
+            "pullback_pct": 2.5,
             "atr_period": 14,
             "atr_sl_mult": 2.5,
         }
@@ -110,7 +110,7 @@ class TrendMomentumStrategy(BaseStrategy):
         # 允许价格略低于 EMA20，捕捉经典回踩场景
         dist_pct = (curr_price / curr_ema_fast - 1) * 100 if curr_ema_fast else 0
         pullback = abs(dist_pct) <= p["pullback_pct"]
-        rsi_pullback = p["rsi_buy_low"] <= curr_rsi <= 55
+        rsi_pullback = p["rsi_buy_low"] <= curr_rsi <= 60
         if (pullback and trend_up and adx_ok and hist_positive and rsi_pullback):
             sl = round(curr_price - curr_atr * p["atr_sl_mult"], 8)
             return Signal(

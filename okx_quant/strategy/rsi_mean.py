@@ -25,8 +25,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
     def __init__(self, params: dict | None = None):
         defaults = {
             "rsi_period": 14,
-            "oversold": 35,
-            "overbought": 65,
+            "oversold": 40,
+            "overbought": 60,
             "atr_period": 14,
             "atr_sl_mult": 1.5,
             "atr_tp_mult": 2.5,

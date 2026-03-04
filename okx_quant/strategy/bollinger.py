@@ -29,10 +29,10 @@ class BollingerBandStrategy(BaseStrategy):
             "bb_period": 20,
             "bb_std": 2.0,
             "rsi_period": 14,
-            "rsi_filter_low": 40,
-            "rsi_filter_high": 60,
-            "pct_b_buy": 20,
-            "pct_b_sell": 80,
+            "rsi_filter_low": 45,
+            "rsi_filter_high": 55,
+            "pct_b_buy": 30,
+            "pct_b_sell": 70,
         }
         merged = {**defaults, **(params or {})}
         super().__init__(merged)

@@ -24,8 +24,8 @@ class MACrossStrategy(BaseStrategy):
 
     def __init__(self, params: dict | None = None):
         defaults = {
-            "fast_period": 9,
-            "slow_period": 21,
+            "fast_period": 7,
+            "slow_period": 15,
             "atr_period": 14,
             "atr_sl_mult": 2.0,
             "atr_tp_mult": 3.0,
