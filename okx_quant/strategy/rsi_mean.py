@@ -13,8 +13,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
 
     默认参数:
         rsi_period: 14
-        oversold: 30
-        overbought: 70
+        oversold: 35      （加密货币 1H 级别适配，传统股票用 30）
+        overbought: 65    （加密货币 1H 级别适配，传统股票用 70）
         atr_period: 14
         atr_sl_mult: 1.5
         atr_tp_mult: 2.5
@@ -25,8 +25,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
     def __init__(self, params: dict | None = None):
         defaults = {
             "rsi_period": 14,
-            "oversold": 30,
-            "overbought": 70,
+            "oversold": 35,
+            "overbought": 65,
             "atr_period": 14,
             "atr_sl_mult": 1.5,
             "atr_tp_mult": 2.5,
