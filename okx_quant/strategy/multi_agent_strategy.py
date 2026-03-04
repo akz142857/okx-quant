@@ -162,10 +162,8 @@ class MultiAgentStrategy(BaseStrategy):
         if signal_type == SignalType.BUY:
             stop_loss = round(curr_price * (1 - sl_pct), 8)
             take_profit = round(curr_price * (1 + tp_pct), 8)
-        elif signal_type == SignalType.SELL:
-            stop_loss = round(curr_price * (1 + sl_pct), 8)
-            take_profit = round(curr_price * (1 - tp_pct), 8)
         else:
+            # 现货多头系统：SELL 是平仓，HOLD 无操作，均不需要止损止盈
             stop_loss = 0
             take_profit = 0
 

@@ -209,21 +209,18 @@ class Screener:
 
         result = pd.DataFrame(rows)
 
-        # Z-score 标准化（atr_pct 单独处理，中等最优）
-        for col in ["adx_mean", "vol_ratio", "roc", "bw_pctile"]:
-            std = result[col].std()
-            if std > 0:
-                result[f"{col}_z"] = (result[col] - result[col].mean()) / std
-            else:
-                result[f"{col}_z"] = 0.0
-
-        # ATR% 特殊处理：中等最优 — 距中位数距离越小分越高
+        # 排名标准化（rank normalization，对加密货币厚尾分布更稳健）
+        # ADX: 越高越好（趋势清晰）
+        result["adx_mean_z"] = result["adx_mean"].rank(pct=True) - 0.5
+        # 量变比: 越高越好（近期放量）
+        result["vol_ratio_z"] = result["vol_ratio"].rank(pct=True) - 0.5
+        # |ROC|: 绝对值越大越好（有波动机会，不偏多空方向）
+        result["roc_z"] = result["roc"].abs().rank(pct=True) - 0.5
+        # 带宽百分位: 越低越好（squeeze 蓄力，预示突破）
+        result["bw_pctile_z"] = (-result["bw_pctile"]).rank(pct=True) - 0.5
+        # ATR%: 中等最优 — 距中位数越近分越高
         atr_median = result["atr_pct"].median()
-        atr_std = result["atr_pct"].std()
-        if atr_std > 0:
-            result["atr_pct_z"] = -abs(result["atr_pct"] - atr_median) / atr_std
-        else:
-            result["atr_pct_z"] = 0.0
+        result["atr_pct_z"] = (-(result["atr_pct"] - atr_median).abs()).rank(pct=True) - 0.5
 
         # 加权综合分
         result["score"] = (

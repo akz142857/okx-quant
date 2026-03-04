@@ -130,10 +130,8 @@ class LLMStrategy(BaseStrategy):
         if signal_type == SignalType.BUY:
             stop_loss = round(curr_price * (1 - sl_pct), 8)
             take_profit = round(curr_price * (1 + tp_pct), 8)
-        elif signal_type == SignalType.SELL:
-            stop_loss = round(curr_price * (1 + sl_pct), 8)
-            take_profit = round(curr_price * (1 - tp_pct), 8)
         else:
+            # 现货多头系统：SELL 是平仓，HOLD 无操作，均不需要止损止盈
             stop_loss = 0
             take_profit = 0
 
@@ -163,10 +161,14 @@ class LLMStrategy(BaseStrategy):
         close = df["close"]
         curr_price = close.iloc[-1]
 
-        # 1. Market Summary
-        high_24h = df["high"].tail(24).max()
-        low_24h = df["low"].tail(24).min()
-        open_24h = close.iloc[-24] if len(df) >= 24 else close.iloc[0]
+        # 1. Market Summary（基于时间戳精确取 24H 窗口）
+        cutoff = df["ts"].iloc[-1] - pd.Timedelta(hours=24)
+        df_24h = df[df["ts"] >= cutoff]
+        if df_24h.empty:
+            df_24h = df
+        high_24h = df_24h["high"].max()
+        low_24h = df_24h["low"].min()
+        open_24h = df_24h["close"].iloc[0]
         change_pct = (curr_price - open_24h) / open_24h * 100
 
         sections.append(
@@ -229,7 +231,8 @@ class LLMStrategy(BaseStrategy):
             pass
 
         # 尝试提取 JSON 块（LLM 有时会包裹在 ```json ... ``` 中）
-        match = re.search(r"\{[^{}]*\}", content, re.DOTALL)
+        # 支持嵌套花括号（如 reason 字段含 {} 的情况）
+        match = re.search(r"\{.*\}", content, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group())
