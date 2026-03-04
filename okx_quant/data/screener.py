@@ -34,6 +34,8 @@ class ScreenerConfig:
     min_listing_days: int = 90
     exclude_stablecoins: list[str] = field(default_factory=lambda: list(_DEFAULT_STABLECOINS))
     pre_filter_top_n: int = 30
+    min_order_usdt: float = 0       # 最小下单金额（0 = 不过滤）
+    available_usdt: float = 0       # 可用资金（0 = 不过滤）
 
     # --- Layer 2: 因子 ---
     bar: str = "4H"
@@ -123,8 +125,8 @@ class Screener:
         usdt = usdt[usdt["vol_usdt"] >= self.cfg.min_vol_24h_usdt]
 
         # 上线时间过滤：拉取 instrument 列表
+        instruments = self.client.get_instruments("SPOT")
         if self.cfg.min_listing_days > 0:
-            instruments = self.client.get_instruments("SPOT")
             now_ms = time.time() * 1000
             min_list_ms = self.cfg.min_listing_days * 86400 * 1000
             valid_insts = set()
@@ -133,6 +135,36 @@ class Screener:
                 if list_time > 0 and (now_ms - list_time) >= min_list_ms:
                     valid_insts.add(inst["instId"])
             usdt = usdt[usdt["inst_id"].isin(valid_insts)]
+
+        # 资金量过滤：排除 minSz * last_price > available_usdt 的币种
+        if self.cfg.min_order_usdt > 0 and self.cfg.available_usdt > 0:
+            min_sz_map = {}
+            for inst in instruments:
+                inst_id = inst["instId"]
+                min_sz = float(inst.get("minSz", "0") or "0")
+                if min_sz > 0:
+                    min_sz_map[inst_id] = min_sz
+
+            before_afford = len(usdt)
+            excluded_afford = []
+            affordable_mask = []
+            for _, row in usdt.iterrows():
+                inst_id = row["inst_id"]
+                min_sz = min_sz_map.get(inst_id, 0)
+                min_cost = min_sz * row["last"]
+                if min_cost > self.cfg.available_usdt:
+                    affordable_mask.append(False)
+                    excluded_afford.append(f"{inst_id}(最小{min_cost:.1f}U)")
+                else:
+                    affordable_mask.append(True)
+            usdt = usdt[affordable_mask]
+            if excluded_afford:
+                print(f"    资金过滤: 可用 {self.cfg.available_usdt:.1f} USDT，"
+                      f"排除 {len(excluded_afford)} 个买不起的币种")
+                # 最多打印 5 个示例
+                examples = excluded_afford[:5]
+                print(f"    排除示例: {', '.join(examples)}"
+                      + (f" 等" if len(excluded_afford) > 5 else ""))
 
         # 按 USDT 成交额排序，取 top N
         usdt = usdt.sort_values("vol_usdt", ascending=False)

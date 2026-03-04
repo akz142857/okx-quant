@@ -26,6 +26,8 @@ import sys
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 from okx_quant.strategy import STRATEGY_REGISTRY, is_llm_strategy
 
 VALID_BARS = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D", "1W"]
@@ -227,6 +229,16 @@ def cmd_screen(args, cfg):
     if hasattr(args, "min_vol") and args.min_vol is not None:
         screener_cfg.min_vol_24h_usdt = args.min_vol
 
+    # 注入资金量过滤参数
+    risk_cfg_raw = cfg.get("risk", {})
+    screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
+    try:
+        balances = client.get_balance("USDT")
+        if balances:
+            screener_cfg.available_usdt = float(balances[0].get("availEq") or balances[0].get("availBal") or 0)
+    except Exception as e:
+        logger.warning("获取余额失败，跳过资金量过滤: %s", e)
+
     screener = Screener(client, screener_cfg)
     selected, scored_df = screener.run(top_n=args.top)
     screener.print_results(selected, scored_df)
@@ -243,6 +255,16 @@ def _run_screen(cfg, top_n: int, bar: str) -> list[str]:
     screener_cfg_raw = cfg.get("screener", {})
     screener_cfg = ScreenerConfig.from_dict(screener_cfg_raw)
     screener_cfg.bar = bar
+
+    # 注入资金量过滤参数
+    risk_cfg_raw = cfg.get("risk", {})
+    screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
+    try:
+        balances = client.get_balance("USDT")
+        if balances:
+            screener_cfg.available_usdt = float(balances[0].get("availEq") or balances[0].get("availBal") or 0)
+    except Exception as e:
+        logger.warning("获取余额失败，跳过资金量过滤: %s", e)
 
     screener = Screener(client, screener_cfg)
     selected, scored_df = screener.run(top_n=top_n)
