@@ -9,6 +9,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+import pandas as pd
+
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.data.market import MarketDataFetcher
 from okx_quant.risk.manager import RiskManager, RiskConfig, PositionInfo
@@ -157,6 +159,10 @@ class LiveTrader:
         self._cached_available: float = 0.0
         self._cached_available_ts: float = 0.0
 
+        # 移动止盈 (trailing stop)
+        self._highest_since_entry: dict[str, float] = {}  # inst_id -> 最高价
+        self.trailing_atr_mult: float = 2.0  # trailing stop = highest - mult * ATR
+
         # 交易对精度（lotSz / minSz），启动时查询
         self._lot_sz: float = 0.0
         self._min_sz: float = 0.0
@@ -262,6 +268,9 @@ class LiveTrader:
             logger.info("[下单] 买入成功 ordId=%s", ord_id)
             self._invalidate_balance_cache()
 
+            # 记录移动止盈基准
+            self._highest_since_entry[self.inst_id] = price
+
             # 记录到风控
             self.risk.add_position(
                 PositionInfo(
@@ -340,6 +349,7 @@ class LiveTrader:
                 )
 
             self.risk.remove_position(self.inst_id)
+            self._highest_since_entry.pop(self.inst_id, None)
             return True
         except Exception as e:
             logger.error("[下单] 卖出失败: %s", e)
@@ -354,15 +364,37 @@ class LiveTrader:
     # 止损/止盈轮询检查
     # -------------------------------------------------------------------------
 
-    def _check_sl_tp(self, current_price: float) -> bool:
+    def _check_sl_tp(self, current_price: float, df: pd.DataFrame | None = None) -> bool:
         """返回 True 表示已触发并平仓"""
         pos = self.risk.get_position(self.inst_id)
         if not pos:
             return False
 
+        # --- 移动止盈 (trailing stop) ---
+        if df is not None and self.inst_id in self._highest_since_entry:
+            from okx_quant.indicators import atr as calc_atr
+
+            # 更新最高价
+            highest = self._highest_since_entry[self.inst_id]
+            if current_price > highest:
+                highest = current_price
+                self._highest_since_entry[self.inst_id] = highest
+
+            # 计算 trailing stop
+            atr_val = calc_atr(df).iloc[-1]
+            trailing_stop = highest - self.trailing_atr_mult * atr_val
+
+            # 只上移不下移
+            if trailing_stop > pos.stop_loss:
+                pos.stop_loss = trailing_stop
+                logger.debug(
+                    "[移动止盈] 最高=%.4f ATR=%.4f 新止损=%.4f",
+                    highest, atr_val, trailing_stop,
+                )
+
         if pos.stop_loss > 0 and current_price <= pos.stop_loss:
             logger.warning("[风控] 止损触发 %.4f <= %.4f", current_price, pos.stop_loss)
-            return self._sell("止损触发")
+            return self._sell("止损触发（移动止盈）" if self.inst_id in self._highest_since_entry else "止损触发")
 
         if pos.take_profit > 0 and current_price >= pos.take_profit:
             logger.info("[风控] 止盈触发 %.4f >= %.4f", current_price, pos.take_profit)
@@ -567,8 +599,8 @@ class LiveTrader:
             logger.warning("[风控] %s，跳过交易", self.risk._halt_reason)
             return
 
-        # 止损/止盈检查
-        if self._check_sl_tp(current_price):
+        # 止损/止盈检查（传入 df 用于 trailing stop）
+        if self._check_sl_tp(current_price, df):
             return
 
         # 生成策略信号

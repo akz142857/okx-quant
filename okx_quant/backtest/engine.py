@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import pandas as pd
 
+from okx_quant.indicators import atr as calc_atr
 from okx_quant.strategy.base import BaseStrategy, SignalType
 
 logger = logging.getLogger(__name__)
@@ -60,10 +61,12 @@ class BacktestEngine:
         initial_capital: float = 10000.0,
         fee_rate: float = 0.001,
         slippage: float = 0.0005,
+        trailing_atr_mult: float = 2.0,
     ):
         self.initial_capital = initial_capital
         self.fee_rate = fee_rate
         self.slippage = slippage
+        self.trailing_atr_mult = trailing_atr_mult
 
     def run(
         self,
@@ -87,6 +90,10 @@ class BacktestEngine:
         position: Optional[Trade] = None
         trades: list[Trade] = []
         equity_records: list[tuple] = []
+        highest_since_entry: float = 0.0
+
+        # 预计算 ATR 序列，供 trailing stop 使用
+        atr_series = calc_atr(df)
 
         for i in range(1, len(df)):
             bar = df.iloc[i]
@@ -96,6 +103,18 @@ class BacktestEngine:
             high = bar["high"]
             low = bar["low"]
 
+            # 移动止盈：更新最高价并上移止损
+            if position and position.is_open:
+                if high > highest_since_entry:
+                    highest_since_entry = high
+                # take_profit == 0 表示使用 trailing stop 代替固定止盈
+                if position.take_profit == 0:
+                    curr_atr = atr_series.iloc[i]
+                    if curr_atr > 0:
+                        trailing_stop = highest_since_entry - self.trailing_atr_mult * curr_atr
+                        if trailing_stop > position.stop_loss:
+                            position.stop_loss = trailing_stop
+
             # 检查止损/止盈（在生成信号前执行，模拟 K 线内触发）
             if position and position.is_open:
                 exit_price, exit_reason = self._check_sl_tp(position, high, low)
@@ -103,6 +122,7 @@ class BacktestEngine:
                     capital = self._close_position(position, exit_price, ts, exit_reason, capital)
                     trades.append(position)
                     position = None
+                    highest_since_entry = 0.0
 
             # 跳过预热期
             if i < warmup:
@@ -134,6 +154,7 @@ class BacktestEngine:
                         stop_loss=signal.stop_loss,
                         take_profit=signal.take_profit,
                     )
+                    highest_since_entry = entry
                     logger.debug("[%s] 开仓 %.4f @ %.4f  SL=%.4f", ts, size, entry, signal.stop_loss)
 
             else:
@@ -142,6 +163,7 @@ class BacktestEngine:
                     capital = self._close_position(position, exit_price, ts, signal.reason, capital)
                     trades.append(position)
                     position = None
+                    highest_since_entry = 0.0
 
             # 记录当前权益（持仓市值 + 现金）
             portfolio_value = capital + (position.size * close if position else 0)
@@ -169,7 +191,9 @@ class BacktestEngine:
     ) -> tuple[float, str]:
         """判断 K 线内是否触发止损/止盈"""
         if pos.stop_loss > 0 and low <= pos.stop_loss:
-            return pos.stop_loss, "止损触发"
+            # take_profit == 0 时止损由 trailing stop 动态上移
+            reason = "止损触发（移动止盈）" if pos.take_profit == 0 else "止损触发"
+            return pos.stop_loss, reason
         if pos.take_profit > 0 and high >= pos.take_profit:
             return pos.take_profit, "止盈触发"
         return 0.0, ""
