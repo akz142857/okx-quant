@@ -136,8 +136,10 @@ class Screener:
                     valid_insts.add(inst["instId"])
             usdt = usdt[usdt["inst_id"].isin(valid_insts)]
 
-        # 资金量过滤：排除 minSz * last_price > available_usdt 的币种
-        if self.cfg.min_order_usdt > 0 and self.cfg.available_usdt > 0:
+        # 资金量过滤：排除买不起的币种
+        # 条件：max(minSz * price, last_price) > available_usdt
+        # 即：最小下单金额或单价超过可用资金时排除
+        if self.cfg.available_usdt > 0:
             min_sz_map = {}
             for inst in instruments:
                 inst_id = inst["instId"]
@@ -145,23 +147,22 @@ class Screener:
                 if min_sz > 0:
                     min_sz_map[inst_id] = min_sz
 
-            before_afford = len(usdt)
             excluded_afford = []
             affordable_mask = []
             for _, row in usdt.iterrows():
                 inst_id = row["inst_id"]
+                price = row["last"]
                 min_sz = min_sz_map.get(inst_id, 0)
-                min_cost = min_sz * row["last"]
+                min_cost = max(min_sz * price, price)  # 至少买 1 个或 minSz 个
                 if min_cost > self.cfg.available_usdt:
                     affordable_mask.append(False)
-                    excluded_afford.append(f"{inst_id}(最小{min_cost:.1f}U)")
+                    excluded_afford.append(f"{inst_id}(${price:.2f}/个,最小{min_cost:.1f}U)")
                 else:
                     affordable_mask.append(True)
             usdt = usdt[affordable_mask]
             if excluded_afford:
                 print(f"    资金过滤: 可用 {self.cfg.available_usdt:.1f} USDT，"
                       f"排除 {len(excluded_afford)} 个买不起的币种")
-                # 最多打印 5 个示例
                 examples = excluded_afford[:5]
                 print(f"    排除示例: {', '.join(examples)}"
                       + (f" 等" if len(excluded_afford) > 5 else ""))
