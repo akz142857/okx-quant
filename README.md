@@ -64,3 +64,90 @@ Dashboard 上看 差值 就行：
 - 差值为正（快线 > 慢线）→ 持仓中，等死叉卖出
 
 简单说：差值越接近 0 且在收窄，离买入信号就越近。
+
+## 配置说明
+
+复制 `config.yaml.example` 为 `config.yaml` 并填写：
+
+```bash
+cp config.yaml.example config.yaml
+```
+
+> **`config.yaml` 包含 API Key 等敏感信息，已在 `.gitignore` 中排除，请勿提交。**
+
+### OKX API (`okx`)
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `api_key` | OKX API Key | 必填 |
+| `secret_key` | OKX Secret Key | 必填 |
+| `passphrase` | OKX Passphrase | 必填 |
+| `simulated` | `true` 模拟盘 / `false` 实盘 | `true` |
+| `base_url` | API 地址 | `https://www.okx.com` |
+| `proxy` | HTTP 代理（可选，留空直连） | 空 |
+
+### 风控 (`risk`)
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `max_position_pct` | 单笔最大仓位占总资产比例 | `0.5` (50%) |
+| `max_drawdown_pct` | 最大回撤触发停止 | `0.15` (15%) |
+| `stop_loss_pct` | 默认止损比例 | `0.02` (2%) |
+| `take_profit_pct` | 默认止盈比例 | `0.04` (4%) |
+| `max_open_positions` | 最大同时持仓数 | `1` |
+| `min_order_usdt` | 最小下单金额 (USDT) | `1.0` |
+
+### 日志 (`logging`)
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `level` | 日志级别 (`DEBUG` / `INFO` / `WARNING` / `ERROR`) | `INFO` |
+| `file` | 日志文件路径 | `logs/quant.log` |
+
+### 回测 (`backtest`)
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `initial_capital` | 初始资金 (USDT) | `10000.0` |
+| `fee_rate` | 手续费率 | `0.001` (0.1%) |
+| `slippage` | 滑点 | `0.0005` (0.05%) |
+
+### LLM 配置 (`llm` / `llm_deep`)
+
+`llm` 用于 AI 策略的分析模型（轻量），`llm_deep` 用于多 Agent 辩论+决策（强力模型）。
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `provider` | 模型提供商 (`openai` / `claude` / `deepseek`) | `openai` |
+| `api_key` | API Key | 必填 |
+| `model` | 模型名称，留空用提供商默认 | — |
+| `base_url` | API 地址，留空用提供商默认 | — |
+| `temperature` | 生成温度 | `0.3` |
+| `max_tokens` | 最大 token 数 | `1024` / `2048` |
+| `timeout` | 请求超时（秒） | `30` / `60` |
+
+### 多 Agent (`multi_agent`)
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `debate_rounds` | 多空辩论轮数 | `2` |
+| `confidence_threshold` | 低于此置信度 → HOLD | `0.6` |
+
+### 因子选币器 (`screener`)
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `min_vol_24h_usdt` | 最小 24H 成交额 (USDT) | `500000` |
+| `min_listing_days` | 最少上线天数 | `90` |
+| `pre_filter_top_n` | 硬过滤后保留 top N | `30` |
+| `bar` | K 线周期 | `4H` |
+| `lookback` | 回看 K 线根数 | `100` |
+| `corr_threshold` | 相关性去重阈值 | `0.85` |
+
+权重参数（总和建议为 1.0）：`weight_adx` (0.30)、`weight_atr_pct` (0.20)、`weight_vol_ratio` (0.15)、`weight_roc` (0.15)、`weight_bandwidth_pctile` (0.20)。
+
+### 新闻 (`news`)
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `auth_token` | CryptoPanic API token（可选，不填也能用） | 空 |
