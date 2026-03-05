@@ -86,14 +86,27 @@ def _wizard_backtest() -> tuple[str, dict]:
     }
 
 
+def prompt_max_price() -> float:
+    """询问单价过滤，返回最大单价（0 = 不过滤）"""
+    value = prompt("最大单价过滤（USDT，0=不过滤）", "0")
+    try:
+        v = float(value)
+        return max(v, 0)
+    except ValueError:
+        print(yellow("    请输入数字"))
+        return prompt_max_price()
+
+
 def _wizard_screen() -> tuple[str, dict]:
     print(cyan("\n  — 因子选币 —\n"))
     top_n = int(prompt("选出 top N 交易对", "5"))
     bar = prompt_bar("4H")
+    max_price = prompt_max_price()
     return "screen", {
         "top": top_n,
         "bar": bar,
         "min_vol": None,
+        "max_price": max_price,
     }
 
 
@@ -103,9 +116,11 @@ def _wizard_live() -> tuple[str, dict]:
     # 自动选币
     auto_screen = prompt("是否自动选币？", "n", ["y", "n"])
     screen_n = 0
+    max_price = 0.0
     inst = ""
     if auto_screen == "y":
         screen_n = int(prompt("选出 top N 交易对", "5"))
+        max_price = prompt_max_price()
     else:
         inst = prompt_inst("DOGE-USDT", allow_multi=True)
 
@@ -119,6 +134,7 @@ def _wizard_live() -> tuple[str, dict]:
         "interval": int(interval),
         "no_dashboard": False,
         "screen": screen_n,
+        "max_price": max_price,
     }
 
 

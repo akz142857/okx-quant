@@ -34,6 +34,7 @@ class ScreenerConfig:
     min_listing_days: int = 90
     exclude_stablecoins: list[str] = field(default_factory=lambda: list(_DEFAULT_STABLECOINS))
     pre_filter_top_n: int = 30
+    max_price: float = 0           # 最大单价（0 = 不过滤）
     min_order_usdt: float = 0       # 最小下单金额（0 = 不过滤）
     available_usdt: float = 0       # 可用资金（0 = 不过滤）
 
@@ -123,6 +124,14 @@ class Screener:
         # 24H 成交额（vol_24h 是币本位，需 * last 转 USDT）
         usdt["vol_usdt"] = usdt["vol_24h"] * usdt["last"]
         usdt = usdt[usdt["vol_usdt"] >= self.cfg.min_vol_24h_usdt]
+
+        # 单价过滤
+        if self.cfg.max_price > 0:
+            before = len(usdt)
+            usdt = usdt[usdt["last"] <= self.cfg.max_price]
+            filtered = before - len(usdt)
+            if filtered > 0:
+                print(f"    单价过滤: ≤ {self.cfg.max_price} USDT，排除 {filtered} 个")
 
         # 上线时间过滤：拉取 instrument 列表
         instruments = self.client.get_instruments("SPOT")

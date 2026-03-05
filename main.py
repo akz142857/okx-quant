@@ -228,6 +228,8 @@ def cmd_screen(args, cfg):
     screener_cfg.bar = args.bar
     if hasattr(args, "min_vol") and args.min_vol is not None:
         screener_cfg.min_vol_24h_usdt = args.min_vol
+    if hasattr(args, "max_price") and args.max_price:
+        screener_cfg.max_price = args.max_price
 
     # 注入资金量过滤参数
     risk_cfg_raw = cfg.get("risk", {})
@@ -252,7 +254,7 @@ def cmd_screen(args, cfg):
         print(f"  推荐交易对: {', '.join(selected)}\n")
 
 
-def _run_screen(cfg, top_n: int, bar: str) -> list[str]:
+def _run_screen(cfg, top_n: int, bar: str, max_price: float = 0) -> list[str]:
     """选币并返回结果列表，供 cmd_live 调用"""
     from okx_quant.data.screener import Screener, ScreenerConfig
 
@@ -260,6 +262,7 @@ def _run_screen(cfg, top_n: int, bar: str) -> list[str]:
     screener_cfg_raw = cfg.get("screener", {})
     screener_cfg = ScreenerConfig.from_dict(screener_cfg_raw)
     screener_cfg.bar = bar
+    screener_cfg.max_price = max_price
 
     # 注入资金量过滤参数
     risk_cfg_raw = cfg.get("risk", {})
@@ -289,7 +292,8 @@ def cmd_live(args, cfg):
     # 自动选币
     screen_n = getattr(args, "screen", 0) or 0
     if screen_n > 0:
-        selected = _run_screen(cfg, top_n=screen_n, bar=args.bar)
+        max_price = getattr(args, "max_price", 0) or 0
+        selected = _run_screen(cfg, top_n=screen_n, bar=args.bar, max_price=max_price)
         if not selected:
             print("选币结果为空，退出")
             sys.exit(1)
@@ -567,12 +571,14 @@ def main():
     p_live.add_argument("--interval", type=int, default=60, help="轮询间隔（秒）")
     p_live.add_argument("--no-dashboard", action="store_true", help="禁用面板，使用日志输出")
     p_live.add_argument("--screen", type=int, default=0, help="自动选币数量，如 --screen 5")
+    p_live.add_argument("--max-price", type=float, default=0, help="选币最大单价过滤 (USDT，0=不过滤)")
 
     # screen
     p_screen = subparsers.add_parser("screen", help="因子选币器")
     p_screen.add_argument("--top", type=int, default=5, help="选出 top N 交易对")
     p_screen.add_argument("--bar", default="4H", help="K 线周期")
     p_screen.add_argument("--min-vol", type=float, default=None, help="最小 24H 成交额 (USDT)")
+    p_screen.add_argument("--max-price", type=float, default=0, help="最大单价过滤 (USDT，0=不过滤)")
 
     # list-pairs
     subparsers.add_parser("list-pairs", help="查看可用交易对")
