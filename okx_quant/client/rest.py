@@ -259,6 +259,7 @@ class OKXRestClient:
         sz: str,
         px: Optional[str] = None,
         td_mode: str = "cash",
+        tgt_ccy: Optional[str] = None,
         cl_ord_id: Optional[str] = None,
     ) -> dict:
         """下单
@@ -270,6 +271,8 @@ class OKXRestClient:
             sz: 委托数量（现货按币种数量）
             px: 委托价格（市价单不需要）
             td_mode: "cash"（现货）| "cross"（全仓）| "isolated"（逐仓）
+            tgt_ccy: "base_ccy"（sz为币数量）| "quote_ccy"（sz为USDT金额）
+                     现货市价买单默认 quote_ccy，需显式传 base_ccy
             cl_ord_id: 客户自定义订单 ID
         """
         body: dict = {
@@ -281,6 +284,8 @@ class OKXRestClient:
         }
         if px:
             body["px"] = px
+        if tgt_ccy:
+            body["tgtCcy"] = tgt_ccy
         if cl_ord_id:
             body["clOrdId"] = cl_ord_id
 

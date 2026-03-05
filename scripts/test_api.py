@@ -270,6 +270,7 @@ def _test_trade_simulated(client: OKXRestClient, inst_id: str, available: float)
             side="buy",
             ord_type="market",
             sz=size_str,
+            tgt_ccy="base_ccy",
         )
         ord_id = result.get("ordId", "")
         _ok(f"买入下单成功  ordId={ord_id}")

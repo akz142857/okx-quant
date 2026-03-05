@@ -146,6 +146,7 @@ class LiveTrader:
         self._last_signal_reason: str = ""
         self._last_logged_signal: tuple = ("", "")  # (signal_type, reason) 用于日志去重
         self._last_signal_extra: dict = {}  # 策略指标数据
+        self._buy_fail_until: float = 0.0  # 买入失败冷却截止时间戳
         self._trade_log: list = []
         self._tick_count: int = 0
         self._start_time: datetime = datetime.now()
@@ -263,6 +264,7 @@ class LiveTrader:
                 side="buy",
                 ord_type="market",
                 sz=size_str,
+                tgt_ccy="base_ccy",
             )
             ord_id = result.get("ordId", "")
             logger.info("[下单] 买入成功 ordId=%s", ord_id)
@@ -299,6 +301,9 @@ class LiveTrader:
             return True
         except Exception as e:
             logger.error("[下单] 买入失败: %s", e)
+            # 下单失败后冷却 5 分钟，避免反复重试
+            self._buy_fail_until = time.time() + 300
+            logger.info("[下单] 买入失败冷却 5 分钟，%.0f 秒后可重试", 300)
             return False
 
     def _sell(self, reason: str) -> bool:
@@ -624,6 +629,12 @@ class LiveTrader:
 
         # 执行信号
         if signal.is_buy and not self.risk.has_position(self.inst_id):
+            # 下单失败冷却检查
+            if time.time() < self._buy_fail_until:
+                remaining = int(self._buy_fail_until - time.time())
+                logger.debug("[下单] 买入冷却中，剩余 %d 秒", remaining)
+                return
+
             available = self.get_available_usdt()
             size_coin, cost_usdt = self.risk.calc_position_size(
                 available, current_price, signal.size_pct
