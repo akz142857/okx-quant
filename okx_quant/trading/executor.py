@@ -173,27 +173,29 @@ class LiveTrader:
     # 账户查询
     # -------------------------------------------------------------------------
 
-    def _fetch_balance(self) -> Optional[dict]:
-        """调用 API 获取余额详情，失败返回 None"""
+    def _fetch_balance(self) -> Optional[tuple[dict, dict]]:
+        """调用 API 获取余额详情，返回 (账户级数据, USDT币种详情) 或 None"""
         try:
             balances = self.client.get_balance(self.quote_ccy)
             for item in balances:
                 for detail in item.get("details", []):
                     if detail.get("ccy") == self.quote_ccy:
-                        return detail
+                        return item, detail
         except Exception as e:
             logger.error("获取账户余额失败: %s", e)
         return None
 
     def get_equity(self, force: bool = False) -> float:
-        """获取账户总权益（USDT），带缓存"""
+        """获取账户总权益（USDT），包含所有币种持仓折算价值"""
         now = time.time()
         if not force and (now - self._cached_equity_ts) < self._balance_cache_ttl:
             return self._cached_equity
 
-        detail = self._fetch_balance()
-        if detail is not None:
-            self._cached_equity = float(detail.get("eq", 0))
+        result = self._fetch_balance()
+        if result is not None:
+            account, _detail = result
+            # totalEq 是账户级总权益（含所有币种折算），比单币种 eq 更准确
+            self._cached_equity = float(account.get("totalEq", 0) or 0)
             self._cached_equity_ts = now
         return self._cached_equity
 
@@ -203,8 +205,9 @@ class LiveTrader:
         if not force and (now - self._cached_available_ts) < self._balance_cache_ttl:
             return self._cached_available
 
-        detail = self._fetch_balance()
-        if detail is not None:
+        result = self._fetch_balance()
+        if result is not None:
+            _account, detail = result
             self._cached_available = float(
                 detail.get("availEq", 0) or detail.get("availBal", 0) or 0
             )
