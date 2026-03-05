@@ -219,6 +219,35 @@ class LiveTrader:
         self._cached_equity_ts = 0.0
         self._cached_available_ts = 0.0
 
+    def _restore_existing_position(self):
+        """检测当前交易对是否有已有持仓，恢复到风控"""
+        base_ccy = self.inst_id.split("-")[0]
+        try:
+            balances = self.client.get_balance(base_ccy)
+            for item in balances:
+                for detail in item.get("details", []):
+                    if detail.get("ccy") == base_ccy:
+                        bal = float(detail.get("cashBal", 0) or 0)
+                        if bal > 0 and not self.risk.has_position(self.inst_id):
+                            price = self._last_price or 0
+                            if price <= 0:
+                                ticker = self.client.get_ticker(self.inst_id)
+                                price = float(ticker.get("last", 0))
+                            if price > 0:
+                                sl = round(price * (1 - self.risk.config.stop_loss_pct), 8)
+                                tp = round(price * (1 + self.risk.config.take_profit_pct), 8)
+                                self.risk.add_position(PositionInfo(
+                                    inst_id=self.inst_id,
+                                    size=bal,
+                                    entry_price=price,
+                                    stop_loss=sl,
+                                    take_profit=tp,
+                                ))
+                                logger.info("恢复已有持仓: %s  数量=%.6f  参考价=%.4f（估算）",
+                                            self.inst_id, bal, price)
+        except Exception as e:
+            logger.warning("检测 %s 已有持仓失败: %s", self.inst_id, e)
+
     # -------------------------------------------------------------------------
     # 交易对精度
     # -------------------------------------------------------------------------
@@ -529,6 +558,10 @@ class LiveTrader:
             self.risk.peak_equity = equity
             self.risk.current_equity = equity
             logger.info("当前账户权益: %.2f USDT", equity)
+
+        # 恢复已有持仓到风控（避免重启后遗留持仓无法管理）
+        if not self._external_risk:
+            self._restore_existing_position()
 
         # 初始化 Dashboard
         if self._use_dashboard:

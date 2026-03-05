@@ -289,26 +289,56 @@ def cmd_live(args, cfg):
     from okx_quant.trading.executor import LiveTrader
     from okx_quant.risk.manager import RiskConfig
 
+    _validate_bar(args.bar)
+    client = make_client(cfg)
+
+    # 优先检测已有持仓（无论选币结果如何，已有持仓必须纳入监控）
+    existing_positions: list[str] = []
+    try:
+        balances = client.get_balance()
+        for item in balances:
+            for detail in item.get("details", []):
+                ccy = detail.get("ccy", "")
+                bal = float(detail.get("cashBal", 0) or 0)
+                if ccy and ccy != "USDT" and bal > 0:
+                    inst_id = f"{ccy}-USDT"
+                    existing_positions.append(inst_id)
+                    print(f"  检测到已有持仓: {inst_id}（{bal} {ccy}）")
+    except Exception as e:
+        logger.warning("检测已有持仓失败: %s", e)
+
     # 自动选币
     screen_n = getattr(args, "screen", 0) or 0
     if screen_n > 0:
         max_price = getattr(args, "max_price", 0) or 0
         selected = _run_screen(cfg, top_n=screen_n, bar=args.bar, max_price=max_price)
+        # 合并已有持仓（选币结果可以为空，只要有持仓就能继续）
+        for pos_inst in existing_positions:
+            if pos_inst not in selected:
+                selected.append(pos_inst)
         if not selected:
-            print("选币结果为空，退出")
+            print("选币结果为空且无已有持仓，退出")
             sys.exit(1)
-        print(f"  选中交易对: {', '.join(selected)}")
+        print(f"  最终交易列表: {', '.join(selected)}")
         confirm = input("  确认使用以上交易对开始交易? (y/N): ").strip().lower()
         if confirm != "y":
             print("已取消")
             sys.exit(0)
         args.inst = ",".join(selected)
 
-    _validate_inst(args.inst)
-    _validate_bar(args.bar)
-    client = make_client(cfg)
+    if args.inst:
+        _validate_inst(args.inst)
 
-    instruments = [s.strip() for s in args.inst.split(",")]
+    # 构建最终交易对列表，确保已有持仓始终包含在内
+    instruments = [s.strip() for s in args.inst.split(",")] if args.inst else []
+    for pos_inst in existing_positions:
+        if pos_inst not in instruments:
+            instruments.append(pos_inst)
+            print(f"  已有持仓 {pos_inst} 自动加入交易列表")
+
+    if not instruments:
+        print("错误: 无交易对可监控")
+        sys.exit(1)
 
     risk_cfg_raw = cfg.get("risk", {})
     risk_config = RiskConfig(

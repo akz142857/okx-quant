@@ -9,7 +9,7 @@ from typing import Callable
 from dataclasses import replace
 
 from okx_quant.client.rest import OKXRestClient
-from okx_quant.risk.manager import RiskConfig, RiskManager
+from okx_quant.risk.manager import PositionInfo, RiskConfig, RiskManager
 from okx_quant.trading.executor import LiveTrader
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,42 @@ class Supervisor:
         self.risk.current_equity = equity
         logger.info("账户权益初始化: %.2f USDT（%d 个交易对）", equity, len(self.instruments))
 
+    def _restore_positions(self):
+        """检测账户已有持仓，恢复到风控管理器中"""
+        inst_set = set(self.instruments)
+        try:
+            balances = self.client.get_balance()
+            for item in balances:
+                for detail in item.get("details", []):
+                    ccy = detail.get("ccy", "")
+                    bal = float(detail.get("cashBal", 0) or 0)
+                    if ccy == "USDT" or bal <= 0:
+                        continue
+                    inst_id = f"{ccy}-USDT"
+                    if inst_id not in inst_set:
+                        continue
+                    # 获取当前价格作为参考入场价（无法获取真实入场价）
+                    try:
+                        ticker = self.client.get_ticker(inst_id)
+                        price = float(ticker.get("last", 0))
+                    except Exception:
+                        price = 0
+                    if price <= 0:
+                        continue
+                    # 用当前价格估算止损止盈
+                    sl = round(price * (1 - self.risk.config.stop_loss_pct), 8)
+                    tp = round(price * (1 + self.risk.config.take_profit_pct), 8)
+                    self.risk.add_position(PositionInfo(
+                        inst_id=inst_id,
+                        size=bal,
+                        entry_price=price,
+                        stop_loss=sl,
+                        take_profit=tp,
+                    ))
+                    logger.info("恢复已有持仓: %s  数量=%.6f  参考价=%.4f（估算）", inst_id, bal, price)
+        except Exception as e:
+            logger.warning("检测已有持仓失败: %s", e)
+
     def collect_states(self) -> list[dict]:
         """收集所有 worker 的状态快照"""
         states = []
@@ -105,6 +141,7 @@ class Supervisor:
     def run(self):
         """启动所有 worker 线程，主线程负责仪表盘或等待"""
         self._init_equity()
+        self._restore_positions()
 
         # 启动 worker 线程
         for worker in self._workers:
