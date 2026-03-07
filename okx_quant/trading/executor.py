@@ -147,6 +147,7 @@ class LiveTrader:
         self._last_logged_signal: tuple = ("", "")  # (signal_type, reason) 用于日志去重
         self._last_signal_extra: dict = {}  # 策略指标数据
         self._buy_fail_until: float = 0.0  # 买入失败冷却截止时间戳
+        self._sell_fail_until: float = 0.0  # 卖出失败冷却截止时间戳
         self._trade_log: list = []
         self._tick_count: int = 0
         self._start_time: datetime = datetime.now()
@@ -347,7 +348,9 @@ class LiveTrader:
 
         sell_size = self._round_lot_size(pos.size)
         if sell_size <= 0:
-            logger.warning("[下单] 卖出数量取整后为 0，跳过")
+            logger.warning("[下单] 卖出数量取整后为 0，清除幽灵仓位 %s", self.inst_id)
+            self.risk.remove_position(self.inst_id)
+            self._highest_since_entry.pop(self.inst_id, None)
             return False
         size_str = self._format_size(sell_size)
         logger.info(
@@ -390,7 +393,41 @@ class LiveTrader:
             return True
         except Exception as e:
             logger.error("[下单] 卖出失败: %s", e)
+            # 检查是否余额不足（51008），清除幽灵仓位
+            if "51008" in str(e):
+                logger.warning("[下单] 余额不足，检查实际持仓并清理...")
+                self._cleanup_phantom_position()
+            else:
+                # 其他失败原因：冷却 5 分钟避免反复重试
+                self._sell_fail_until = time.time() + 300
+                logger.info("[下单] 卖出失败冷却 5 分钟")
             return False
+
+    def _cleanup_phantom_position(self):
+        """检查实际余额，若不足以下单则清除风控中的幽灵仓位"""
+        base_ccy = self.inst_id.split("-")[0]
+        try:
+            balances = self.client.get_balance(base_ccy)
+            actual_bal = 0.0
+            for item in balances:
+                for detail in item.get("details", []):
+                    if detail.get("ccy") == base_ccy:
+                        actual_bal = float(detail.get("availBal", 0) or 0)
+            rounded = self._round_lot_size(actual_bal)
+            if rounded <= 0 or (self._min_sz > 0 and rounded < self._min_sz):
+                logger.warning(
+                    "[清理] %s 实际可用余额 %.8f，取整后 %.8f 不足最小下单量，清除幽灵仓位",
+                    self.inst_id, actual_bal, rounded,
+                )
+                self.risk.remove_position(self.inst_id)
+                self._highest_since_entry.pop(self.inst_id, None)
+            else:
+                # 余额存在但下单失败，冷却后重试
+                self._sell_fail_until = time.time() + 300
+                logger.info("[下单] 实际余额 %.8f 足够，冷却 5 分钟后重试", actual_bal)
+        except Exception as ex:
+            logger.error("[清理] 查询 %s 余额失败: %s，冷却 5 分钟", base_ccy, ex)
+            self._sell_fail_until = time.time() + 300
 
     @staticmethod
     def _format_size(size: float) -> str:
@@ -428,6 +465,10 @@ class LiveTrader:
                     "[移动止盈] 最高=%.4f ATR=%.4f 新止损=%.4f",
                     highest, atr_val, trailing_stop,
                 )
+
+        # 卖出冷却期内跳过
+        if time.time() < self._sell_fail_until:
+            return False
 
         if pos.stop_loss > 0 and current_price <= pos.stop_loss:
             logger.warning("[风控] 止损触发 %.4f <= %.4f", current_price, pos.stop_loss)
@@ -690,6 +731,12 @@ class LiveTrader:
             logger.debug("[信号] SELL 忽略: 当前无持仓")
 
         elif signal.is_sell:
+            # 卖出失败冷却检查
+            if time.time() < self._sell_fail_until:
+                remaining = int(self._sell_fail_until - time.time())
+                logger.debug("[下单] 卖出冷却中，剩余 %d 秒", remaining)
+                return
+
             allowed, msg = self.risk.check_order(
                 self.inst_id, "sell", 0, current_price, equity
             )
