@@ -2,7 +2,9 @@
 
 import pandas as pd
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
-from okx_quant.indicators import ema, macd, adx, rsi, atr
+from okx_quant.indicators import (
+    cached_adx, cached_atr, cached_ema, cached_macd, cached_rsi,
+)
 
 
 class TrendMomentumStrategy(BaseStrategy):
@@ -58,13 +60,13 @@ class TrendMomentumStrategy(BaseStrategy):
         close = df["close"]
         curr_price = close.iloc[-1]
 
-        # 计算指标
-        ema_fast = ema(close, p["ema_fast"])
-        ema_slow = ema(close, p["ema_slow"])
-        macd_df = macd(close, p["macd_fast"], p["macd_slow"], p["macd_signal"])
-        adx_df = adx(df, p["adx_period"])
-        rsi_val = rsi(close, p["rsi_period"])
-        atr_val = atr(df, p["atr_period"])
+        # 计算指标（回测时从 df.attrs 缓存命中，O(1) 查表）
+        ema_fast = cached_ema(df, p["ema_fast"])
+        ema_slow = cached_ema(df, p["ema_slow"])
+        macd_df = cached_macd(df, p["macd_fast"], p["macd_slow"], p["macd_signal"])
+        adx_df = cached_adx(df, p["adx_period"])
+        rsi_val = cached_rsi(df, p["rsi_period"])
+        atr_val = cached_atr(df, p["atr_period"])
 
         curr_ema_fast = ema_fast.iloc[-1]
         curr_ema_slow = ema_slow.iloc[-1]

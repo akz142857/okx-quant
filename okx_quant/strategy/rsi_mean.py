@@ -2,7 +2,7 @@
 
 import pandas as pd
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
-from okx_quant.indicators import rsi, atr
+from okx_quant.indicators import cached_atr, cached_rsi
 
 
 class RSIMeanReversionStrategy(BaseStrategy):
@@ -45,8 +45,8 @@ class RSIMeanReversionStrategy(BaseStrategy):
         if len(df) < rsi_period + 2:
             return Signal(SignalType.HOLD, inst_id, price=0, reason="数据不足")
 
-        rsi_series = rsi(df["close"], rsi_period)
-        atr_val = atr(df, atr_period)
+        rsi_series = cached_rsi(df, rsi_period)
+        atr_val = cached_atr(df, atr_period)
 
         prev_rsi = rsi_series.iloc[-2]
         curr_rsi = rsi_series.iloc[-1]

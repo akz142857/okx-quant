@@ -199,19 +199,39 @@ class AgenticPipeline:
         return reports
 
     def _run_debate(self, analyst_reports: dict[str, str]) -> str:
-        """运行多轮多空辩论，返回辩论记录"""
+        """运行多轮多空辩论，返回辩论记录
+
+        并行化：每一轮内 Bull/Bear 都只读对手"上一轮"的论点，因此可并行
+        发起。相比原先 Bear 等待 Bull 当轮结果的串行实现，辩论阶段墙钟
+        时间减半（每轮 ~50%）。语义略微改变：原先 Bear 反驳 Bull 当轮
+        最新论点，现在反驳上一轮论点——这在多轮辩论中仍然合理。
+        """
         transcript_parts: list[str] = []
-        bull_arg = ""
-        bear_arg = ""
+        bull_prev = ""
+        bear_prev = ""
 
         for round_num in range(1, self.config.debate_rounds + 1):
-            # Bull 发言
-            bull_arg = self.bull.argue(analyst_reports, bear_arg, round_num)
-            transcript_parts.append(f"=== Round {round_num} — Bull ===\n{bull_arg}")
+            with ThreadPoolExecutor(max_workers=2, thread_name_prefix="debate") as ex:
+                bull_future = ex.submit(
+                    self.bull.argue, analyst_reports, bear_prev, round_num,
+                )
+                bear_future = ex.submit(
+                    self.bear.argue, analyst_reports, bull_prev, round_num,
+                )
+                try:
+                    bull_arg = bull_future.result(timeout=self.config.debate_timeout)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[Pipeline] Bull round %d 异常: %s", round_num, e)
+                    bull_arg = "(Bull 研究员调用失败)"
+                try:
+                    bear_arg = bear_future.result(timeout=self.config.debate_timeout)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("[Pipeline] Bear round %d 异常: %s", round_num, e)
+                    bear_arg = "(Bear 研究员调用失败)"
 
-            # Bear 发言
-            bear_arg = self.bear.argue(analyst_reports, bull_arg, round_num)
+            transcript_parts.append(f"=== Round {round_num} — Bull ===\n{bull_arg}")
             transcript_parts.append(f"=== Round {round_num} — Bear ===\n{bear_arg}")
+            bull_prev, bear_prev = bull_arg, bear_arg
 
         return "\n\n".join(transcript_parts)
 

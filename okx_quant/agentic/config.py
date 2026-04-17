@@ -17,6 +17,7 @@ class AgenticConfig:
 
     debate_rounds: int = 2
     analyst_timeout: int = 120
+    debate_timeout: int = 120
     confidence_threshold: float = 0.6
     max_total_tokens: int = 50000
 

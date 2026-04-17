@@ -16,6 +16,7 @@ from typing import Optional
 import pandas as pd
 
 from okx_quant.indicators import atr as calc_atr
+from okx_quant.indicators import populate_cache, slice_cache
 from okx_quant.strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
@@ -102,6 +103,18 @@ class BacktestEngine:
         # 预计算 ATR 序列，供 trailing stop 使用
         atr_series = calc_atr(df)
 
+        # 预计算一组常用指标到 df.attrs，策略通过 cached_* 读取，O(n²) → O(n)
+        # 指标都是因果的（第 i 行仅依赖 <=i 输入），slice 后等价于子区间内单独计算
+        populate_cache(
+            df,
+            ema_periods=(7, 9, 12, 14, 15, 20, 21, 26, 50),
+            rsi_periods=(14,),
+            macd_specs=((12, 26, 9),),
+            bbands_specs=((20, 2.0),),
+            atr_periods=(14,),
+            adx_periods=(14,),
+        )
+
         # 待执行订单：由前一根 K 线收盘生成，于当前 K 线开盘成交
         pending_entry: Optional[dict] = None  # {size_pct, sl, tp, reason}
         pending_exit: bool = False
@@ -181,6 +194,8 @@ class BacktestEngine:
             # 回测最后一根不再挂单（无下一根可执行）
             if i < n - 1:
                 history = df.iloc[: i + 1]
+                # 把预计算结果切片传给策略，避免其在子区间上重算指标
+                slice_cache(df, history, i + 1)
                 signal = strategy.generate_signal(history, inst_id)
 
                 if position is None and signal.is_buy and signal.size_pct > 0:

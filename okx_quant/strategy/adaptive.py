@@ -5,7 +5,7 @@ from typing import Optional
 
 import pandas as pd
 
-from okx_quant.indicators import adx, bollinger_bands
+from okx_quant.indicators import cached_adx, cached_bollinger
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
 from okx_quant.strategy.ma_cross import MACrossStrategy
 from okx_quant.strategy.bollinger import BollingerBandStrategy
@@ -64,9 +64,9 @@ class AdaptiveStrategy(BaseStrategy):
         self._pending_count: int = 0
 
     def _compute_indicators(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """一次性计算 ADX 和布林带指标，避免重复计算"""
-        adx_df = adx(df, self.get_param("adx_period"))
-        bb_df = bollinger_bands(df["close"], self.get_param("bb_period"), self.get_param("bb_std"))
+        """一次性计算 ADX 和布林带指标（回测时命中 df.attrs 缓存）"""
+        adx_df = cached_adx(df, self.get_param("adx_period"))
+        bb_df = cached_bollinger(df, self.get_param("bb_period"), self.get_param("bb_std"))
         return adx_df, bb_df
 
     def _detect_regime(

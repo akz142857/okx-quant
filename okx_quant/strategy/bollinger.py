@@ -2,7 +2,7 @@
 
 import pandas as pd
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
-from okx_quant.indicators import bollinger_bands, rsi
+from okx_quant.indicators import cached_bollinger, cached_rsi
 
 
 class BollingerBandStrategy(BaseStrategy):
@@ -50,8 +50,8 @@ class BollingerBandStrategy(BaseStrategy):
         if len(df) < min_len:
             return Signal(SignalType.HOLD, inst_id, price=0, reason="数据不足")
 
-        bb = bollinger_bands(df["close"], bb_period, bb_std)
-        rsi_series = rsi(df["close"], rsi_period)
+        bb = cached_bollinger(df, bb_period, bb_std)
+        rsi_series = cached_rsi(df, rsi_period)
 
         curr_close = df["close"].iloc[-1]
         curr_rsi = rsi_series.iloc[-1]

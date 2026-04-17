@@ -2,7 +2,7 @@
 
 import pandas as pd
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
-from okx_quant.indicators import ema, atr
+from okx_quant.indicators import cached_atr, cached_ema
 
 
 class MACrossStrategy(BaseStrategy):
@@ -44,9 +44,9 @@ class MACrossStrategy(BaseStrategy):
             return Signal(SignalType.HOLD, inst_id, price=0, reason="数据不足")
 
         close = df["close"]
-        fast_ma = ema(close, fast)
-        slow_ma = ema(close, slow)
-        atr_val = atr(df, atr_period)
+        fast_ma = cached_ema(df, fast)
+        slow_ma = cached_ema(df, slow)
+        atr_val = cached_atr(df, atr_period)
 
         prev_fast, curr_fast = fast_ma.iloc[-2], fast_ma.iloc[-1]
         prev_slow, curr_slow = slow_ma.iloc[-2], slow_ma.iloc[-1]
