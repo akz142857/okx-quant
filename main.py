@@ -344,10 +344,15 @@ def cmd_live(args, cfg):
             print("选币结果为空且无已有持仓，退出")
             sys.exit(1)
         print(f"  最终交易列表: {', '.join(selected)}")
-        confirm = input("  确认使用以上交易对开始交易? (y/N): ").strip().lower()
-        if confirm != "y":
-            print("已取消")
-            sys.exit(0)
+        # systemd / CI 等非交互场景：stdin 不是 tty，或显式 --yes，跳过确认
+        auto = getattr(args, "yes", False) or not sys.stdin.isatty()
+        if auto:
+            print("  [auto-confirm] 非交互环境，自动确认以上交易对")
+        else:
+            confirm = input("  确认使用以上交易对开始交易? (y/N): ").strip().lower()
+            if confirm != "y":
+                print("已取消")
+                sys.exit(0)
         args.inst = ",".join(selected)
 
     if args.inst:
@@ -633,6 +638,7 @@ def main():
     p_live.add_argument("--no-dashboard", action="store_true", help="禁用面板，使用日志输出")
     p_live.add_argument("--screen", type=int, default=0, help="自动选币数量，如 --screen 5")
     p_live.add_argument("--max-price", type=float, default=0, help="选币最大单价过滤 (USDT，0=不过滤)")
+    p_live.add_argument("-y", "--yes", action="store_true", help="跳过交易对确认 prompt（自动化必用）")
 
     # screen
     p_screen = subparsers.add_parser("screen", help="因子选币器")
