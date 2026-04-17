@@ -9,8 +9,10 @@ from typing import Callable
 from dataclasses import replace
 
 from okx_quant.client.rest import OKXRestClient
-from okx_quant.risk.manager import PositionInfo, RiskConfig, RiskManager
+from okx_quant.exchange import Exchange, OKXExchange
+from okx_quant.risk.manager import RiskConfig, RiskManager
 from okx_quant.trading.executor import LiveTrader
+from okx_quant.trading.position_restore import restore_to_risk
 from okx_quant.trading.state import StateStore
 
 logger = logging.getLogger(__name__)
@@ -37,10 +39,10 @@ class Supervisor:
 
     def __init__(
         self,
-        client: OKXRestClient,
-        instruments: list[str],
-        strategy_factory: Callable,
-        risk_config: RiskConfig,
+        client: "OKXRestClient | None" = None,
+        instruments: "list[str] | None" = None,
+        strategy_factory: "Callable | None" = None,
+        risk_config: "RiskConfig | None" = None,
         bar: str = "1H",
         lookback: int = 100,
         interval_seconds: int = 60,
@@ -48,8 +50,18 @@ class Supervisor:
         simulated: bool = True,
         signal_timeout_s: float = 20.0,
         state_store: "StateStore | None" = None,
+        *,
+        exchange: "Exchange | None" = None,
     ):
-        self.client = client
+        if exchange is None and client is None:
+            raise ValueError("Supervisor 需要 exchange 或 client 至少一个")
+        if not instruments or strategy_factory is None or risk_config is None:
+            raise ValueError("Supervisor 需要 instruments / strategy_factory / risk_config")
+
+        self.exchange: Exchange = exchange if exchange is not None else OKXExchange(client)
+        self.client: "OKXRestClient | None" = (
+            client if client is not None else getattr(self.exchange, "client", None)
+        )
         self.instruments = instruments
         self.bar = bar
         self.lookback = lookback
@@ -71,12 +83,12 @@ class Supervisor:
             max_position_pct=per_inst_pct,
         ))
 
-        # 每个 instrument 创建独立策略实例和 LiveTrader
+        # 每个 instrument 创建独立策略实例和 LiveTrader；共享同一个 Exchange
         self._workers: list[LiveTrader] = []
         for inst_id in instruments:
             strategy = strategy_factory()
             trader = LiveTrader(
-                client=client,
+                exchange=self.exchange,
                 strategy=strategy,
                 inst_id=inst_id,
                 dashboard=False,
@@ -92,48 +104,14 @@ class Supervisor:
 
     def _init_equity(self):
         """统一初始化账户权益（一次 API 调用）"""
-        # 使用第一个 worker 获取余额
         equity = self._workers[0].get_equity(force=True)
-        self.risk.initial_equity = equity
-        self.risk.peak_equity = equity
-        self.risk.current_equity = equity
+        self.risk.initialize(equity)
         logger.info("账户权益初始化: %.2f USDT（%d 个交易对）", equity, len(self.instruments))
 
     def _restore_positions(self):
         """检测账户已有持仓，恢复到风控管理器中"""
-        inst_set = set(self.instruments)
-        try:
-            balances = self.client.get_balance()
-            for item in balances:
-                for detail in item.get("details", []):
-                    ccy = detail.get("ccy", "")
-                    bal = float(detail.get("cashBal", 0) or 0)
-                    if ccy == "USDT" or bal <= 0:
-                        continue
-                    inst_id = f"{ccy}-USDT"
-                    if inst_id not in inst_set:
-                        continue
-                    # 获取当前价格作为参考入场价（无法获取真实入场价）
-                    try:
-                        ticker = self.client.get_ticker(inst_id)
-                        price = float(ticker.get("last", 0))
-                    except Exception:
-                        price = 0
-                    if price <= 0:
-                        continue
-                    # 用当前价格估算止损止盈
-                    sl = round(price * (1 - self.risk.config.stop_loss_pct), 8)
-                    tp = round(price * (1 + self.risk.config.take_profit_pct), 8)
-                    self.risk.add_position(PositionInfo(
-                        inst_id=inst_id,
-                        size=bal,
-                        entry_price=price,
-                        stop_loss=sl,
-                        take_profit=tp,
-                    ))
-                    logger.info("恢复已有持仓: %s  数量=%.6f  参考价=%.4f（估算）", inst_id, bal, price)
-        except Exception as e:
-            logger.warning("检测已有持仓失败: %s", e)
+        quote = getattr(self.exchange, "quote_ccy", "USDT")
+        restore_to_risk(self.exchange, self.risk, self.instruments, quote_ccy=quote)
 
     def collect_states(self) -> list[dict]:
         """收集所有 worker 的状态快照"""

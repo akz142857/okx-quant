@@ -1,10 +1,31 @@
 """策略基类：定义信号结构和策略接口"""
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
+
 import pandas as pd
+
+if TYPE_CHECKING:
+    from okx_quant.data.news import CryptoNewsFetcher
+    from okx_quant.llm.client import LLMClient
+
+
+@dataclass(frozen=True)
+class StrategyContext:
+    """策略依赖注入容器
+
+    替代旧的 set_llm_client / set_deep_llm_client / set_news_fetcher 分散调用，
+    所有外部依赖在构造时一次性传入，避免"部分装配"中间态。
+    """
+
+    llm_client: "Optional[LLMClient]" = None           # 廉价模型（单 LLM 策略主用）
+    deep_llm_client: "Optional[LLMClient]" = None      # 强力模型（多 Agent 辩论+决策）
+    news_fetcher: "Optional[CryptoNewsFetcher]" = None
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 class SignalType(Enum):
@@ -56,8 +77,21 @@ class BaseStrategy(ABC):
 
     name: str = "BaseStrategy"
 
-    def __init__(self, params: Optional[dict] = None):
+    def __init__(
+        self,
+        params: Optional[dict] = None,
+        context: Optional[StrategyContext] = None,
+    ):
         self.params = params or {}
+        self._context: StrategyContext = context or StrategyContext()
+        self._apply_context()
+
+    @property
+    def context(self) -> StrategyContext:
+        return self._context
+
+    def _apply_context(self) -> None:
+        """子类可覆写以将 StrategyContext 字段分发到自己的内部句柄"""
 
     @abstractmethod
     def generate_signal(self, df: pd.DataFrame, inst_id: str) -> Signal:

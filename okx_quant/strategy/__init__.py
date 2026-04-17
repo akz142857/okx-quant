@@ -1,4 +1,4 @@
-from .base import BaseStrategy, Signal, SignalType
+from .base import BaseStrategy, Signal, SignalType, StrategyContext
 from .ma_cross import MACrossStrategy
 from .rsi_mean import RSIMeanReversionStrategy
 from .bollinger import BollingerBandStrategy
@@ -35,6 +35,7 @@ __all__ = [
     "BaseStrategy",
     "Signal",
     "SignalType",
+    "StrategyContext",
     "MACrossStrategy",
     "RSIMeanReversionStrategy",
     "BollingerBandStrategy",

@@ -78,8 +78,10 @@ def make_strategy(name: str, params: dict | None = None, cfg: dict | None = None
         sys.exit(1)
     cls = entry[0]
 
-    # 多 Agent 策略：合并 config.yaml 的 multi_agent 配置到 params
+    from okx_quant.strategy import StrategyContext
     from okx_quant.strategy.multi_agent_strategy import MultiAgentStrategy
+
+    # 多 Agent 策略：合并 config.yaml 的 multi_agent 配置到 params
     if issubclass(cls, MultiAgentStrategy) and cfg:
         ma_cfg = cfg.get("multi_agent", {})
         params = {**ma_cfg, **(params or {})}
@@ -91,9 +93,8 @@ def make_strategy(name: str, params: dict | None = None, cfg: dict | None = None
         if budget is not None:
             params = {**(params or {}), "max_total_tokens": budget}
 
-    strategy = cls(params)
-
-    # LLM 策略：注入 LLM 客户端和新闻获取器
+    # 构造 StrategyContext —— 所有外部依赖在构造时一次性注入
+    context: StrategyContext | None = None
     if is_llm_strategy(name) and cfg:
         from okx_quant.llm import LLMClient, LLMConfig
         from okx_quant.data.news import CryptoNewsFetcher
@@ -103,22 +104,25 @@ def make_strategy(name: str, params: dict | None = None, cfg: dict | None = None
             print("错误: LLM 策略需要配置 llm.api_key，请在 config.yaml 中填写")
             sys.exit(1)
 
-        llm_config = LLMConfig.from_dict(llm_cfg)
-        strategy.set_llm_client(LLMClient(llm_config))
+        llm_client = LLMClient(LLMConfig.from_dict(llm_cfg))
 
-        # 多 Agent 策略：注入 deep LLM 客户端
-        if isinstance(strategy, MultiAgentStrategy):
+        deep_client = None
+        if issubclass(cls, MultiAgentStrategy):
             deep_cfg = cfg.get("llm_deep", {})
             if deep_cfg.get("api_key"):
-                deep_config = LLMConfig.from_dict(deep_cfg)
-                strategy.set_deep_llm_client(LLMClient(deep_config))
-            # 如果没配置 llm_deep，pipeline 会用 quick_llm 兜底
+                deep_client = LLMClient(LLMConfig.from_dict(deep_cfg))
+            # 未配置 llm_deep：pipeline 自身会用 quick_llm 兜底
 
         news_cfg = cfg.get("news", {})
-        news_token = news_cfg.get("auth_token", "")
-        strategy.set_news_fetcher(CryptoNewsFetcher(auth_token=news_token))
+        news_fetcher = CryptoNewsFetcher(auth_token=news_cfg.get("auth_token", ""))
 
-    return strategy
+        context = StrategyContext(
+            llm_client=llm_client,
+            deep_llm_client=deep_client,
+            news_fetcher=news_fetcher,
+        )
+
+    return cls(params, context=context) if context is not None else cls(params)
 
 
 def _validate_bar(bar: str):
@@ -240,14 +244,9 @@ def cmd_screen(args, cfg):
     risk_cfg_raw = cfg.get("risk", {})
     screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
     try:
-        balances = client.get_balance("USDT")
-        for item in balances:
-            for detail in item.get("details", []):
-                if detail.get("ccy") == "USDT":
-                    screener_cfg.available_usdt = float(
-                        detail.get("availEq", 0) or detail.get("availBal", 0) or 0
-                    )
-                    break
+        from okx_quant.exchange import OKXExchange
+        snap = OKXExchange(client).get_balance()
+        screener_cfg.available_usdt = snap.available_quote
     except Exception as e:
         logger.warning("获取余额失败，跳过资金量过滤: %s", e)
 
@@ -273,14 +272,9 @@ def _run_screen(cfg, top_n: int, bar: str, max_price: float = 0) -> list[str]:
     risk_cfg_raw = cfg.get("risk", {})
     screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
     try:
-        balances = client.get_balance("USDT")
-        for item in balances:
-            for detail in item.get("details", []):
-                if detail.get("ccy") == "USDT":
-                    screener_cfg.available_usdt = float(
-                        detail.get("availEq", 0) or detail.get("availBal", 0) or 0
-                    )
-                    break
+        from okx_quant.exchange import OKXExchange
+        snap = OKXExchange(client).get_balance()
+        screener_cfg.available_usdt = snap.available_quote
     except Exception as e:
         logger.warning("获取余额失败，跳过资金量过滤: %s", e)
 
@@ -310,25 +304,21 @@ def cmd_live(args, cfg):
             print("已取消。如确需实盘请重试并输入完整确认语。")
             sys.exit(0)
 
+    from okx_quant.exchange import OKXExchange
+    from okx_quant.trading.position_restore import discover_positions
+
     client = make_client(cfg)
+    exchange = OKXExchange(client)
     executor_cfg = cfg.get("executor", {})
     signal_timeout_s = float(executor_cfg.get("signal_timeout_s", 20))
     state_store = StateStore(state_dir=executor_cfg.get("state_dir", "state"))
 
     # 优先检测已有持仓（无论选币结果如何，已有持仓必须纳入监控）
     existing_positions: list[str] = []
-    try:
-        balances = client.get_balance()
-        for item in balances:
-            for detail in item.get("details", []):
-                ccy = detail.get("ccy", "")
-                bal = float(detail.get("cashBal", 0) or 0)
-                if ccy and ccy != "USDT" and bal > 0:
-                    inst_id = f"{ccy}-USDT"
-                    existing_positions.append(inst_id)
-                    print(f"  检测到已有持仓: {inst_id}（{bal} {ccy}）")
-    except Exception as e:
-        logger.warning("检测已有持仓失败: %s", e)
+    for inst_id, balance in discover_positions(exchange, exchange.quote_ccy):
+        existing_positions.append(inst_id)
+        ccy = inst_id.split("-")[0]
+        print(f"  检测到已有持仓: {inst_id}（{balance} {ccy}）")
 
     # 自动选币
     screen_n = getattr(args, "screen", 0) or 0
@@ -390,7 +380,7 @@ def cmd_live(args, cfg):
             print("按 Ctrl+C 停止\n")
 
         supervisor = Supervisor(
-            client=client,
+            exchange=exchange,
             instruments=instruments,
             strategy_factory=strategy_factory,
             risk_config=risk_config,
@@ -416,7 +406,10 @@ def cmd_live(args, cfg):
         print("按 Ctrl+C 停止\n")
 
     trader = LiveTrader(
-        client, strategy, inst_id=instruments[0], risk_config=risk_config,
+        exchange=exchange,
+        strategy=strategy,
+        inst_id=instruments[0],
+        risk_config=risk_config,
         dashboard=use_dashboard, simulated=simulated,
         signal_timeout_s=signal_timeout_s,
         state_store=state_store,

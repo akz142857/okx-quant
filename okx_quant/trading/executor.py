@@ -13,9 +13,10 @@ from typing import Any, Optional
 import pandas as pd
 
 from okx_quant.client.rest import OKXRestClient
-from okx_quant.data.market import MarketDataFetcher
+from okx_quant.exchange import Exchange, OKXExchange
 from okx_quant.risk.manager import RiskManager, RiskConfig, PositionInfo
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
+from okx_quant.trading.position_restore import restore_to_risk
 from okx_quant.trading.state import StateStore, TraderState
 from okx_quant.utils.timeout import run_with_timeout, TimeoutError as SignalTimeout
 
@@ -133,9 +134,9 @@ class LiveTrader:
 
     def __init__(
         self,
-        client: OKXRestClient,
-        strategy: BaseStrategy,
-        inst_id: str,
+        client: Optional[OKXRestClient] = None,
+        strategy: Optional[BaseStrategy] = None,
+        inst_id: str = "",
         risk_config: Optional[RiskConfig] = None,
         quote_ccy: str = "USDT",
         dashboard: bool = False,
@@ -143,12 +144,28 @@ class LiveTrader:
         risk_manager: Optional[RiskManager] = None,
         signal_timeout_s: float = 20.0,
         state_store: Optional[StateStore] = None,
+        *,
+        exchange: Optional[Exchange] = None,
     ):
-        self.client = client
+        if exchange is None and client is None:
+            raise ValueError("LiveTrader 需要 exchange 或 client 至少一个")
+        if strategy is None:
+            raise ValueError("LiveTrader 需要 strategy")
+        if not inst_id:
+            raise ValueError("LiveTrader 需要 inst_id")
+
+        # Exchange 优先；未提供则把旧 client 包一层 OKXExchange（向后兼容）
+        self.exchange: Exchange = exchange if exchange is not None else OKXExchange(
+            client, quote_ccy=quote_ccy,
+        )
+        # 兼容字段：仅当底层是 OKX 时保留，供确实依赖 REST 的代码路径使用
+        self.client: Optional[OKXRestClient] = (
+            client if client is not None
+            else getattr(self.exchange, "client", None)
+        )
         self.strategy = strategy
         self.inst_id = inst_id
         self.quote_ccy = quote_ccy
-        self.fetcher = MarketDataFetcher(client)
         self.risk = risk_manager if risk_manager is not None else RiskManager(risk_config)
         self._external_risk = risk_manager is not None
         self._running = False
@@ -206,17 +223,13 @@ class LiveTrader:
     # 账户查询
     # -------------------------------------------------------------------------
 
-    def _fetch_balance(self) -> Optional[tuple[dict, dict]]:
-        """调用 API 获取余额详情，返回 (账户级数据, USDT币种详情) 或 None"""
+    def _fetch_snapshot(self):
+        """拉取归一化余额快照（一次 API 调用覆盖 equity + available）"""
         try:
-            balances = self.client.get_balance(self.quote_ccy)
-            for item in balances:
-                for detail in item.get("details", []):
-                    if detail.get("ccy") == self.quote_ccy:
-                        return item, detail
-        except Exception as e:
+            return self.exchange.get_balance()
+        except Exception as e:  # noqa: BLE001 — 对外部 API 兜底
             logger.error("获取账户余额失败: %s", e)
-        return None
+            return None
 
     def get_equity(self, force: bool = False) -> float:
         """获取账户总权益（USDT），包含所有币种持仓折算价值"""
@@ -224,12 +237,13 @@ class LiveTrader:
         if not force and (now - self._cached_equity_ts) < self._balance_cache_ttl:
             return self._cached_equity
 
-        result = self._fetch_balance()
-        if result is not None:
-            account, _detail = result
-            # totalEq 是账户级总权益（含所有币种折算），比单币种 eq 更准确
-            self._cached_equity = float(account.get("totalEq", 0) or 0)
+        snap = self._fetch_snapshot()
+        if snap is not None:
+            self._cached_equity = snap.total_equity_quote
             self._cached_equity_ts = now
+            # 顺便刷新 available，减少重复请求
+            self._cached_available = snap.available_quote
+            self._cached_available_ts = now
         return self._cached_equity
 
     def get_available_usdt(self, force: bool = False) -> float:
@@ -238,13 +252,12 @@ class LiveTrader:
         if not force and (now - self._cached_available_ts) < self._balance_cache_ttl:
             return self._cached_available
 
-        result = self._fetch_balance()
-        if result is not None:
-            _account, detail = result
-            self._cached_available = float(
-                detail.get("availEq", 0) or detail.get("availBal", 0) or 0
-            )
+        snap = self._fetch_snapshot()
+        if snap is not None:
+            self._cached_available = snap.available_quote
             self._cached_available_ts = now
+            self._cached_equity = snap.total_equity_quote
+            self._cached_equity_ts = now
         return self._cached_available
 
     def _invalidate_balance_cache(self):
@@ -292,52 +305,32 @@ class LiveTrader:
 
     def _restore_existing_position(self):
         """检测当前交易对是否有已有持仓，恢复到风控"""
-        base_ccy = self.inst_id.split("-")[0]
-        try:
-            balances = self.client.get_balance(base_ccy)
-            for item in balances:
-                for detail in item.get("details", []):
-                    if detail.get("ccy") == base_ccy:
-                        bal = float(detail.get("cashBal", 0) or 0)
-                        if bal > 0 and not self.risk.has_position(self.inst_id):
-                            price = self._last_price or 0
-                            if price <= 0:
-                                ticker = self.client.get_ticker(self.inst_id)
-                                price = float(ticker.get("last", 0))
-                            if price > 0:
-                                sl = round(price * (1 - self.risk.config.stop_loss_pct), 8)
-                                tp = round(price * (1 + self.risk.config.take_profit_pct), 8)
-                                self.risk.add_position(PositionInfo(
-                                    inst_id=self.inst_id,
-                                    size=bal,
-                                    entry_price=price,
-                                    stop_loss=sl,
-                                    take_profit=tp,
-                                ))
-                                logger.info("恢复已有持仓: %s  数量=%.6f  参考价=%.4f（估算）",
-                                            self.inst_id, bal, price)
-        except Exception as e:
-            logger.warning("检测 %s 已有持仓失败: %s", self.inst_id, e)
+        restore_to_risk(
+            self.exchange,
+            self.risk,
+            [self.inst_id],
+            quote_ccy=self.quote_ccy,
+        )
 
     # -------------------------------------------------------------------------
     # 交易对精度
     # -------------------------------------------------------------------------
 
     def _fetch_instrument_info(self):
-        """查询交易对的 lotSz（下单步长）和 minSz（最小数量）"""
+        """查询交易对的 lot_size（下单步长）和 min_size（最小数量）"""
         try:
-            info = self.client.get_instrument(self.inst_id)
-            self._lot_sz = float(info.get("lotSz", 0))
-            self._min_sz = float(info.get("minSz", 0))
-            # 预算 lotSz 的小数位数，避免每次下单重复字符串化
+            info = self.exchange.get_instrument(self.inst_id)
+            self._lot_sz = info.lot_size
+            self._min_sz = info.min_size
+            # 预算 lot_size 的小数位数，避免每次下单重复字符串化
             if self._lot_sz > 0:
                 lot_str = f"{self._lot_sz:.10f}".rstrip("0")
                 self._lot_decimals = len(lot_str.split(".")[-1]) if "." in lot_str else 0
             logger.info(
                 "[精度] %s  lotSz=%s  minSz=%s",
-                self.inst_id, info.get("lotSz"), info.get("minSz"),
+                self.inst_id, self._lot_sz, self._min_sz,
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.warning("[精度] 获取 %s 交易对信息失败: %s，将使用原始数量下单", self.inst_id, e)
 
     def _round_lot_size(self, size: float) -> float:
@@ -357,21 +350,18 @@ class LiveTrader:
         if self._min_sz > 0 and size_coin < self._min_sz:
             logger.warning("[下单] 数量 %.8f 低于最小下单量 %s，跳过", size_coin, self._min_sz)
             return False
-        size_str = self._format_size(size_coin)
         logger.info(
             "[下单] BUY %s  数量=%.6f  价格=%.4f  止损=%.4f  止盈=%.4f  原因=%s",
             self.inst_id, size_coin, price, sl, tp, reason,
         )
         try:
-            result = self.client.place_order(
+            result = self.exchange.place_market_order(
                 inst_id=self.inst_id,
                 side="buy",
-                ord_type="market",
-                sz=size_str,
+                size=size_coin,
                 tgt_ccy="base_ccy",
             )
-            ord_id = result.get("ordId", "")
-            logger.info("[下单] 买入成功 ordId=%s", ord_id)
+            logger.info("[下单] 买入成功 ordId=%s", result.ord_id)
             self._invalidate_balance_cache()
 
             # 记录移动止盈基准
@@ -423,20 +413,17 @@ class LiveTrader:
             self.risk.remove_position(self.inst_id)
             self._highest_since_entry.pop(self.inst_id, None)
             return False
-        size_str = self._format_size(sell_size)
         logger.info(
             "[下单] SELL %s  数量=%.6f  原因=%s",
             self.inst_id, sell_size, reason,
         )
         try:
-            result = self.client.place_order(
+            result = self.exchange.place_market_order(
                 inst_id=self.inst_id,
                 side="sell",
-                ord_type="market",
-                sz=size_str,
+                size=sell_size,
             )
-            ord_id = result.get("ordId", "")
-            logger.info("[下单] 卖出成功 ordId=%s", ord_id)
+            logger.info("[下单] 卖出成功 ordId=%s", result.ord_id)
             self._invalidate_balance_cache()
 
             # 计算盈亏
@@ -478,12 +465,9 @@ class LiveTrader:
         """检查实际余额，若不足以下单则清除风控中的幽灵仓位"""
         base_ccy = self.inst_id.split("-")[0]
         try:
-            balances = self.client.get_balance(base_ccy)
-            actual_bal = 0.0
-            for item in balances:
-                for detail in item.get("details", []):
-                    if detail.get("ccy") == base_ccy:
-                        actual_bal = float(detail.get("availBal", 0) or 0)
+            snap = self.exchange.get_balance()
+            holding = snap.holding(base_ccy)
+            actual_bal = holding.available if holding else 0.0
             rounded = self._round_lot_size(actual_bal)
             if rounded <= 0 or (self._min_sz > 0 and rounded < self._min_sz):
                 logger.warning(
@@ -496,14 +480,9 @@ class LiveTrader:
                 # 余额存在但下单失败，冷却后重试
                 self._sell_fail_until = time.time() + 300
                 logger.info("[下单] 实际余额 %.8f 足够，冷却 5 分钟后重试", actual_bal)
-        except Exception as ex:
+        except Exception as ex:  # noqa: BLE001
             logger.error("[清理] 查询 %s 余额失败: %s，冷却 5 分钟", base_ccy, ex)
             self._sell_fail_until = time.time() + 300
-
-    @staticmethod
-    def _format_size(size: float) -> str:
-        """格式化下单数量（避免科学计数法）"""
-        return f"{size:.8f}".rstrip("0").rstrip(".")
 
     # -------------------------------------------------------------------------
     # 止损/止盈轮询检查
@@ -666,9 +645,7 @@ class LiveTrader:
         # 初始化风控净值（外部共享 risk_manager 由 Supervisor 统一初始化）
         if not self._external_risk:
             equity = self.get_equity(force=True)
-            self.risk.initial_equity = equity
-            self.risk.peak_equity = equity
-            self.risk.current_equity = equity
+            self.risk.initialize(equity)
             logger.info("当前账户权益: %.2f USDT", equity)
 
         # 恢复已有持仓到风控（避免重启后遗留持仓无法管理）
@@ -736,7 +713,7 @@ class LiveTrader:
     def _tick(self, bar: str, lookback: int):
         """单次轮询处理"""
         # 获取 K 线
-        df = self.fetcher.get_candles(self.inst_id, bar=bar, limit=lookback)
+        df = self.exchange.get_candles(self.inst_id, bar=bar, limit=lookback)
         if df.empty:
             logger.warning("K 线数据为空，跳过本次")
             return

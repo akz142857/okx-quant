@@ -17,7 +17,7 @@ import pandas as pd
 from okx_quant.data.news import CryptoNewsFetcher
 from okx_quant.indicators import atr, bollinger_bands, ema, macd, rsi
 from okx_quant.llm.client import LLMClient
-from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
+from okx_quant.strategy.base import BaseStrategy, Signal, SignalType, StrategyContext
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +31,7 @@ class MultiAgentStrategy(BaseStrategy):
 
     name = "MultiAgent"
 
-    def __init__(self, params: dict | None = None):
+    def __init__(self, params: dict | None = None, context: "StrategyContext | None" = None):
         defaults = {
             "confidence_threshold": 0.6,
             "candle_count": 20,
@@ -41,13 +41,26 @@ class MultiAgentStrategy(BaseStrategy):
             "max_total_tokens": 0,
         }
         merged = {**defaults, **(params or {})}
-        super().__init__(merged)
 
-        self._llm_client: Optional[LLMClient] = None       # cheap model
-        self._deep_llm_client: Optional[LLMClient] = None   # strong model
+        # 这些字段必须在 super().__init__ 调用 _apply_context 之前初始化
+        self._llm_client: Optional[LLMClient] = None
+        self._deep_llm_client: Optional[LLMClient] = None
         self._news_fetcher: Optional[CryptoNewsFetcher] = None
-        self._pipeline = None  # 延迟初始化
+        self._pipeline = None
         self._budget_exceeded_logged: bool = False
+
+        super().__init__(merged, context)
+
+    def _apply_context(self) -> None:
+        ctx = self._context
+        if ctx.llm_client is not None:
+            self._llm_client = ctx.llm_client
+        if ctx.deep_llm_client is not None:
+            self._deep_llm_client = ctx.deep_llm_client
+        if ctx.news_fetcher is not None:
+            self._news_fetcher = ctx.news_fetcher
+        # 依赖变更后需重建 pipeline
+        self._pipeline = None
 
     def _over_budget(self) -> bool:
         """检查是否超出 token 预算"""
@@ -62,16 +75,17 @@ class MultiAgentStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     def set_llm_client(self, client: LLMClient) -> None:
-        """注入 cheap model（分析师使用）"""
+        """DEPRECATED: 构造时通过 StrategyContext(llm_client=...) 注入"""
         self._llm_client = client
-        self._pipeline = None  # 客户端变更，重建 pipeline
+        self._pipeline = None
 
     def set_deep_llm_client(self, client: LLMClient) -> None:
-        """注入 strong model（辩论 + 决策使用）"""
+        """DEPRECATED: 构造时通过 StrategyContext(deep_llm_client=...) 注入"""
         self._deep_llm_client = client
-        self._pipeline = None  # 客户端变更，重建 pipeline
+        self._pipeline = None
 
     def set_news_fetcher(self, fetcher: CryptoNewsFetcher) -> None:
+        """DEPRECATED: 构造时通过 StrategyContext(news_fetcher=...) 注入"""
         self._news_fetcher = fetcher
 
     @property
