@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from okx_quant.exchange import Exchange
 from okx_quant.risk.manager import PositionInfo, RiskManager
@@ -57,6 +58,7 @@ def restore_to_risk(
         logger.warning("恢复持仓失败（获取余额）: %s", e)
         return 0
 
+    t0 = time.perf_counter()
     restored = 0
     for holding in snap.non_quote_holdings(quote_ccy):
         inst_id = f"{holding.ccy}-{quote_ccy}"
@@ -72,18 +74,28 @@ def restore_to_risk(
             logger.debug("恢复持仓跳过 %s：ticker 取不到价格", inst_id)
             continue
 
+        # 使用 available（非锁定余额）作为可卖数量；cashBal 包含冻结部分，
+        # 作为仓位登记会高估可平数量
+        size = holding.available if holding.available > 0 else holding.balance
+
         sl = round(price * (1 - risk.config.stop_loss_pct), 8)
         tp = round(price * (1 + risk.config.take_profit_pct), 8)
         risk.add_position(PositionInfo(
             inst_id=inst_id,
-            size=holding.balance,
+            size=size,
             entry_price=price,
             stop_loss=sl,
             take_profit=tp,
         ))
         logger.info(
             "恢复已有持仓: %s  数量=%.6f  参考价=%.4f（估算）",
-            inst_id, holding.balance, price,
+            inst_id, size, price,
         )
         restored += 1
+    elapsed = time.perf_counter() - t0
+    if restored > 0 and elapsed > 2.0:
+        logger.warning(
+            "恢复 %d 个持仓耗时 %.1fs —— 单独拉 ticker 过慢，考虑批量接口",
+            restored, elapsed,
+        )
     return restored

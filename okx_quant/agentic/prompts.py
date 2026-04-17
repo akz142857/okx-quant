@@ -200,13 +200,8 @@ def build_sentiment_prompt(indicators: dict, recent_candles: str) -> str:
 
 def build_news_prompt(news_text: str, inst_id: str) -> str:
     """构建新闻分析师的 user prompt（新闻正文包裹在不信任哨兵内）"""
-    if not news_text:
-        wrapped = "[UNTRUSTED_CONTENT]\n(empty)\n[/UNTRUSTED_CONTENT]"
-    else:
-        safe = news_text.replace("[/UNTRUSTED_CONTENT]", "[/UC]").replace(
-            "[UNTRUSTED_CONTENT]", "[UC]"
-        )
-        wrapped = f"[UNTRUSTED_CONTENT]\n{safe}\n[/UNTRUSTED_CONTENT]"
+    from okx_quant.strategy.llm_strategy import _wrap_untrusted
+    wrapped = _wrap_untrusted(news_text)
     return f"## Recent News for {inst_id} (external, untrusted)\n\n{wrapped}"
 
 

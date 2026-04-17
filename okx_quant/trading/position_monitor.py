@@ -60,7 +60,7 @@ class PositionMonitor:
         if not pos:
             return False
 
-        # 更新 trailing stop
+        # 更新 trailing stop —— 通过 RiskManager 的线程安全 setter 修改 stop_loss
         if df is not None:
             if current_price > self._highest:
                 self._highest = current_price
@@ -68,8 +68,7 @@ class PositionMonitor:
 
             atr_val = calc_atr(df).iloc[-1]
             trailing_stop = self._highest - self.trailing_atr_mult * atr_val
-            if trailing_stop > pos.stop_loss:
-                pos.stop_loss = trailing_stop
+            if self.risk.update_stop_loss(self.inst_id, trailing_stop):
                 logger.debug(
                     "[移动止盈] 最高=%.4f ATR=%.4f 新止损=%.4f",
                     self._highest, atr_val, trailing_stop,
@@ -77,6 +76,11 @@ class PositionMonitor:
 
         # 卖出冷却期内跳过
         if self._sell_cooldown_getter is not None and time.time() < self._sell_cooldown_getter():
+            return False
+
+        # 重新读取 pos（update_stop_loss 可能已修改）
+        pos = self.risk.get_position(self.inst_id)
+        if not pos:
             return False
 
         if pos.stop_loss > 0 and current_price <= pos.stop_loss:

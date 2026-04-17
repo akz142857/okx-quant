@@ -29,7 +29,7 @@ class OKXWebSocketClient:
         client = OKXWebSocketClient(api_key=..., secret_key=..., passphrase=...)
 
         async def on_ticker(data):
-            print(data)
+            logger.info("ticker: %s", data)
 
         await client.subscribe_ticker("BTC-USDT", on_ticker)
         await client.run()

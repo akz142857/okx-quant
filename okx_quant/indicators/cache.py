@@ -166,10 +166,23 @@ def slice_cache(src: pd.DataFrame, dst: pd.DataFrame, upto: int) -> None:
 
     回测引擎在每根 K 线的 history 片段上调用此函数，避免策略在子片段上
     再次触发缓存未命中并重新计算。
+
+    前置条件（unchecked in release，assert in dev）：
+      - ``dst`` 的索引等于 ``src`` 的索引前 ``upto`` 项
+      - ``upto`` 不超过 ``len(src)``
+
+    若调用方 reset_index 了 dst，iloc 定位虽仍能工作，但 label 定位将错位；
+    此处的 assert 帮助在单测里早期发现。
     """
     src_cache = src.attrs.get(_CACHE_ATTR)
     if not isinstance(src_cache, _Cache):
         return
+    assert upto <= len(src), f"slice_cache: upto={upto} > len(src)={len(src)}"
+    assert len(dst) == upto, f"slice_cache: dst 长度 {len(dst)} ≠ upto {upto}"
+    assert dst.index.equals(src.index[:upto]), (
+        "slice_cache: dst.index 与 src.index[:upto] 不一致（是否 reset_index 了？）"
+    )
+
     dst_cache = _get_cache(dst).data
     for k, v in src_cache.data.items():
         if isinstance(v, (pd.Series, pd.DataFrame)):

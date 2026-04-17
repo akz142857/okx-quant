@@ -2,6 +2,8 @@
 
 import json
 import logging
+import re
+import unicodedata
 from typing import Optional
 
 import pandas as pd
@@ -35,14 +37,42 @@ Required JSON format:
 """
 
 
+_ZERO_WIDTH = dict.fromkeys(map(ord, (
+    "\u200b", "\u200c", "\u200d", "\u200e", "\u200f",
+    "\u2028", "\u2029", "\u202a", "\u202b", "\u202c",
+    "\u202d", "\u202e", "\u2060", "\u2066", "\u2067",
+    "\u2068", "\u2069", "\ufeff",
+)))
+_UNTRUSTED_MAX_LEN = 4_096  # 单个 untrusted 块硬上限
+_SENTINEL_PATTERN = re.compile(
+    r"\[\s*/?\s*UNTRUSTED_?CONTENT\s*\]",
+    flags=re.IGNORECASE,
+)
+
+
 def _wrap_untrusted(text: str) -> str:
-    """用哨兵包裹来自不可信源的内容（新闻等），并过滤内部哨兵以防逃逸"""
+    """用哨兵包裹来自不可信源的内容（新闻等）
+
+    加固：
+      1. NFKC 归一化 —— 全宽括号 ``［/UNTRUSTED_CONTENT］`` 等同形体等价化为 ASCII
+      2. 移除零宽字符 / 方向控制字符 —— 防止 ``[/UNTRUSTE\u200bD_CONTENT]`` 分词旁路
+      3. 正则宽松匹配并中和任何形如 ``[UNTRUSTED*CONTENT]`` 的伪哨兵
+      4. 长度硬截断 —— 防御 token 洪水
+
+    说明：LLM 无硬边界，此函数仅把最明显的 ASCII/Unicode 攻击面压平；
+    真正的纵深防御必须叠加 output 端（置信度门槛 + size_pct clamp + 风控校验）。
+    """
     if not text:
         return "[UNTRUSTED_CONTENT]\n(empty)\n[/UNTRUSTED_CONTENT]"
-    # 剥离攻击者可能插入的闭合标记，防止 "提前关闭" 哨兵
-    safe = text.replace("[/UNTRUSTED_CONTENT]", "[/UC]").replace(
-        "[UNTRUSTED_CONTENT]", "[UC]"
-    )
+    # 1) NFKC 归一化
+    safe = unicodedata.normalize("NFKC", text)
+    # 2) 移除零宽 / 方向控制字符
+    safe = safe.translate(_ZERO_WIDTH)
+    # 3) 中和任何伪哨兵变体
+    safe = _SENTINEL_PATTERN.sub("[UC]", safe)
+    # 4) 长度截断
+    if len(safe) > _UNTRUSTED_MAX_LEN:
+        safe = safe[:_UNTRUSTED_MAX_LEN] + "\n...[truncated]"
     return f"[UNTRUSTED_CONTENT]\n{safe}\n[/UNTRUSTED_CONTENT]"
 
 
@@ -270,12 +300,18 @@ class LLMStrategy(BaseStrategy):
 
     # 长度上限，防止 ReDoS：正常 LLM 决策 JSON 不会超过数 KB
     _MAX_CONTENT_LEN = 32_768
+    # 最多尝试的 JSON 候选数；超出即视为无效输入
+    _MAX_JSON_ATTEMPTS = 8
 
     @staticmethod
     def _parse_decision(content: str) -> Optional[dict]:
         """尝试从 LLM 返回内容中解析交易决策 JSON
 
-        防御：长度上限 + 栈式花括号匹配（O(n)）取代正则回溯。
+        防御三道闸：
+          1) 长度硬上限（默认 32 KB），防御超长输入
+          2) 栈式花括号匹配（O(n)），取代正则回溯
+          3) 候选尝试次数上限（默认 8），防御 "{"a":x}{"b":y}..." 这类
+             大量无效候选堆积导致的 O(n × k) 退化。
         """
         if not content:
             return None
@@ -288,9 +324,11 @@ class LLMStrategy(BaseStrategy):
         except json.JSONDecodeError:
             pass
 
-        # 2) 用 O(n) 扫描找第一个平衡的 {...}，避开 re 回溯风险
+        # 2) 用 O(n) 扫描找平衡的 {...}，避开 re 回溯风险
         start = content.find("{")
-        while start != -1:
+        attempts = 0
+        while start != -1 and attempts < LLMStrategy._MAX_JSON_ATTEMPTS:
+            attempts += 1
             depth = 0
             in_str = False
             esc = False
@@ -315,14 +353,15 @@ class LLMStrategy(BaseStrategy):
                         close_idx = i
                         break
             if close_idx < 0:
-                # 未找到匹配的 }；更靠后的起点也一定无法匹配，提前终止避免 O(n²)
+                # 未找到匹配的 }；更靠后的起点也一定无法匹配，提前终止
                 return None
             candidate = content[start: close_idx + 1]
             try:
                 return json.loads(candidate)
             except json.JSONDecodeError:
-                # 当前 {...} 不是合法 JSON，从下一个 { 重试
-                start = content.find("{", start + 1)
+                # 当前 {...} 不是合法 JSON，从 candidate 之后重试
+                # （跳到 close_idx 而非 start+1，避免 O(n²) 重叠扫描）
+                start = content.find("{", close_idx + 1)
 
         return None
 

@@ -79,8 +79,34 @@ class RiskManager:
             return inst_id in self._positions
 
     def get_position(self, inst_id: str) -> Optional[PositionInfo]:
+        """返回持仓引用。
+
+        注意：返回的是内部 PositionInfo 的引用（非拷贝），调用方**不应**
+        直接修改 ``stop_loss`` / ``take_profit``。如需更新，请使用
+        ``update_stop_loss`` / ``update_take_profit`` 以确保在锁内完成。
+        """
         with self._lock:
             return self._positions.get(inst_id)
+
+    def update_stop_loss(self, inst_id: str, new_sl: float) -> bool:
+        """线程安全地更新止损价（上移）。返回是否发生了更新。"""
+        with self._lock:
+            pos = self._positions.get(inst_id)
+            if pos is None:
+                return False
+            if new_sl > pos.stop_loss:
+                pos.stop_loss = new_sl
+                return True
+            return False
+
+    def update_take_profit(self, inst_id: str, new_tp: float) -> bool:
+        """线程安全地更新止盈价。返回是否发生了更新。"""
+        with self._lock:
+            pos = self._positions.get(inst_id)
+            if pos is None:
+                return False
+            pos.take_profit = new_tp
+            return True
 
     @property
     def open_count(self) -> int:

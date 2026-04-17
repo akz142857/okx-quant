@@ -17,8 +17,6 @@ from collections import deque
 from datetime import datetime
 from typing import Optional
 
-import pandas as pd
-
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.exchange import Exchange, OKXExchange
 from okx_quant.risk.manager import RiskConfig, RiskManager
@@ -346,36 +344,38 @@ class LiveTrader:
                 if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
                     handler.setLevel(logging.WARNING)
 
-        while self._running:
-            try:
-                self._tick_count += 1
-                self._tick(bar, lookback)
-                self._consecutive_errors = 0
-            except KeyboardInterrupt:
-                logger.info("收到停止信号，退出...")
-                self._running = False
-                break
-            except Exception as e:  # noqa: BLE001
-                self._consecutive_errors += 1
-                backoff = min(
-                    interval_seconds * (2 ** self._consecutive_errors),
-                    self._max_backoff,
-                )
-                logger.error(
-                    "轮询异常 (连续第%d次): %s — %ds 后重试",
-                    self._consecutive_errors, e, backoff,
-                    exc_info=(self._consecutive_errors == 1),
-                )
-                if self._running:
-                    self._stop_event.wait(timeout=backoff)
-                continue
+        # 以 context manager 管理决策日志：任何异常都会关闭文件句柄
+        with self._decision_logger:
+            while self._running:
+                try:
+                    self._tick_count += 1
+                    self._tick(bar, lookback)
+                    self._consecutive_errors = 0
+                except KeyboardInterrupt:
+                    logger.info("收到停止信号，退出...")
+                    self._running = False
+                    break
+                except Exception as e:  # noqa: BLE001
+                    self._consecutive_errors += 1
+                    backoff = min(
+                        interval_seconds * (2 ** self._consecutive_errors),
+                        self._max_backoff,
+                    )
+                    logger.error(
+                        "轮询异常 (连续第%d次): %s — %ds 后重试",
+                        self._consecutive_errors, e, backoff,
+                        exc_info=(self._consecutive_errors == 1),
+                    )
+                    if self._running:
+                        self._stop_event.wait(timeout=backoff)
+                    continue
 
-            if self._running:
-                if self._dashboard:
-                    self._countdown_with_dashboard(bar, interval_seconds)
-                else:
-                    logger.debug("等待 %ds...", interval_seconds)
-                    self._stop_event.wait(timeout=interval_seconds)
+                if self._running:
+                    if self._dashboard:
+                        self._countdown_with_dashboard(bar, interval_seconds)
+                    else:
+                        logger.debug("等待 %ds...", interval_seconds)
+                        self._stop_event.wait(timeout=interval_seconds)
 
     def _countdown_with_dashboard(self, bar: str, interval_seconds: int) -> None:
         equity = self.risk.current_equity
@@ -505,6 +505,8 @@ class LiveTrader:
     def stop(self) -> None:
         self._running = False
         self._stop_event.set()
+        # run() 内的 with self._decision_logger 会在退出时关闭文件；
+        # 此处再显式 close() 幂等，以应对未经 run() 启动就直接 stop() 的场景
         self._decision_logger.close()
         try:
             self._persist_state(force=True)

@@ -150,10 +150,11 @@ class OrderExecutor:
 
         sell_size = self.round_lot_size(pos.size)
         if sell_size <= 0:
+            # 幽灵仓位：取整后低于 lotSz，交易所无实际持仓。
+            # 仅清理 RiskManager 本地状态，不触发 on_sell_success
+            # （那是成交回调；这里没有真实成交）
             logger.warning("[下单] 卖出数量取整后为 0，清除幽灵仓位 %s", self.inst_id)
             self.risk.remove_position(self.inst_id)
-            if self._on_sell_success is not None:
-                self._on_sell_success(pos, last_price)
             self._mark_dirty()
             return False
 
@@ -184,7 +185,11 @@ class OrderExecutor:
     # ------------------ 异常清理 ------------------
 
     def _cleanup_phantom_position(self) -> None:
-        """实际余额 < 最小下单量 → 清除风控中的幽灵仓位"""
+        """实际余额 < 最小下单量 → 清除风控中的幽灵仓位
+
+        所有改变内部状态的路径都必须显式调用 ``_mark_dirty()``，
+        不依赖调用方在外层补救。
+        """
         base_ccy = self.inst_id.split("-")[0]
         try:
             snap = self.exchange.get_balance()
@@ -197,9 +202,12 @@ class OrderExecutor:
                     self.inst_id, actual_bal, rounded,
                 )
                 self.risk.remove_position(self.inst_id)
+                self._mark_dirty()
             else:
                 self._sell_fail_until = time.time() + self.COOLDOWN_SECONDS
                 logger.info("[下单] 实际余额 %.8f 足够，冷却 %ds 后重试", actual_bal, self.COOLDOWN_SECONDS)
+                self._mark_dirty()
         except Exception as ex:  # noqa: BLE001
             logger.error("[清理] 查询 %s 余额失败: %s，冷却 %ds", base_ccy, ex, self.COOLDOWN_SECONDS)
             self._sell_fail_until = time.time() + self.COOLDOWN_SECONDS
+            self._mark_dirty()

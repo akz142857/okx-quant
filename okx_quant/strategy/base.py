@@ -20,12 +20,35 @@ class StrategyContext:
 
     替代旧的 set_llm_client / set_deep_llm_client / set_news_fetcher 分散调用，
     所有外部依赖在构造时一次性传入，避免"部分装配"中间态。
+
+    ``extra`` 通过 tuple[tuple] 存储以兼顾不可变性；若需字典形式访问，
+    使用 ``context.extra_dict()``。
     """
 
     llm_client: "Optional[LLMClient]" = None           # 廉价模型（单 LLM 策略主用）
     deep_llm_client: "Optional[LLMClient]" = None      # 强力模型（多 Agent 辩论+决策）
     news_fetcher: "Optional[CryptoNewsFetcher]" = None
-    extra: dict[str, Any] = field(default_factory=dict)
+    extra: tuple[tuple[str, Any], ...] = ()
+
+    def extra_dict(self) -> dict[str, Any]:
+        """只读快照：返回 extra 的字典视图"""
+        return dict(self.extra)
+
+    @classmethod
+    def from_dict_extra(
+        cls,
+        *,
+        llm_client: "Optional[LLMClient]" = None,
+        deep_llm_client: "Optional[LLMClient]" = None,
+        news_fetcher: "Optional[CryptoNewsFetcher]" = None,
+        extra: "Optional[dict[str, Any]]" = None,
+    ) -> "StrategyContext":
+        return cls(
+            llm_client=llm_client,
+            deep_llm_client=deep_llm_client,
+            news_fetcher=news_fetcher,
+            extra=tuple((extra or {}).items()),
+        )
 
 
 class SignalType(Enum):

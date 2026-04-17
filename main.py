@@ -292,12 +292,23 @@ def cmd_live(args, cfg):
     _validate_bar(args.bar)
 
     # 实盘二次确认：simulated=false 时需要用户显式确认
-    simulated = cfg.get("okx", {}).get("simulated", True)
+    # 自动化流水线可设置 OKX_LIVE_CONFIRMED=1 跳过交互（仅用于 CI，生产慎用）
+    okx_cfg = cfg.get("okx")
+    if not okx_cfg:
+        # 配置缺失或 cfg 为空 → 无法判定模式，保险起见视作实盘并要求确认
+        logger.warning("配置缺失 okx 段；保守视作实盘模式")
+        simulated = False
+    else:
+        # 显式读取：只有明确写 true 才视为模拟盘，避免 None/缺失回退到 simulated
+        simulated_raw = okx_cfg.get("simulated")
+        simulated = bool(simulated_raw) if simulated_raw is not None else False
+
     if not simulated and not os.environ.get("OKX_LIVE_CONFIRMED"):
         print("\n" + "=" * 60)
         print("  ⚠️  警告：当前为【实盘模式】(simulated=false)")
         print("     程序将使用真实账户资金执行真实订单。")
         print("     建议先在 simulated=true 模拟盘充分测试策略。")
+        print("     自动化场景可设置环境变量 OKX_LIVE_CONFIRMED=1 跳过确认。")
         print("=" * 60)
         confirm = input("  输入 'I UNDERSTAND' 以继续实盘交易: ").strip()
         if confirm != "I UNDERSTAND":
