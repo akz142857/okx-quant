@@ -10,7 +10,11 @@ wheels/
 .venv
 
 # Logs
-logs
+logs/
+*.log
+
+# 运行时状态（含持仓 / 冷却时间戳）
+state/
 
 # Config (含 API Key 等敏感信息)
 config.yaml
@@ -18,3 +22,18 @@ config.yaml
 .env.*
 *.pem
 *.key
+
+# 临时脚本 / 调试快照
+probe.py
+scratch.py
+*.backup
+*.bak
+
+# 编辑器 / 平台
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 操作系统临时
+Thumbs.db
