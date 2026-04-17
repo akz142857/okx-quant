@@ -53,6 +53,7 @@ class LiveTrader:
         state_store: Optional[StateStore] = None,
         *,
         exchange: Optional[Exchange] = None,
+        decision_log_dir: str = "logs",
     ):
         if exchange is None and client is None:
             raise ValueError("LiveTrader 需要 exchange 或 client 至少一个")
@@ -84,7 +85,7 @@ class LiveTrader:
         self._state = self._state_store.load(inst_id) or TraderState(inst_id=inst_id)
 
         # 决策日志
-        self._decision_logger = DecisionLogger(inst_id)
+        self._decision_logger = DecisionLogger(inst_id, log_dir=decision_log_dir)
 
         # Dashboard 相关（部分字段由持久化状态恢复）
         self._use_dashboard = dashboard

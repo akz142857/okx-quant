@@ -85,6 +85,7 @@ def _build_trader(tmp_path, scripted: list[SignalType]) -> tuple[LiveTrader, Fak
         state_store=store,
         signal_timeout_s=0,  # 同步调用，简化测试
         dashboard=False,
+        decision_log_dir=str(tmp_path / "logs"),
     )
     return trader, ex, risk
 
@@ -167,6 +168,7 @@ def test_tick_buy_fail_enters_cooldown(tmp_path):
         exchange=ex, strategy=ScriptedStrategy([SignalType.BUY]),
         inst_id="BTC-USDT", risk_manager=risk, state_store=store,
         signal_timeout_s=0, dashboard=False,
+        decision_log_dir=str(tmp_path / "logs"),
     )
     trader._tick("1H", lookback=50)
 
