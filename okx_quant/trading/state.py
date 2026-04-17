@@ -15,11 +15,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass, field
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+# inst_id 白名单：字母/数字/连字符/下划线；任何不匹配即拒绝
+_SAFE_INST_ID = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 
 
 @dataclass
@@ -62,15 +66,26 @@ class StateStore:
     """
 
     def __init__(self, state_dir: str = "state"):
-        self._dir = state_dir
+        # 解析为绝对路径，便于后续的 "路径必须位于此目录下" 校验
+        self._dir = os.path.abspath(state_dir)
         os.makedirs(self._dir, exist_ok=True)
 
     def _path(self, inst_id: str) -> str:
-        safe = inst_id.replace("/", "-")
-        return os.path.join(self._dir, f"state_{safe}.json")
+        """构造状态文件路径；inst_id 必须通过白名单校验且结果路径位于 state_dir 之内"""
+        if not _SAFE_INST_ID.match(inst_id):
+            raise ValueError(f"非法的 inst_id（仅允许字母数字/-/_）: {inst_id!r}")
+        path = os.path.abspath(os.path.join(self._dir, f"state_{inst_id}.json"))
+        # 二次防护：规范化后仍必须以 state_dir 为前缀
+        if not path.startswith(self._dir + os.sep):
+            raise ValueError(f"非法的 inst_id 路径逃逸: {inst_id!r}")
+        return path
 
     def load(self, inst_id: str) -> Optional[TraderState]:
-        path = self._path(inst_id)
+        try:
+            path = self._path(inst_id)
+        except ValueError as e:
+            logger.warning("[状态] %s", e)
+            return None
         if not os.path.isfile(path):
             return None
         try:
@@ -86,7 +101,11 @@ class StateStore:
     def save(self, state: TraderState) -> None:
         if not state.inst_id:
             return
-        path = self._path(state.inst_id)
+        try:
+            path = self._path(state.inst_id)
+        except ValueError as e:
+            logger.warning("[状态] %s", e)
+            return
         try:
             # 原子写入：tmp → rename
             fd, tmp = tempfile.mkstemp(
@@ -99,7 +118,10 @@ class StateStore:
             logger.warning("[状态] 保存 %s 失败: %s", path, e)
 
     def clear(self, inst_id: str) -> None:
-        path = self._path(inst_id)
+        try:
+            path = self._path(inst_id)
+        except ValueError:
+            return
         if os.path.isfile(path):
             try:
                 os.remove(path)

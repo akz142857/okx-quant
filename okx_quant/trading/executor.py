@@ -6,8 +6,9 @@ import math
 import os
 import threading
 import time
+from collections import OrderedDict, deque
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 import pandas as pd
 
@@ -32,14 +33,15 @@ class DecisionLogger:
         "timestamp", "inst_id", "signal", "price", "reason",
         "stop_loss", "take_profit", "size_pct",
     ]
+    _SEEN_MAX_ENTRIES = 2048  # LRU 上限，防止长时间运行时内存无界增长
 
     def __init__(self, inst_id: str, log_dir: str = "logs"):
         self._inst_id = inst_id
         self._log_dir = log_dir
-        self._seen: set[tuple] = set()  # (candle_ts, signal_type)
+        # OrderedDict 用作 LRU set：键是 (candle_ts, signal_type)
+        self._seen: "OrderedDict[tuple, None]" = OrderedDict()
         self._file = None
-        self._writer: Optional[csv.writer] = None
-        self._header_written = False
+        self._writer: Optional[Any] = None
         self._current_columns: list[str] = []
 
     def _ensure_file(self, extra_keys: list[str]):
@@ -70,8 +72,12 @@ class DecisionLogger:
         """记录一条决策日志，返回是否写入（False = 去重跳过）"""
         key = (candle_ts, signal.signal.value)
         if key in self._seen:
+            self._seen.move_to_end(key)
             return False
-        self._seen.add(key)
+        self._seen[key] = None
+        # LRU 淘汰
+        while len(self._seen) > self._SEEN_MAX_ENTRIES:
+            self._seen.popitem(last=False)
 
         extra = signal.extra or {}
         extra_keys = [k for k in extra if k not in self._BASE_COLUMNS]
@@ -96,9 +102,19 @@ class DecisionLogger:
 
     def close(self):
         if self._file is not None:
-            self._file.close()
-            self._file = None
-            self._writer = None
+            try:
+                self._file.close()
+            except OSError as e:
+                logger.warning("[日志] 关闭决策日志失败: %s", e)
+            finally:
+                self._file = None
+                self._writer = None
+
+    def __enter__(self) -> "DecisionLogger":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 class LiveTrader:
@@ -157,7 +173,8 @@ class LiveTrader:
         self._last_signal_extra: dict = {}
         self._buy_fail_until: float = self._state.buy_fail_until
         self._sell_fail_until: float = self._state.sell_fail_until
-        self._trade_log: list = []
+        # dashboard 只展示最近 5 条；用 deque 避免长时间运行后无界增长
+        self._trade_log: deque = deque(maxlen=20)
         self._tick_count: int = self._state.tick_count
         self._start_time: datetime = datetime.now()
         self._consecutive_errors: int = 0
@@ -179,7 +196,11 @@ class LiveTrader:
         # 交易对精度（lotSz / minSz），启动时查询
         self._lot_sz: float = 0.0
         self._min_sz: float = 0.0
+        self._lot_decimals: int = 0
         self._fetch_instrument_info()
+
+        # _persist_state dirty flag：仅在真正有变化时落盘，降低 IO
+        self._state_dirty: bool = False
 
     # -------------------------------------------------------------------------
     # 账户查询
@@ -231,16 +252,41 @@ class LiveTrader:
         self._cached_equity_ts = 0.0
         self._cached_available_ts = 0.0
 
-    def _persist_state(self) -> None:
-        """将当前可持久化字段落盘"""
+    def _persist_state(self, force: bool = False) -> None:
+        """将当前可持久化字段落盘；仅在发生变化时写入
+
+        Args:
+            force: 忽略 dirty flag 强制写（用于 stop() / 关键节点）
+        """
+        snapshot = (
+            self._highest_since_entry.get(self.inst_id, 0.0),
+            self._buy_fail_until,
+            self._sell_fail_until,
+            self._last_signal_name,
+            self._last_signal_reason,
+            tuple(self._last_logged_signal),
+            self._tick_count,
+        )
+        prev_snapshot = (
+            self._state.highest_since_entry,
+            self._state.buy_fail_until,
+            self._state.sell_fail_until,
+            self._state.last_signal_name,
+            self._state.last_signal_reason,
+            self._state.last_logged_signal,
+            self._state.tick_count,
+        )
+        if not force and snapshot == prev_snapshot:
+            return
+
+        (self._state.highest_since_entry,
+         self._state.buy_fail_until,
+         self._state.sell_fail_until,
+         self._state.last_signal_name,
+         self._state.last_signal_reason,
+         self._state.last_logged_signal,
+         self._state.tick_count) = snapshot
         self._state.inst_id = self.inst_id
-        self._state.highest_since_entry = self._highest_since_entry.get(self.inst_id, 0.0)
-        self._state.buy_fail_until = self._buy_fail_until
-        self._state.sell_fail_until = self._sell_fail_until
-        self._state.last_signal_name = self._last_signal_name
-        self._state.last_signal_reason = self._last_signal_reason
-        self._state.last_logged_signal = tuple(self._last_logged_signal)
-        self._state.tick_count = self._tick_count
         self._state.last_update_ts = time.time()
         self._state_store.save(self._state)
 
@@ -283,6 +329,10 @@ class LiveTrader:
             info = self.client.get_instrument(self.inst_id)
             self._lot_sz = float(info.get("lotSz", 0))
             self._min_sz = float(info.get("minSz", 0))
+            # 预算 lotSz 的小数位数，避免每次下单重复字符串化
+            if self._lot_sz > 0:
+                lot_str = f"{self._lot_sz:.10f}".rstrip("0")
+                self._lot_decimals = len(lot_str.split(".")[-1]) if "." in lot_str else 0
             logger.info(
                 "[精度] %s  lotSz=%s  minSz=%s",
                 self.inst_id, info.get("lotSz"), info.get("minSz"),
@@ -294,10 +344,7 @@ class LiveTrader:
         """按 lotSz 向下取整，确保不低于 minSz"""
         if self._lot_sz > 0:
             size = math.floor(size / self._lot_sz) * self._lot_sz
-            # 处理浮点精度：保留与 lotSz 相同的小数位数
-            lot_str = f"{self._lot_sz:.10f}".rstrip("0")
-            decimals = len(lot_str.split(".")[-1]) if "." in lot_str else 0
-            size = round(size, decimals)
+            size = round(size, self._lot_decimals)
         return size
 
     # -------------------------------------------------------------------------
@@ -531,7 +578,7 @@ class LiveTrader:
                 time=t["time"], side=t["side"], price=t["price"],
                 size=t["size"], coin=t["coin"], pnl=t.get("pnl", ""),
             )
-            for t in self._trade_log[-5:]
+            for t in list(self._trade_log)[-5:]
         ]
 
         return DashboardState(
@@ -589,7 +636,7 @@ class LiveTrader:
             "position": pos,
             "position_coin": coin,
             "position_pnl_pct": position_pnl_pct,
-            "recent_trades": list(self._trade_log[-5:]),
+            "recent_trades": list(self._trade_log)[-5:],
             "tick_count": self._tick_count,
             "indicators": dict(self._last_signal_extra),
         }
@@ -803,7 +850,7 @@ class LiveTrader:
         self._decision_logger.close()
         # 退出前尽力保存一次状态
         try:
-            self._persist_state()
+            self._persist_state(force=True)
         except Exception as e:  # noqa: BLE001 — 退出路径容错
             logger.warning("[状态] 停止时保存失败: %s", e)
         logger.info("实盘交易已停止")

@@ -1,13 +1,19 @@
 """OKX REST API 客户端，支持鉴权和模拟盘"""
 
+import base64
 import hashlib
 import hmac
-import base64
-import time
+import json
 import logging
+import time
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Union
+from urllib.parse import urlencode
+
 import requests
+
+# OKX V5 业务数据返回类型：公共接口通常是 list[dict]，部分返回单个 dict，也可能为 None
+OKXData = Union[list, dict, None]
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +100,10 @@ class OKXRestClient:
         params: Optional[dict] = None,
         body: Optional[dict] = None,
         auth: bool = False,
-    ) -> Any:
-        import json
-
+    ) -> OKXData:
         url = self.BASE_URL + path
         body_str = json.dumps(body) if body else ""
-        headers = {}
+        headers: dict[str, str] = {}
 
         if auth:
             if not self.api_key:
@@ -107,7 +111,6 @@ class OKXRestClient:
             # OKX 签名要求 GET path 包含 query string
             sign_path = path
             if params:
-                from urllib.parse import urlencode
                 sign_path = f"{path}?{urlencode(params)}"
             headers = self._auth_headers(method, sign_path, body_str)
 
@@ -215,7 +218,6 @@ class OKXRestClient:
         """重试前刷新签名（时间戳必须更新）"""
         sign_path = path
         if params:
-            from urllib.parse import urlencode
             sign_path = f"{path}?{urlencode(params)}"
         return self._auth_headers(method, sign_path, body_str)
 

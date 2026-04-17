@@ -1,4 +1,8 @@
-"""OKX WebSocket 客户端，支持公共/私有频道订阅"""
+"""OKX WebSocket 客户端，支持公共/私有频道订阅
+
+NOTE: 此模块已完整实现但尚未集成到实盘执行器（当前使用 REST 轮询）。
+保留供未来切换到实时行情推送；如需移除请同步更新 ``client/__init__.py`` 的导出。
+"""
 
 import asyncio
 import hashlib

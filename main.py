@@ -296,6 +296,20 @@ def cmd_live(args, cfg):
     from okx_quant.risk.manager import RiskConfig
 
     _validate_bar(args.bar)
+
+    # 实盘二次确认：simulated=false 时需要用户显式确认
+    simulated = cfg.get("okx", {}).get("simulated", True)
+    if not simulated and not os.environ.get("OKX_LIVE_CONFIRMED"):
+        print("\n" + "=" * 60)
+        print("  ⚠️  警告：当前为【实盘模式】(simulated=false)")
+        print("     程序将使用真实账户资金执行真实订单。")
+        print("     建议先在 simulated=true 模拟盘充分测试策略。")
+        print("=" * 60)
+        confirm = input("  输入 'I UNDERSTAND' 以继续实盘交易: ").strip()
+        if confirm != "I UNDERSTAND":
+            print("已取消。如确需实盘请重试并输入完整确认语。")
+            sys.exit(0)
+
     client = make_client(cfg)
     executor_cfg = cfg.get("executor", {})
     signal_timeout_s = float(executor_cfg.get("signal_timeout_s", 20))
@@ -360,7 +374,6 @@ def cmd_live(args, cfg):
         drawdown_recover_ratio=risk_cfg_raw.get("drawdown_recover_ratio", 0.5),
     )
 
-    simulated = cfg.get("okx", {}).get("simulated", True)
     use_dashboard = not args.no_dashboard
 
     # 多币种 → Supervisor

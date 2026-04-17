@@ -1,9 +1,12 @@
 """加密货币新闻获取 — CryptoPanic 免费 API，带内存缓存"""
 
+import logging
 import time
 from dataclasses import dataclass
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -55,6 +58,8 @@ class CryptoNewsFetcher:
         return items[:limit]
 
     def _fetch(self, coin: str) -> list[NewsItem]:
+        # CryptoPanic 免费 API 要求 auth_token 作为 query 参数；
+        # 仅在调用此方法时作用域内持有，避免意外写入日志。
         params: dict[str, str | int] = {
             "currencies": coin.upper(),
             "kind": "news",
@@ -67,7 +72,9 @@ class CryptoNewsFetcher:
             resp = self._session.get(self.BASE_URL, params=params, timeout=10)
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
+        except (requests.RequestException, ValueError) as e:
+            # 不记录完整 URL（含 token），仅币种
+            logger.debug("CryptoPanic 拉取 %s 新闻失败: %s", coin, type(e).__name__)
             return []
 
         results: list[NewsItem] = []

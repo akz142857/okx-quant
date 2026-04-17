@@ -18,9 +18,8 @@ class RiskConfig:
     max_drawdown_pct: float = 0.15    # 最大回撤阈值（触发后停止交易）
     max_open_positions: int = 1       # 最大同时持仓数（现货策略通常为 1）
     min_order_usdt: float = 1.0       # 最小下单 USDT 价值（低于此值不下单）
-    max_daily_loss_pct: float = 0.05  # 当日最大亏损比例（触发后当日停止交易）
     # 回撤自动恢复阈值：当前回撤低于 max_drawdown_pct * 此比例时解除停盘
-    # 设为 0 则不自动恢复（保留原有语义，需手动 reset_daily）
+    # 设为 0 则不自动恢复
     drawdown_recover_ratio: float = 0.5
 
 
@@ -48,11 +47,17 @@ class RiskManager:
         self.initial_equity = initial_equity
         self.peak_equity = initial_equity
         self.current_equity = initial_equity
-        self.daily_start_equity = initial_equity
         self._positions: dict[str, PositionInfo] = {}
         self._trading_halted = False
         self._halt_reason = ""
         self._lock = threading.Lock()
+
+    def initialize(self, equity: float) -> None:
+        """设置初始净值快照（由 Supervisor/LiveTrader 启动时调用）"""
+        with self._lock:
+            self.initial_equity = equity
+            self.peak_equity = equity
+            self.current_equity = equity
 
     # -------------------------------------------------------------------------
     # 仓位管理
@@ -197,14 +202,6 @@ class RiskManager:
                 )
                 self._trading_halted = False
                 self._halt_reason = ""
-
-    def reset_daily(self, equity: float):
-        """每日开盘时重置当日亏损统计"""
-        self.daily_start_equity = equity
-        # 若之前因当日亏损暂停，重置（最大回撤触发不重置）
-        if self._trading_halted and "当日" in self._halt_reason:
-            self._trading_halted = False
-            self._halt_reason = ""
 
     @property
     def is_halted(self) -> bool:
