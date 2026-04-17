@@ -1,21 +1,32 @@
-"""实盘交易执行器：策略信号 → 下单 → 风控 → 监控"""
+"""实盘交易执行器：策略信号 → 下单 → 风控 → 监控
 
-import csv
+LiveTrader 只负责主循环和协调；具体职责拆分到：
+- OrderExecutor       下单 + 冷却 + 精度取整
+- PositionMonitor     SL/TP + trailing stop
+- AccountSnapshot     余额缓存
+- DecisionLogger      决策 CSV
+- position_restore    账户持仓恢复
+"""
+
+from __future__ import annotations
+
 import logging
-import math
-import os
 import threading
 import time
-from collections import OrderedDict, deque
+from collections import deque
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 import pandas as pd
 
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.exchange import Exchange, OKXExchange
-from okx_quant.risk.manager import RiskManager, RiskConfig, PositionInfo
+from okx_quant.risk.manager import RiskConfig, RiskManager
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
+from okx_quant.trading.account import AccountSnapshot
+from okx_quant.trading.decision_log import DecisionLogger
+from okx_quant.trading.orders import OrderExecutor
+from okx_quant.trading.position_monitor import PositionMonitor
 from okx_quant.trading.position_restore import restore_to_risk
 from okx_quant.trading.state import StateStore, TraderState
 from okx_quant.utils.timeout import run_with_timeout, TimeoutError as SignalTimeout
@@ -23,113 +34,11 @@ from okx_quant.utils.timeout import run_with_timeout, TimeoutError as SignalTime
 logger = logging.getLogger(__name__)
 
 
-class DecisionLogger:
-    """CSV 决策日志记录器
-
-    每根 K 线 + 信号类型只记录一次（去重），写入后立即 flush。
-    文件路径: logs/decisions_{inst_id}_{date}.csv
-    """
-
-    _BASE_COLUMNS = [
-        "timestamp", "inst_id", "signal", "price", "reason",
-        "stop_loss", "take_profit", "size_pct",
-    ]
-    _SEEN_MAX_ENTRIES = 2048  # LRU 上限，防止长时间运行时内存无界增长
-
-    def __init__(self, inst_id: str, log_dir: str = "logs"):
-        self._inst_id = inst_id
-        self._log_dir = log_dir
-        # OrderedDict 用作 LRU set：键是 (candle_ts, signal_type)
-        self._seen: "OrderedDict[tuple, None]" = OrderedDict()
-        self._file = None
-        self._writer: Optional[Any] = None
-        self._current_columns: list[str] = []
-
-    def _ensure_file(self, extra_keys: list[str]):
-        """按需创建/打开 CSV 文件并写表头"""
-        columns = self._BASE_COLUMNS + sorted(extra_keys)
-        if self._file is not None and columns == self._current_columns:
-            return
-
-        # 关闭旧文件（日期切换或列变化时）
-        if self._file is not None:
-            self._file.close()
-
-        os.makedirs(self._log_dir, exist_ok=True)
-        date_str = datetime.now().strftime("%Y%m%d")
-        safe_id = self._inst_id.replace("/", "-")
-        path = os.path.join(self._log_dir, f"decisions_{safe_id}_{date_str}.csv")
-
-        file_exists = os.path.isfile(path) and os.path.getsize(path) > 0
-        self._file = open(path, "a", newline="", encoding="utf-8")
-        self._writer = csv.writer(self._file)
-        self._current_columns = columns
-
-        if not file_exists:
-            self._writer.writerow(columns)
-            self._file.flush()
-
-    def log(self, signal: Signal, candle_ts) -> bool:
-        """记录一条决策日志，返回是否写入（False = 去重跳过）"""
-        key = (candle_ts, signal.signal.value)
-        if key in self._seen:
-            self._seen.move_to_end(key)
-            return False
-        self._seen[key] = None
-        # LRU 淘汰
-        while len(self._seen) > self._SEEN_MAX_ENTRIES:
-            self._seen.popitem(last=False)
-
-        extra = signal.extra or {}
-        extra_keys = [k for k in extra if k not in self._BASE_COLUMNS]
-        self._ensure_file(extra_keys)
-
-        row = [
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            signal.inst_id,
-            signal.signal.value.upper(),
-            signal.price,
-            signal.reason,
-            signal.stop_loss,
-            signal.take_profit,
-            signal.size_pct,
-        ]
-        for col in sorted(extra_keys):
-            row.append(extra.get(col, ""))
-
-        self._writer.writerow(row)
-        self._file.flush()
-        return True
-
-    def close(self):
-        if self._file is not None:
-            try:
-                self._file.close()
-            except OSError as e:
-                logger.warning("[日志] 关闭决策日志失败: %s", e)
-            finally:
-                self._file = None
-                self._writer = None
-
-    def __enter__(self) -> "DecisionLogger":
-        return self
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        self.close()
-
-
 class LiveTrader:
     """实盘交易执行器
 
-    每隔 `interval_seconds` 秒拉取最新 K 线，调用策略生成信号，
-    经风控校验后执行买卖。
-
-    用法::
-
-        client = OKXRestClient(api_key=..., secret_key=..., passphrase=..., simulated=True)
-        risk_config = RiskConfig(max_position_pct=0.1, stop_loss_pct=0.02)
-        trader = LiveTrader(client, strategy, inst_id="BTC-USDT", risk_config=risk_config)
-        trader.run(bar="1H", lookback=100, interval_seconds=60)
+    每隔 ``interval_seconds`` 秒拉取最新 K 线，调用策略生成信号，
+    经风控校验后委派给 OrderExecutor 执行买卖。
     """
 
     def __init__(
@@ -158,7 +67,6 @@ class LiveTrader:
         self.exchange: Exchange = exchange if exchange is not None else OKXExchange(
             client, quote_ccy=quote_ccy,
         )
-        # 兼容字段：仅当底层是 OKX 时保留，供确实依赖 REST 的代码路径使用
         self.client: Optional[OKXRestClient] = (
             client if client is not None
             else getattr(self.exchange, "client", None)
@@ -188,93 +96,109 @@ class LiveTrader:
         self._last_signal_reason: str = self._state.last_signal_reason
         self._last_logged_signal: tuple = self._state.last_logged_signal
         self._last_signal_extra: dict = {}
-        self._buy_fail_until: float = self._state.buy_fail_until
-        self._sell_fail_until: float = self._state.sell_fail_until
-        # dashboard 只展示最近 5 条；用 deque 避免长时间运行后无界增长
         self._trade_log: deque = deque(maxlen=20)
         self._tick_count: int = self._state.tick_count
         self._start_time: datetime = datetime.now()
         self._consecutive_errors: int = 0
         self._max_backoff: int = 300  # 最大退避 5 分钟
 
-        # 余额缓存（减少 API 调用频率）
-        self._balance_cache_ttl: int = 300  # 缓存 5 分钟
-        self._cached_equity: float = 0.0
-        self._cached_equity_ts: float = 0.0
-        self._cached_available: float = 0.0
-        self._cached_available_ts: float = 0.0
+        # 余额缓存
+        self._account = AccountSnapshot(self.exchange, ttl_seconds=300)
 
-        # 移动止盈 (trailing stop)
-        self._highest_since_entry: dict[str, float] = {}
-        if self._state.highest_since_entry > 0:
-            self._highest_since_entry[inst_id] = self._state.highest_since_entry
-        self.trailing_atr_mult: float = 2.0  # trailing stop = highest - mult * ATR
+        # 订单执行器
+        self._orders = OrderExecutor(
+            exchange=self.exchange,
+            inst_id=inst_id,
+            risk=self.risk,
+            buy_fail_until=self._state.buy_fail_until,
+            sell_fail_until=self._state.sell_fail_until,
+            on_buy_success=self._on_buy_success,
+            on_sell_success=self._on_sell_success,
+            on_state_change=self._mark_state_dirty,
+        )
 
-        # 交易对精度（lotSz / minSz），启动时查询
-        self._lot_sz: float = 0.0
-        self._min_sz: float = 0.0
-        self._lot_decimals: int = 0
-        self._fetch_instrument_info()
+        # 持仓监控
+        self._monitor = PositionMonitor(
+            inst_id=inst_id,
+            risk=self.risk,
+            sell_fn=self._sell_for_monitor,
+            trailing_atr_mult=2.0,
+            initial_highest=self._state.highest_since_entry,
+            on_state_change=self._mark_state_dirty,
+            sell_cooldown_getter=lambda: self._orders.sell_fail_until,
+        )
 
-        # _persist_state dirty flag：仅在真正有变化时落盘，降低 IO
+        # dirty flag：仅在发生变化时落盘
         self._state_dirty: bool = False
 
-    # -------------------------------------------------------------------------
-    # 账户查询
-    # -------------------------------------------------------------------------
-
-    def _fetch_snapshot(self):
-        """拉取归一化余额快照（一次 API 调用覆盖 equity + available）"""
-        try:
-            return self.exchange.get_balance()
-        except Exception as e:  # noqa: BLE001 — 对外部 API 兜底
-            logger.error("获取账户余额失败: %s", e)
-            return None
+    # ------------------------------------------------------------------
+    # 账户查询（保留公共 API 供 Supervisor dashboard 使用）
+    # ------------------------------------------------------------------
 
     def get_equity(self, force: bool = False) -> float:
-        """获取账户总权益（USDT），包含所有币种持仓折算价值"""
-        now = time.time()
-        if not force and (now - self._cached_equity_ts) < self._balance_cache_ttl:
-            return self._cached_equity
-
-        snap = self._fetch_snapshot()
-        if snap is not None:
-            self._cached_equity = snap.total_equity_quote
-            self._cached_equity_ts = now
-            # 顺便刷新 available，减少重复请求
-            self._cached_available = snap.available_quote
-            self._cached_available_ts = now
-        return self._cached_equity
+        return self._account.total_equity(force=force)
 
     def get_available_usdt(self, force: bool = False) -> float:
-        """获取可用 USDT，带缓存"""
-        now = time.time()
-        if not force and (now - self._cached_available_ts) < self._balance_cache_ttl:
-            return self._cached_available
+        return self._account.available_quote(force=force)
 
-        snap = self._fetch_snapshot()
-        if snap is not None:
-            self._cached_available = snap.available_quote
-            self._cached_available_ts = now
-            self._cached_equity = snap.total_equity_quote
-            self._cached_equity_ts = now
-        return self._cached_available
+    # ------------------------------------------------------------------
+    # 回调：由 OrderExecutor / PositionMonitor 触发
+    # ------------------------------------------------------------------
 
-    def _invalidate_balance_cache(self):
-        """交易后清除余额缓存，下次查询将强制刷新"""
-        self._cached_equity_ts = 0.0
-        self._cached_available_ts = 0.0
+    def _on_buy_success(self, price: float, size_coin: float) -> None:
+        self._account.invalidate()
+        self._monitor.on_buy(price)
+
+        coin = self.inst_id.split("-")[0]
+        self._trade_log.append({
+            "time": datetime.now().strftime("%m-%d %H:%M"),
+            "side": "BUY",
+            "price": price,
+            "size": size_coin,
+            "coin": coin,
+            "pnl": "",
+        })
+        if self._dashboard:
+            self._dashboard.log_event(f"BUY {size_coin:.4f} {coin} @ ${price:.4f}")
+
+    def _on_sell_success(self, pos, last_price: float) -> None:
+        self._account.invalidate()
+        self._monitor.on_sell()
+
+        pnl = (last_price - pos.entry_price) * pos.size if last_price > 0 else 0
+        pnl_pct = (last_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
+        pnl_str = f"{pnl:+.2f} ({pnl_pct:+.1f}%)"
+
+        coin = self.inst_id.split("-")[0]
+        self._trade_log.append({
+            "time": datetime.now().strftime("%m-%d %H:%M"),
+            "side": "SELL",
+            "price": last_price,
+            "size": pos.size,
+            "coin": coin,
+            "pnl": pnl_str,
+        })
+        if self._dashboard:
+            self._dashboard.log_event(
+                f"SELL {pos.size:.4f} {coin} @ ${last_price:.4f}  盈亏: {pnl_str}"
+            )
+
+    def _sell_for_monitor(self, reason: str) -> bool:
+        """PositionMonitor 触发 SL/TP 时的卖出入口"""
+        return self._orders.sell(self._last_price, reason)
+
+    def _mark_state_dirty(self) -> None:
+        self._state_dirty = True
+
+    # ------------------------------------------------------------------
+    # 状态持久化
+    # ------------------------------------------------------------------
 
     def _persist_state(self, force: bool = False) -> None:
-        """将当前可持久化字段落盘；仅在发生变化时写入
-
-        Args:
-            force: 忽略 dirty flag 强制写（用于 stop() / 关键节点）
-        """
         snapshot = (
-            self._highest_since_entry.get(self.inst_id, 0.0),
-            self._buy_fail_until,
-            self._sell_fail_until,
+            self._monitor.highest_since_entry,
+            self._orders.buy_fail_until,
+            self._orders.sell_fail_until,
             self._last_signal_name,
             self._last_signal_reason,
             tuple(self._last_logged_signal),
@@ -289,7 +213,7 @@ class LiveTrader:
             self._state.last_logged_signal,
             self._state.tick_count,
         )
-        if not force and snapshot == prev_snapshot:
+        if not force and snapshot == prev_snapshot and not self._state_dirty:
             return
 
         (self._state.highest_since_entry,
@@ -302,242 +226,22 @@ class LiveTrader:
         self._state.inst_id = self.inst_id
         self._state.last_update_ts = time.time()
         self._state_store.save(self._state)
+        self._state_dirty = False
 
-    def _restore_existing_position(self):
-        """检测当前交易对是否有已有持仓，恢复到风控"""
-        restore_to_risk(
-            self.exchange,
-            self.risk,
-            [self.inst_id],
-            quote_ccy=self.quote_ccy,
-        )
+    # ------------------------------------------------------------------
+    # 已有持仓恢复
+    # ------------------------------------------------------------------
 
-    # -------------------------------------------------------------------------
-    # 交易对精度
-    # -------------------------------------------------------------------------
+    def _restore_existing_position(self) -> None:
+        restore_to_risk(self.exchange, self.risk, [self.inst_id], quote_ccy=self.quote_ccy)
 
-    def _fetch_instrument_info(self):
-        """查询交易对的 lot_size（下单步长）和 min_size（最小数量）"""
-        try:
-            info = self.exchange.get_instrument(self.inst_id)
-            self._lot_sz = info.lot_size
-            self._min_sz = info.min_size
-            # 预算 lot_size 的小数位数，避免每次下单重复字符串化
-            if self._lot_sz > 0:
-                lot_str = f"{self._lot_sz:.10f}".rstrip("0")
-                self._lot_decimals = len(lot_str.split(".")[-1]) if "." in lot_str else 0
-            logger.info(
-                "[精度] %s  lotSz=%s  minSz=%s",
-                self.inst_id, self._lot_sz, self._min_sz,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[精度] 获取 %s 交易对信息失败: %s，将使用原始数量下单", self.inst_id, e)
-
-    def _round_lot_size(self, size: float) -> float:
-        """按 lotSz 向下取整，确保不低于 minSz"""
-        if self._lot_sz > 0:
-            size = math.floor(size / self._lot_sz) * self._lot_sz
-            size = round(size, self._lot_decimals)
-        return size
-
-    # -------------------------------------------------------------------------
-    # 下单
-    # -------------------------------------------------------------------------
-
-    def _buy(self, price: float, size_coin: float, sl: float, tp: float, reason: str) -> bool:
-        """执行买入"""
-        size_coin = self._round_lot_size(size_coin)
-        if self._min_sz > 0 and size_coin < self._min_sz:
-            logger.warning("[下单] 数量 %.8f 低于最小下单量 %s，跳过", size_coin, self._min_sz)
-            return False
-        logger.info(
-            "[下单] BUY %s  数量=%.6f  价格=%.4f  止损=%.4f  止盈=%.4f  原因=%s",
-            self.inst_id, size_coin, price, sl, tp, reason,
-        )
-        try:
-            result = self.exchange.place_market_order(
-                inst_id=self.inst_id,
-                side="buy",
-                size=size_coin,
-                tgt_ccy="base_ccy",
-            )
-            logger.info("[下单] 买入成功 ordId=%s", result.ord_id)
-            self._invalidate_balance_cache()
-
-            # 记录移动止盈基准
-            self._highest_since_entry[self.inst_id] = price
-
-            # 记录到风控
-            self.risk.add_position(
-                PositionInfo(
-                    inst_id=self.inst_id,
-                    size=size_coin,
-                    entry_price=price,
-                    stop_loss=sl,
-                    take_profit=tp,
-                )
-            )
-
-            # 交易日志
-            coin = self.inst_id.split("-")[0]
-            self._trade_log.append({
-                "time": datetime.now().strftime("%m-%d %H:%M"),
-                "side": "BUY",
-                "price": price,
-                "size": size_coin,
-                "coin": coin,
-                "pnl": "",
-            })
-            if self._dashboard:
-                self._dashboard.log_event(
-                    f"BUY {size_coin:.4f} {coin} @ ${price:.4f}  原因: {reason}"
-                )
-            return True
-        except Exception as e:
-            logger.error("[下单] 买入失败: %s", e)
-            # 下单失败后冷却 5 分钟，避免反复重试
-            self._buy_fail_until = time.time() + 300
-            logger.info("[下单] 买入失败冷却 5 分钟，%.0f 秒后可重试", 300)
-            return False
-
-    def _sell(self, reason: str) -> bool:
-        """执行卖出（全仓）"""
-        pos = self.risk.get_position(self.inst_id)
-        if not pos:
-            logger.warning("[下单] 无持仓，跳过卖出")
-            return False
-
-        sell_size = self._round_lot_size(pos.size)
-        if sell_size <= 0:
-            logger.warning("[下单] 卖出数量取整后为 0，清除幽灵仓位 %s", self.inst_id)
-            self.risk.remove_position(self.inst_id)
-            self._highest_since_entry.pop(self.inst_id, None)
-            return False
-        logger.info(
-            "[下单] SELL %s  数量=%.6f  原因=%s",
-            self.inst_id, sell_size, reason,
-        )
-        try:
-            result = self.exchange.place_market_order(
-                inst_id=self.inst_id,
-                side="sell",
-                size=sell_size,
-            )
-            logger.info("[下单] 卖出成功 ordId=%s", result.ord_id)
-            self._invalidate_balance_cache()
-
-            # 计算盈亏
-            pnl = (self._last_price - pos.entry_price) * pos.size if self._last_price > 0 else 0
-            pnl_pct = (self._last_price / pos.entry_price - 1) * 100 if pos.entry_price > 0 else 0
-            pnl_str = f"{pnl:+.2f} ({pnl_pct:+.1f}%)"
-
-            coin = self.inst_id.split("-")[0]
-            self._trade_log.append({
-                "time": datetime.now().strftime("%m-%d %H:%M"),
-                "side": "SELL",
-                "price": self._last_price,
-                "size": pos.size,
-                "coin": coin,
-                "pnl": pnl_str,
-            })
-            if self._dashboard:
-                self._dashboard.log_event(
-                    f"SELL {pos.size:.4f} {coin} @ ${self._last_price:.4f}  "
-                    f"盈亏: {pnl_str}  原因: {reason}"
-                )
-
-            self.risk.remove_position(self.inst_id)
-            self._highest_since_entry.pop(self.inst_id, None)
-            return True
-        except Exception as e:
-            logger.error("[下单] 卖出失败: %s", e)
-            # 检查是否余额不足（51008），清除幽灵仓位
-            if "51008" in str(e):
-                logger.warning("[下单] 余额不足，检查实际持仓并清理...")
-                self._cleanup_phantom_position()
-            else:
-                # 其他失败原因：冷却 5 分钟避免反复重试
-                self._sell_fail_until = time.time() + 300
-                logger.info("[下单] 卖出失败冷却 5 分钟")
-            return False
-
-    def _cleanup_phantom_position(self):
-        """检查实际余额，若不足以下单则清除风控中的幽灵仓位"""
-        base_ccy = self.inst_id.split("-")[0]
-        try:
-            snap = self.exchange.get_balance()
-            holding = snap.holding(base_ccy)
-            actual_bal = holding.available if holding else 0.0
-            rounded = self._round_lot_size(actual_bal)
-            if rounded <= 0 or (self._min_sz > 0 and rounded < self._min_sz):
-                logger.warning(
-                    "[清理] %s 实际可用余额 %.8f，取整后 %.8f 不足最小下单量，清除幽灵仓位",
-                    self.inst_id, actual_bal, rounded,
-                )
-                self.risk.remove_position(self.inst_id)
-                self._highest_since_entry.pop(self.inst_id, None)
-            else:
-                # 余额存在但下单失败，冷却后重试
-                self._sell_fail_until = time.time() + 300
-                logger.info("[下单] 实际余额 %.8f 足够，冷却 5 分钟后重试", actual_bal)
-        except Exception as ex:  # noqa: BLE001
-            logger.error("[清理] 查询 %s 余额失败: %s，冷却 5 分钟", base_ccy, ex)
-            self._sell_fail_until = time.time() + 300
-
-    # -------------------------------------------------------------------------
-    # 止损/止盈轮询检查
-    # -------------------------------------------------------------------------
-
-    def _check_sl_tp(self, current_price: float, df: pd.DataFrame | None = None) -> bool:
-        """返回 True 表示已触发并平仓"""
-        pos = self.risk.get_position(self.inst_id)
-        if not pos:
-            return False
-
-        # --- 移动止盈 (trailing stop) ---
-        if df is not None and self.inst_id in self._highest_since_entry:
-            from okx_quant.indicators import atr as calc_atr
-
-            # 更新最高价
-            highest = self._highest_since_entry[self.inst_id]
-            if current_price > highest:
-                highest = current_price
-                self._highest_since_entry[self.inst_id] = highest
-
-            # 计算 trailing stop
-            atr_val = calc_atr(df).iloc[-1]
-            trailing_stop = highest - self.trailing_atr_mult * atr_val
-
-            # 只上移不下移
-            if trailing_stop > pos.stop_loss:
-                pos.stop_loss = trailing_stop
-                logger.debug(
-                    "[移动止盈] 最高=%.4f ATR=%.4f 新止损=%.4f",
-                    highest, atr_val, trailing_stop,
-                )
-
-        # 卖出冷却期内跳过
-        if time.time() < self._sell_fail_until:
-            return False
-
-        if pos.stop_loss > 0 and current_price <= pos.stop_loss:
-            logger.warning("[风控] 止损触发 %.4f <= %.4f", current_price, pos.stop_loss)
-            return self._sell("止损触发（移动止盈）" if self.inst_id in self._highest_since_entry else "止损触发")
-
-        if pos.take_profit > 0 and current_price >= pos.take_profit:
-            logger.info("[风控] 止盈触发 %.4f >= %.4f", current_price, pos.take_profit)
-            return self._sell("止盈触发")
-
-        return False
-
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # Dashboard 状态构建
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
     def _build_dashboard_state(
-        self, bar: str, equity: float, available: float, interval_seconds: int, countdown: int
+        self, bar: str, equity: float, available: float, interval_seconds: int, countdown: int,
     ):
-        """构建仪表盘状态"""
         from okx_quant.cli.dashboard import DashboardState, TradeRecord
 
         pos = self.risk.get_position(self.inst_id)
@@ -593,10 +297,6 @@ class LiveTrader:
             last_update=datetime.now().strftime("%H:%M:%S"),
         )
 
-    # -------------------------------------------------------------------------
-    # Worker 状态（供 Supervisor 收集）
-    # -------------------------------------------------------------------------
-
     def get_worker_state(self) -> dict:
         """返回当前 worker 状态快照，供 MultiDashboard 渲染"""
         pos = self.risk.get_position(self.inst_id)
@@ -620,26 +320,13 @@ class LiveTrader:
             "indicators": dict(self._last_signal_extra),
         }
 
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
     # 主循环
-    # -------------------------------------------------------------------------
+    # ------------------------------------------------------------------
 
-    def run(
-        self,
-        bar: str = "1H",
-        lookback: int = 100,
-        interval_seconds: int = 60,
-    ):
-        """启动实盘交易主循环
-
-        Args:
-            bar: K 线周期
-            lookback: 每次获取的历史 K 线数
-            interval_seconds: 轮询间隔（秒）
-        """
+    def run(self, bar: str = "1H", lookback: int = 100, interval_seconds: int = 60) -> None:
         self._running = True
         self._start_time = datetime.now()
-        self._tick_count = 0
         logger.info("启动实盘交易: %s  策略=%s  周期=%s", self.inst_id, self.strategy.name, bar)
 
         # 初始化风控净值（外部共享 risk_manager 由 Supervisor 统一初始化）
@@ -647,19 +334,14 @@ class LiveTrader:
             equity = self.get_equity(force=True)
             self.risk.initialize(equity)
             logger.info("当前账户权益: %.2f USDT", equity)
-
-        # 恢复已有持仓到风控（避免重启后遗留持仓无法管理）
-        if not self._external_risk:
             self._restore_existing_position()
 
-        # 初始化 Dashboard
         if self._use_dashboard:
             from okx_quant.cli.dashboard import Dashboard
             self._dashboard = Dashboard()
             self._dashboard.log_event(
                 f"启动实盘交易 {self.inst_id} {self.strategy.name} {bar}"
             )
-            # Dashboard 模式下只抑制控制台输出，保留文件日志
             for handler in logging.getLogger().handlers:
                 if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
                     handler.setLevel(logging.WARNING)
@@ -673,7 +355,7 @@ class LiveTrader:
                 logger.info("收到停止信号，退出...")
                 self._running = False
                 break
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 self._consecutive_errors += 1
                 backoff = min(
                     interval_seconds * (2 ** self._consecutive_errors),
@@ -695,8 +377,7 @@ class LiveTrader:
                     logger.debug("等待 %ds...", interval_seconds)
                     self._stop_event.wait(timeout=interval_seconds)
 
-    def _countdown_with_dashboard(self, bar: str, interval_seconds: int):
-        """逐秒倒计时并刷新面板"""
+    def _countdown_with_dashboard(self, bar: str, interval_seconds: int) -> None:
         equity = self.risk.current_equity
         available = self.get_available_usdt()
         for remaining in range(interval_seconds, 0, -1):
@@ -710,9 +391,7 @@ class LiveTrader:
                 self._running = False
                 break
 
-    def _tick(self, bar: str, lookback: int):
-        """单次轮询处理"""
-        # 获取 K 线
+    def _tick(self, bar: str, lookback: int) -> None:
         df = self.exchange.get_candles(self.inst_id, bar=bar, limit=lookback)
         if df.empty:
             logger.warning("K 线数据为空，跳过本次")
@@ -721,7 +400,6 @@ class LiveTrader:
         current_price = df["close"].iloc[-1]
         self._last_price = current_price
 
-        # 更新风控净值
         equity = self.get_equity()
         self.risk.update_equity(equity)
 
@@ -729,8 +407,9 @@ class LiveTrader:
             logger.warning("[风控] %s，跳过交易", self.risk.halt_reason)
             return
 
-        # 止损/止盈检查（传入 df 用于 trailing stop）
-        if self._check_sl_tp(current_price, df):
+        # 止损/止盈检查（可能触发 sell）
+        if self._monitor.check(current_price, df):
+            self._persist_state()
             return
 
         # 生成策略信号（带硬超时；超时则视为 HOLD，保护主循环）
@@ -752,7 +431,7 @@ class LiveTrader:
                 price=current_price,
                 reason=f"策略调用超时 (>{self._signal_timeout_s:.0f}s)",
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error("[信号] %s 策略异常: %s", self.inst_id, e, exc_info=True)
             signal = Signal(
                 signal=SignalType.HOLD,
@@ -760,6 +439,7 @@ class LiveTrader:
                 price=current_price,
                 reason=f"策略异常: {e}",
             )
+
         self._last_signal_name = signal.signal.value.upper()
         self._last_signal_reason = signal.reason
         self._last_signal_extra = signal.extra or {}
@@ -773,61 +453,61 @@ class LiveTrader:
             )
             self._last_logged_signal = sig_key
 
-        # 记录决策日志（每根 K 线 + 信号类型去重）
+        # 记录决策日志
         candle_ts = df["ts"].iloc[-1]
         self._decision_logger.log(signal, candle_ts)
 
         # 执行信号
+        self._dispatch_signal(signal, current_price, equity)
+
+        # 本轮结束后持久化一次状态
+        self._persist_state()
+
+    def _dispatch_signal(self, signal: Signal, current_price: float, equity: float) -> None:
         if signal.is_buy and not self.risk.has_position(self.inst_id):
-            # 下单失败冷却检查
-            if time.time() < self._buy_fail_until:
-                remaining = int(self._buy_fail_until - time.time())
+            if self._orders.in_buy_cooldown():
+                remaining = int(self._orders.buy_fail_until - time.time())
                 logger.debug("[下单] 买入冷却中，剩余 %d 秒", remaining)
                 return
 
             available = self.get_available_usdt()
             size_coin, cost_usdt = self.risk.calc_position_size(
-                available, current_price, signal.size_pct
+                available, current_price, signal.size_pct,
             )
 
             allowed, msg = self.risk.check_order(
-                self.inst_id, "buy", cost_usdt, current_price, equity
+                self.inst_id, "buy", cost_usdt, current_price, equity,
             )
             if not allowed:
                 logger.warning("[风控] 买入被拒: %s", msg)
                 return
 
             sl, tp = self.risk.calc_sl_tp(current_price, signal.stop_loss, signal.take_profit)
-            self._buy(current_price, size_coin, sl, tp, signal.reason)
+            self._orders.buy(current_price, size_coin, sl, tp, signal.reason)
 
         elif signal.is_sell and not self.risk.has_position(self.inst_id):
             logger.debug("[信号] SELL 忽略: 当前无持仓")
 
         elif signal.is_sell:
-            # 卖出失败冷却检查
-            if time.time() < self._sell_fail_until:
-                remaining = int(self._sell_fail_until - time.time())
+            if self._orders.in_sell_cooldown():
+                remaining = int(self._orders.sell_fail_until - time.time())
                 logger.debug("[下单] 卖出冷却中，剩余 %d 秒", remaining)
                 return
 
             allowed, msg = self.risk.check_order(
-                self.inst_id, "sell", 0, current_price, equity
+                self.inst_id, "sell", 0, current_price, equity,
             )
             if not allowed:
                 logger.warning("[风控] 卖出被拒: %s", msg)
                 return
-            self._sell(signal.reason)
+            self._orders.sell(current_price, signal.reason)
 
-        # 无论本轮是否有交易，都持久化一次状态
-        self._persist_state()
-
-    def stop(self):
+    def stop(self) -> None:
         self._running = False
         self._stop_event.set()
         self._decision_logger.close()
-        # 退出前尽力保存一次状态
         try:
             self._persist_state(force=True)
-        except Exception as e:  # noqa: BLE001 — 退出路径容错
+        except Exception as e:  # noqa: BLE001
             logger.warning("[状态] 停止时保存失败: %s", e)
         logger.info("实盘交易已停止")
