@@ -48,6 +48,8 @@ class LLMStrategy(BaseStrategy):
             "confidence_threshold": 0.6,
             "candle_count": 20,
             "news_count": 5,
+            # 单次会话 (run) 的 token 预算上限，<=0 表示不限
+            "max_total_tokens": 0,
         }
         merged = {**defaults, **(params or {})}
         super().__init__(merged)
@@ -59,6 +61,15 @@ class LLMStrategy(BaseStrategy):
         self.total_input_tokens: int = 0
         self.total_output_tokens: int = 0
         self.total_calls: int = 0
+        self._budget_exceeded_logged: bool = False
+
+    def _over_budget(self) -> bool:
+        """检查是否超出 token 预算"""
+        cap = int(self.get_param("max_total_tokens") or 0)
+        if cap <= 0:
+            return False
+        used = self.total_input_tokens + self.total_output_tokens
+        return used >= cap
 
     @property
     def llm_model(self) -> str:
@@ -81,6 +92,19 @@ class LLMStrategy(BaseStrategy):
             return Signal(SignalType.HOLD, inst_id, price=0, reason="数据不足")
 
         curr_price = df["close"].iloc[-1]
+
+        # Token 预算检查：超出则直接 HOLD，避免继续烧钱
+        if self._over_budget():
+            if not self._budget_exceeded_logged:
+                logger.warning(
+                    "[LLM] 已达 token 预算上限 %s，后续调用将直接 HOLD",
+                    self.get_param("max_total_tokens"),
+                )
+                self._budget_exceeded_logged = True
+            return Signal(
+                SignalType.HOLD, inst_id, price=curr_price,
+                reason="LLM token 预算已达上限",
+            )
 
         # 构建 Prompt
         user_prompt = self._build_prompt(df, inst_id)

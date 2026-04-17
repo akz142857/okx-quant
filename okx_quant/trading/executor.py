@@ -15,6 +15,8 @@ from okx_quant.client.rest import OKXRestClient
 from okx_quant.data.market import MarketDataFetcher
 from okx_quant.risk.manager import RiskManager, RiskConfig, PositionInfo
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
+from okx_quant.trading.state import StateStore, TraderState
+from okx_quant.utils.timeout import run_with_timeout, TimeoutError as SignalTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -123,6 +125,8 @@ class LiveTrader:
         dashboard: bool = False,
         simulated: bool = True,
         risk_manager: Optional[RiskManager] = None,
+        signal_timeout_s: float = 20.0,
+        state_store: Optional[StateStore] = None,
     ):
         self.client = client
         self.strategy = strategy
@@ -134,22 +138,27 @@ class LiveTrader:
         self._running = False
         self._stop_event = threading.Event()
         self._simulated = simulated
+        self._signal_timeout_s = signal_timeout_s
+
+        # 状态持久化（跨进程 / 崩溃恢复）
+        self._state_store = state_store if state_store is not None else StateStore()
+        self._state = self._state_store.load(inst_id) or TraderState(inst_id=inst_id)
 
         # 决策日志
         self._decision_logger = DecisionLogger(inst_id)
 
-        # Dashboard 相关
+        # Dashboard 相关（部分字段由持久化状态恢复）
         self._use_dashboard = dashboard
         self._dashboard: Optional["Dashboard"] = None
         self._last_price: float = 0.0
-        self._last_signal_name: str = "HOLD"
-        self._last_signal_reason: str = ""
-        self._last_logged_signal: tuple = ("", "")  # (signal_type, reason) 用于日志去重
-        self._last_signal_extra: dict = {}  # 策略指标数据
-        self._buy_fail_until: float = 0.0  # 买入失败冷却截止时间戳
-        self._sell_fail_until: float = 0.0  # 卖出失败冷却截止时间戳
+        self._last_signal_name: str = self._state.last_signal_name
+        self._last_signal_reason: str = self._state.last_signal_reason
+        self._last_logged_signal: tuple = self._state.last_logged_signal
+        self._last_signal_extra: dict = {}
+        self._buy_fail_until: float = self._state.buy_fail_until
+        self._sell_fail_until: float = self._state.sell_fail_until
         self._trade_log: list = []
-        self._tick_count: int = 0
+        self._tick_count: int = self._state.tick_count
         self._start_time: datetime = datetime.now()
         self._consecutive_errors: int = 0
         self._max_backoff: int = 300  # 最大退避 5 分钟
@@ -162,7 +171,9 @@ class LiveTrader:
         self._cached_available_ts: float = 0.0
 
         # 移动止盈 (trailing stop)
-        self._highest_since_entry: dict[str, float] = {}  # inst_id -> 最高价
+        self._highest_since_entry: dict[str, float] = {}
+        if self._state.highest_since_entry > 0:
+            self._highest_since_entry[inst_id] = self._state.highest_since_entry
         self.trailing_atr_mult: float = 2.0  # trailing stop = highest - mult * ATR
 
         # 交易对精度（lotSz / minSz），启动时查询
@@ -219,6 +230,19 @@ class LiveTrader:
         """交易后清除余额缓存，下次查询将强制刷新"""
         self._cached_equity_ts = 0.0
         self._cached_available_ts = 0.0
+
+    def _persist_state(self) -> None:
+        """将当前可持久化字段落盘"""
+        self._state.inst_id = self.inst_id
+        self._state.highest_since_entry = self._highest_since_entry.get(self.inst_id, 0.0)
+        self._state.buy_fail_until = self._buy_fail_until
+        self._state.sell_fail_until = self._sell_fail_until
+        self._state.last_signal_name = self._last_signal_name
+        self._state.last_signal_reason = self._last_signal_reason
+        self._state.last_logged_signal = tuple(self._last_logged_signal)
+        self._state.tick_count = self._tick_count
+        self._state.last_update_ts = time.time()
+        self._state_store.save(self._state)
 
     def _restore_existing_position(self):
         """检测当前交易对是否有已有持仓，恢复到风控"""
@@ -678,15 +702,40 @@ class LiveTrader:
         self.risk.update_equity(equity)
 
         if self.risk.is_halted:
-            logger.warning("[风控] %s，跳过交易", self.risk._halt_reason)
+            logger.warning("[风控] %s，跳过交易", self.risk.halt_reason)
             return
 
         # 止损/止盈检查（传入 df 用于 trailing stop）
         if self._check_sl_tp(current_price, df):
             return
 
-        # 生成策略信号
-        signal = self.strategy.generate_signal(df, self.inst_id)
+        # 生成策略信号（带硬超时；超时则视为 HOLD，保护主循环）
+        try:
+            signal = run_with_timeout(
+                self.strategy.generate_signal,
+                self._signal_timeout_s,
+                df,
+                self.inst_id,
+            )
+        except SignalTimeout:
+            logger.warning(
+                "[信号] %s 策略调用超时 (>%.1fs)，本轮视为 HOLD",
+                self.inst_id, self._signal_timeout_s,
+            )
+            signal = Signal(
+                signal=SignalType.HOLD,
+                inst_id=self.inst_id,
+                price=current_price,
+                reason=f"策略调用超时 (>{self._signal_timeout_s:.0f}s)",
+            )
+        except Exception as e:
+            logger.error("[信号] %s 策略异常: %s", self.inst_id, e, exc_info=True)
+            signal = Signal(
+                signal=SignalType.HOLD,
+                inst_id=self.inst_id,
+                price=current_price,
+                reason=f"策略异常: {e}",
+            )
         self._last_signal_name = signal.signal.value.upper()
         self._last_signal_reason = signal.reason
         self._last_signal_extra = signal.extra or {}
@@ -745,8 +794,16 @@ class LiveTrader:
                 return
             self._sell(signal.reason)
 
+        # 无论本轮是否有交易，都持久化一次状态
+        self._persist_state()
+
     def stop(self):
         self._running = False
         self._stop_event.set()
         self._decision_logger.close()
+        # 退出前尽力保存一次状态
+        try:
+            self._persist_state()
+        except Exception as e:  # noqa: BLE001 — 退出路径容错
+            logger.warning("[状态] 停止时保存失败: %s", e)
         logger.info("实盘交易已停止")

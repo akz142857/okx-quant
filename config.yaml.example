@@ -1,8 +1,10 @@
 # OKX API 配置
+# 提示：所有字段支持 ${VAR} / ${VAR:-default} 从环境变量读取，避免把密钥写入配置文件。
+# 例如：api_key: ${OKX_API_KEY}
 okx:
-  api_key: "your_api_key_here"
-  secret_key: "your_secret_key_here"
-  passphrase: "your_passphrase_here"
+  api_key: "${OKX_API_KEY:-}"
+  secret_key: "${OKX_SECRET_KEY:-}"
+  passphrase: "${OKX_PASSPHRASE:-}"
   # 模拟盘: https://www.okx.com/api/v5 (正式环境)
   # 使用 simulated=true 切换到模拟盘
   simulated: true
@@ -12,63 +14,71 @@ okx:
 
 # 全局风控参数
 risk:
-  max_position_pct: 0.5        # 单笔最大仓位占总资产比例 (50%)
-  max_drawdown_pct: 0.15       # 最大回撤触发停止 (15%)
-  stop_loss_pct: 0.02          # 默认止损比例 (2%)
-  take_profit_pct: 0.04        # 默认止盈比例 (4%)
-  max_open_positions: 1        # 最大同时持仓数
-  min_order_usdt: 1.0          # 最小下单金额 (USDT)
+  max_position_pct: 0.5         # 单笔最大仓位占总资产比例 (50%)
+  max_drawdown_pct: 0.15        # 最大回撤触发停止 (15%)
+  drawdown_recover_ratio: 0.5   # 回撤回落至 max_drawdown * 0.5 自动恢复（0=关闭自动恢复）
+  stop_loss_pct: 0.02           # 默认止损比例 (2%)
+  take_profit_pct: 0.04         # 默认止盈比例 (4%)
+  max_open_positions: 1         # 最大同时持仓数
+  min_order_usdt: 1.0           # 最小下单金额 (USDT)
 
 # 日志配置
 logging:
-  level: "INFO"               # DEBUG / INFO / WARNING / ERROR
+  level: "INFO"                 # DEBUG / INFO / WARNING / ERROR
   file: "logs/quant.log"
+
+# 实盘执行器参数
+executor:
+  signal_timeout_s: 20          # 策略 generate_signal 最大耗时（秒），超时视为 HOLD 避免阻塞主循环
+  state_dir: "state"            # 崩溃恢复状态文件目录
 
 # 回测默认参数
 backtest:
-  initial_capital: 10000.0   # 初始资金 (USDT)
-  fee_rate: 0.001             # 手续费率 (0.1%)
-  slippage: 0.0005            # 滑点 (0.05%)
+  initial_capital: 10000.0      # 初始资金 (USDT)
+  fee_rate: 0.001               # 手续费率 (0.1%)
+  slippage: 0.0005              # 滑点 (0.05%)
 
 # LLM 大模型配置（AI 策略使用）
 llm:
-  provider: "openai"          # openai / claude / deepseek
-  api_key: ""                  # Anthropic API Key (sk-ant-*) 或 Claude Max OAuth token
-  model: "gpt-4o-mini"        # 留空则使用提供商默认模型
-  base_url: "https://api.openai.com/v1"  # 留空则使用提供商默认地址
+  provider: "openai"            # openai / claude / deepseek
+  api_key: "${LLM_API_KEY:-}"   # 推荐通过环境变量注入
+  model: "gpt-4o-mini"          # 留空则使用提供商默认模型
+  base_url: "https://api.openai.com/v1"
   temperature: 0.3
   max_tokens: 1024
   timeout: 30
+  max_total_tokens: 0           # 单次会话 token 预算上限，0 表示不限
 
 # LLM 强力模型配置（多 Agent 策略的辩论+决策使用，llm 作为分析师的 cheap model）
 llm_deep:
-  provider: "claude"          # openai / claude / deepseek
-  api_key: ""                  # 强力模型 API Key
-  model: ""                    # 留空则使用提供商默认模型
-  base_url: ""                 # 留空则使用提供商默认地址
+  provider: "claude"
+  api_key: "${LLM_DEEP_API_KEY:-}"
+  model: ""
+  base_url: ""
   temperature: 0.3
   max_tokens: 2048
   timeout: 60
 
 # 多 Agent 策略参数
 multi_agent:
-  debate_rounds: 2             # 多空辩论轮数
-  confidence_threshold: 0.6    # 低于此置信度 → HOLD
+  debate_rounds: 2              # 多空辩论轮数
+  confidence_threshold: 0.6     # 低于此置信度 → HOLD
+  max_total_tokens: 0           # 单次会话 token 预算上限，0 表示不限
 
 # 因子选币器参数
 screener:
-  min_vol_24h_usdt: 500000    # 最小 24H 成交额 (USDT)
-  min_listing_days: 90        # 最少上线天数
-  pre_filter_top_n: 30        # 硬过滤后保留 top N
-  bar: "4H"                   # K 线周期
-  lookback: 100               # 回看 K 线根数
-  weight_adx: 0.30            # ADX 趋势清晰度权重
-  weight_atr_pct: 0.20        # ATR% 相对波动率权重（中等最优）
-  weight_vol_ratio: 0.15      # 量变比权重
-  weight_roc: 0.15            # ROC 动量权重
-  weight_bandwidth_pctile: 0.20  # 布林带宽百分位权重
-  corr_threshold: 0.85        # 相关性去重阈值
+  min_vol_24h_usdt: 500000      # 最小 24H 成交额 (USDT)
+  min_listing_days: 90          # 最少上线天数
+  pre_filter_top_n: 30          # 硬过滤后保留 top N
+  bar: "4H"                     # K 线周期
+  lookback: 100                 # 回看 K 线根数
+  weight_adx: 0.30              # ADX 趋势清晰度权重
+  weight_atr_pct: 0.20          # ATR% 相对波动率权重（中等最优）
+  weight_vol_ratio: 0.15        # 量变比权重
+  weight_roc: 0.15              # ROC 动量权重
+  weight_bandwidth_pctile: 0.20 # 布林带宽百分位权重
+  corr_threshold: 0.85          # 相关性去重阈值
 
 # 新闻数据源（AI 策略可选）
 news:
-  auth_token: ""              # CryptoPanic API token（可选，不填也能用）
+  auth_token: "${CRYPTOPANIC_TOKEN:-}"  # CryptoPanic API token（可选，不填也能用）

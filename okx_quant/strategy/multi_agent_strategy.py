@@ -37,6 +37,8 @@ class MultiAgentStrategy(BaseStrategy):
             "candle_count": 20,
             "news_count": 5,
             "debate_rounds": 2,
+            # 单次会话 (run) 的 token 预算上限，<=0 表示不限
+            "max_total_tokens": 0,
         }
         merged = {**defaults, **(params or {})}
         super().__init__(merged)
@@ -45,6 +47,15 @@ class MultiAgentStrategy(BaseStrategy):
         self._deep_llm_client: Optional[LLMClient] = None   # strong model
         self._news_fetcher: Optional[CryptoNewsFetcher] = None
         self._pipeline = None  # 延迟初始化
+        self._budget_exceeded_logged: bool = False
+
+    def _over_budget(self) -> bool:
+        """检查是否超出 token 预算"""
+        cap = int(self.get_param("max_total_tokens") or 0)
+        if cap <= 0 or self._pipeline is None:
+            return False
+        used = self._pipeline.tracker.summary().get("total_tokens", 0)
+        return used >= cap
 
     # ------------------------------------------------------------------
     # 依赖注入（兼容 make_strategy 的调用约定）
@@ -116,6 +127,19 @@ class MultiAgentStrategy(BaseStrategy):
             )
 
         curr_price = df["close"].iloc[-1]
+
+        # Token 预算检查（pipeline 已初始化后才可评估）
+        if self._over_budget():
+            if not self._budget_exceeded_logged:
+                logger.warning(
+                    "[MultiAgent] 已达 token 预算上限 %s，后续调用将直接 HOLD",
+                    self.get_param("max_total_tokens"),
+                )
+                self._budget_exceeded_logged = True
+            return Signal(
+                SignalType.HOLD, inst_id, price=curr_price,
+                reason="LLM token 预算已达上限",
+            )
 
         # 构建指标上下文
         indicators = self._build_indicators(df, inst_id)

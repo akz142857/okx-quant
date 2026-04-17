@@ -12,6 +12,18 @@ logger = logging.getLogger(__name__)
 # OKX K 线原始字段顺序
 _CANDLE_COLS = ["ts", "open", "high", "low", "close", "vol", "vol_ccy", "vol_ccy_quote", "confirm"]
 
+# bar 字符串 → pandas Timedelta
+_BAR_MINUTES = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1H": 60, "2H": 120, "4H": 240, "6H": 360, "12H": 720,
+    "1D": 1440, "1W": 10080, "1M": 43200,
+}
+
+
+def _bar_to_timedelta(bar: str) -> Optional[pd.Timedelta]:
+    minutes = _BAR_MINUTES.get(bar)
+    return pd.Timedelta(minutes=minutes) if minutes else None
+
 
 class MarketDataFetcher:
     """封装 OKX 行情数据拉取，返回易用的 DataFrame"""
@@ -51,9 +63,11 @@ class MarketDataFetcher:
         """获取大量历史 K 线（自动翻页）
 
         OKX 单次最多返回 300 条，此方法自动翻页直到获取 total 条。
+        翻页间使用轻量退避防限流；REST 客户端自身也会在 429 / 50011 时重试。
         """
         all_raw: list = []
-        after = None
+        after: Optional[str] = None
+        seen_after: set[str] = set()
         batch = min(300, total)
 
         while len(all_raw) < total:
@@ -61,13 +75,44 @@ class MarketDataFetcher:
             if not raw:
                 break
             all_raw.extend(raw)
-            after = raw[-1][0]  # 最早的时间戳，用于继续向前翻页
+
+            # 翻页游标：取最早一条的时间戳继续向前
+            next_after = str(raw[-1][0])
+            if next_after in seen_after:
+                # 防止相同游标无限循环
+                logger.warning("分页游标重复（%s），提前终止", next_after)
+                break
+            seen_after.add(next_after)
+            after = next_after
+
             if len(raw) < batch:
                 break
-            time.sleep(0.2)  # 防止触发频率限制
+            time.sleep(0.3)  # 轻量退避，配合 REST 层限流重试
 
         df = self._parse_candles(all_raw)
+        if df.empty:
+            return df
+
+        # 校验时间戳连续性（单位：周期分钟）— 仅告警，不阻断
+        self._warn_if_gaps(df, bar)
         return df.tail(total).reset_index(drop=True)
+
+    @staticmethod
+    def _warn_if_gaps(df: pd.DataFrame, bar: str) -> None:
+        """检测 K 线是否存在时间跳跃（缺失/重叠）"""
+        if len(df) < 2:
+            return
+        period = _bar_to_timedelta(bar)
+        if period is None:
+            return
+        diffs = df["ts"].diff().dropna()
+        # 容忍 ±50% 漂移
+        gaps = diffs[(diffs > period * 1.5) | (diffs < period * 0.5)]
+        if not gaps.empty:
+            logger.warning(
+                "K 线时间戳存在 %d 处跳跃/重叠（周期=%s），最大间隔=%s",
+                len(gaps), bar, gaps.max(),
+            )
 
     def _parse_candles(self, raw: list[list]) -> pd.DataFrame:
         if not raw:

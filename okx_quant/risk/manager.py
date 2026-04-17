@@ -19,6 +19,9 @@ class RiskConfig:
     max_open_positions: int = 1       # 最大同时持仓数（现货策略通常为 1）
     min_order_usdt: float = 1.0       # 最小下单 USDT 价值（低于此值不下单）
     max_daily_loss_pct: float = 0.05  # 当日最大亏损比例（触发后当日停止交易）
+    # 回撤自动恢复阈值：当前回撤低于 max_drawdown_pct * 此比例时解除停盘
+    # 设为 0 则不自动恢复（保留原有语义，需手动 reset_daily）
+    drawdown_recover_ratio: float = 0.5
 
 
 @dataclass
@@ -160,7 +163,11 @@ class RiskManager:
     # -------------------------------------------------------------------------
 
     def update_equity(self, equity: float):
-        """更新当前净值，检测最大回撤"""
+        """更新当前净值，检测最大回撤
+
+        - 达到阈值 → 触发停盘
+        - 低于阈值 * drawdown_recover_ratio → 自动解除停盘（若 ratio > 0 且因回撤停盘）
+        """
         if equity <= 0:
             logger.debug("[风控] 忽略无效净值: %.2f", equity)
             return
@@ -169,10 +176,27 @@ class RiskManager:
             self.peak_equity = max(self.peak_equity, equity)
 
             drawdown = (self.peak_equity - equity) / self.peak_equity if self.peak_equity > 0 else 0
+
             if drawdown >= self.config.max_drawdown_pct and not self._trading_halted:
                 self._trading_halted = True
                 self._halt_reason = f"最大回撤 {drawdown*100:.1f}% 触发保护，停止交易"
                 logger.warning("[风控] %s", self._halt_reason)
+                return
+
+            # 回撤自动恢复（仅对因回撤而停盘的情形生效）
+            recover_ratio = self.config.drawdown_recover_ratio
+            if (
+                self._trading_halted
+                and recover_ratio > 0
+                and "最大回撤" in self._halt_reason
+                and drawdown <= self.config.max_drawdown_pct * recover_ratio
+            ):
+                logger.info(
+                    "[风控] 回撤回落至 %.2f%%（阈值 %.2f%%），恢复交易",
+                    drawdown * 100, self.config.max_drawdown_pct * recover_ratio * 100,
+                )
+                self._trading_halted = False
+                self._halt_reason = ""
 
     def reset_daily(self, equity: float):
         """每日开盘时重置当日亏损统计"""
@@ -185,6 +209,11 @@ class RiskManager:
     @property
     def is_halted(self) -> bool:
         return self._trading_halted
+
+    @property
+    def halt_reason(self) -> str:
+        """对外暴露的停盘原因（只读）"""
+        return self._halt_reason
 
     @property
     def current_drawdown_pct(self) -> float:

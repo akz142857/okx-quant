@@ -24,10 +24,9 @@ import logging
 import os
 import sys
 
-import yaml
-
 logger = logging.getLogger(__name__)
 
+from okx_quant.config import load_yaml
 from okx_quant.strategy import STRATEGY_REGISTRY, is_llm_strategy
 
 VALID_BARS = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D", "1W"]
@@ -56,8 +55,7 @@ def load_config(path: str = "config.yaml") -> dict:
         if os.path.exists(example):
             print(f"配置文件不存在，请复制 {example} 为 {path} 并填写 API Key")
         return {}
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    return load_yaml(path)
 
 
 def make_client(cfg: dict):
@@ -85,6 +83,13 @@ def make_strategy(name: str, params: dict | None = None, cfg: dict | None = None
     if issubclass(cls, MultiAgentStrategy) and cfg:
         ma_cfg = cfg.get("multi_agent", {})
         params = {**ma_cfg, **(params or {})}
+
+    # 单 LLM 策略：注入 llm.max_total_tokens 预算
+    if cfg and is_llm_strategy(name) and not issubclass(cls, MultiAgentStrategy):
+        llm_cfg = cfg.get("llm", {})
+        budget = llm_cfg.get("max_total_tokens")
+        if budget is not None:
+            params = {**(params or {}), "max_total_tokens": budget}
 
     strategy = cls(params)
 
@@ -287,10 +292,14 @@ def _run_screen(cfg, top_n: int, bar: str, max_price: float = 0) -> list[str]:
 
 def cmd_live(args, cfg):
     from okx_quant.trading.executor import LiveTrader
+    from okx_quant.trading.state import StateStore
     from okx_quant.risk.manager import RiskConfig
 
     _validate_bar(args.bar)
     client = make_client(cfg)
+    executor_cfg = cfg.get("executor", {})
+    signal_timeout_s = float(executor_cfg.get("signal_timeout_s", 20))
+    state_store = StateStore(state_dir=executor_cfg.get("state_dir", "state"))
 
     # 优先检测已有持仓（无论选币结果如何，已有持仓必须纳入监控）
     existing_positions: list[str] = []
@@ -348,6 +357,7 @@ def cmd_live(args, cfg):
         max_drawdown_pct=risk_cfg_raw.get("max_drawdown_pct", 0.15),
         max_open_positions=risk_cfg_raw.get("max_open_positions", 1),
         min_order_usdt=risk_cfg_raw.get("min_order_usdt", 5.0),
+        drawdown_recover_ratio=risk_cfg_raw.get("drawdown_recover_ratio", 0.5),
     )
 
     simulated = cfg.get("okx", {}).get("simulated", True)
@@ -376,6 +386,8 @@ def cmd_live(args, cfg):
             interval_seconds=args.interval,
             dashboard=use_dashboard,
             simulated=simulated,
+            signal_timeout_s=signal_timeout_s,
+            state_store=state_store,
         )
         supervisor.run()
         return
@@ -393,6 +405,8 @@ def cmd_live(args, cfg):
     trader = LiveTrader(
         client, strategy, inst_id=instruments[0], risk_config=risk_config,
         dashboard=use_dashboard, simulated=simulated,
+        signal_timeout_s=signal_timeout_s,
+        state_store=state_store,
     )
     trader.run(bar=args.bar, lookback=100, interval_seconds=args.interval)
 

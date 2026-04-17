@@ -11,6 +11,7 @@ from dataclasses import replace
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.risk.manager import PositionInfo, RiskConfig, RiskManager
 from okx_quant.trading.executor import LiveTrader
+from okx_quant.trading.state import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,8 @@ class Supervisor:
         interval_seconds: int = 60,
         dashboard: bool = True,
         simulated: bool = True,
+        signal_timeout_s: float = 20.0,
+        state_store: "StateStore | None" = None,
     ):
         self.client = client
         self.instruments = instruments
@@ -54,6 +57,8 @@ class Supervisor:
         self._use_dashboard = dashboard
         self._simulated = simulated
         self._start_time = datetime.now()
+        self._signal_timeout_s = signal_timeout_s
+        self._state_store = state_store if state_store is not None else StateStore()
 
         # 共享风控（副本，不修改调用方）
         # max_open_positions 自动设为币种数
@@ -77,6 +82,8 @@ class Supervisor:
                 dashboard=False,
                 simulated=simulated,
                 risk_manager=self.risk,
+                signal_timeout_s=self._signal_timeout_s,
+                state_store=self._state_store,
             )
             self._workers.append(trader)
 

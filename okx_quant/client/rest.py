@@ -21,6 +21,14 @@ class OKXRestClient:
 
     BASE_URL = "https://www.okx.com"
 
+    # OKX V5 错误码：触发速率限制（需退避重试）
+    # 参考: https://www.okx.com/docs-v5/zh/#error-code
+    _RATE_LIMIT_CODES: frozenset[str] = frozenset({
+        "50011",  # User/IP 限速
+        "50013",  # 系统繁忙
+        "50061",  # 批量下单过快
+    })
+
     def __init__(
         self,
         api_key: str = "",
@@ -106,7 +114,8 @@ class OKXRestClient:
         if self.simulated:
             headers["x-simulated-trading"] = "1"
 
-        last_exc = None
+        data: Any = None
+        last_exc: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
                 resp = self._session.request(
@@ -117,39 +126,60 @@ class OKXRestClient:
                     data=body_str if body_str else None,
                     timeout=self.timeout,
                 )
+                # HTTP 429 显式退避
+                if resp.status_code == 429:
+                    wait = self._backoff_delay(attempt, resp.headers.get("Retry-After"))
+                    logger.warning(
+                        "HTTP 429 限速 (%d/%d)，%.1fs 后重试: %s %s",
+                        attempt, self.max_retries, wait, method, url,
+                    )
+                    if attempt < self.max_retries:
+                        time.sleep(wait)
+                        if auth:
+                            headers.update(self._refresh_auth(method, path, params, body_str))
+                        continue
                 resp.raise_for_status()
                 data = resp.json()
-                break
             except (requests.ConnectionError, requests.Timeout) as e:
                 last_exc = e
                 # SSL/连接错误后清理连接池，避免复用损坏的连接
                 self._session.close()
                 self._session = self._make_session()
                 if attempt < self.max_retries:
-                    wait = min(2 ** attempt, 10)  # 2s, 4s, 8s, 10s
+                    wait = self._backoff_delay(attempt)
                     logger.warning(
-                        "HTTP 请求超时/连接失败 (%d/%d)，%ds 后重试: %s %s",
+                        "HTTP 请求超时/连接失败 (%d/%d)，%.1fs 后重试: %s %s",
                         attempt, self.max_retries, wait, method, url,
                     )
                     time.sleep(wait)
-                    # 重试需刷新签名时间戳
                     if auth:
-                        sign_path = path
-                        if params:
-                            from urllib.parse import urlencode
-                            sign_path = f"{path}?{urlencode(params)}"
-                        headers.update(self._auth_headers(method, sign_path, body_str))
-                else:
-                    logger.error("HTTP 请求失败 (已重试 %d 次): %s %s -> %s", self.max_retries, method, url, e)
-                    raise
+                        headers.update(self._refresh_auth(method, path, params, body_str))
+                    continue
+                logger.error("HTTP 请求失败 (已重试 %d 次): %s %s -> %s", self.max_retries, method, url, e)
+                raise
             except requests.RequestException as e:
                 logger.error("HTTP 请求失败: %s %s -> %s", method, url, e)
                 raise
 
-        if data.get("code") != "0":
-            msg = data.get("msg", "未知错误")
+            # 解析 OKX 业务错误码
             code = data.get("code")
-            # 解析 data 数组中的详细错误信息（sCode / sMsg）
+            if code == "0":
+                return data.get("data")
+
+            # 命中速率限制码 → 退避后重试
+            if code in self._RATE_LIMIT_CODES and attempt < self.max_retries:
+                wait = self._backoff_delay(attempt)
+                logger.warning(
+                    "OKX 限速 [%s] (%d/%d)，%.1fs 后重试: %s %s",
+                    code, attempt, self.max_retries, wait, method, url,
+                )
+                time.sleep(wait)
+                if auth:
+                    headers.update(self._refresh_auth(method, path, params, body_str))
+                continue
+
+            # 其它业务错误直接抛出
+            msg = data.get("msg", "未知错误")
             details = ""
             items = data.get("data")
             if isinstance(items, list):
@@ -159,7 +189,35 @@ class OKXRestClient:
             logger.error("OKX API 错误 [%s]: %s%s", code, msg, details)
             raise RuntimeError(f"OKX API Error [{code}]: {msg}{details}")
 
-        return data.get("data")
+        # 重试耗尽仍未成功
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError(f"OKX API 请求失败（已重试 {self.max_retries} 次）: {method} {url}")
+
+    @staticmethod
+    def _backoff_delay(attempt: int, retry_after: Optional[str] = None) -> float:
+        """指数退避延迟，支持服务端 Retry-After 头部"""
+        if retry_after:
+            try:
+                return max(float(retry_after), 0.5)
+            except (TypeError, ValueError):
+                pass
+        # 2s, 4s, 8s, 16s ... 上限 30s
+        return min(2 ** attempt, 30.0)
+
+    def _refresh_auth(
+        self,
+        method: str,
+        path: str,
+        params: Optional[dict],
+        body_str: str,
+    ) -> dict:
+        """重试前刷新签名（时间戳必须更新）"""
+        sign_path = path
+        if params:
+            from urllib.parse import urlencode
+            sign_path = f"{path}?{urlencode(params)}"
+        return self._auth_headers(method, sign_path, body_str)
 
     def get(self, path: str, params: dict | None = None, auth: bool = False) -> Any:
         return self._request("GET", path, params=params, auth=auth)

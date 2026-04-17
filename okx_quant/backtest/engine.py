@@ -1,12 +1,22 @@
-"""事件驱动回测引擎"""
+"""事件驱动回测引擎
+
+执行约定：
+  - 信号由第 i 根 K 线收盘后生成，基于 history[: i+1] 的数据。
+  - 订单在第 i+1 根 K 线的开盘价成交，滑点作用于开盘价。
+  - 止损/止盈在第 i+1 根 K 线内依 high/low 检查：
+      · 同一根 K 线内若 low <= SL 且 high >= TP，保守假设先触发止损
+        （open→low→high→close 路径，最坏情形）。
+      · 仅触发其一则按命中价平仓。
+"""
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
+
 import pandas as pd
 
 from okx_quant.indicators import atr as calc_atr
-from okx_quant.strategy.base import BaseStrategy, SignalType
+from okx_quant.strategy.base import BaseStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -40,20 +50,14 @@ class BacktestResult:
 
 
 class BacktestEngine:
-    """简单现货回测引擎
+    """现货多头回测引擎
 
     特性:
-    - 每次只持有一个方向的仓位（无做空）
-    - 支持止损/止盈自动出场
-    - 计算手续费和滑点
-    - 输出权益曲线和绩效指标
-
-    用法::
-
-        engine = BacktestEngine(initial_capital=10000, fee_rate=0.001, slippage=0.0005)
-        result = engine.run(df, strategy, inst_id="BTC-USDT")
-        report = BacktestReport(result)
-        report.print_summary()
+    - 单向持仓（无做空），最多一笔
+    - 信号 → 下一根 K 线开盘价成交
+    - SL/TP 在 K 线内用 high/low 路径判断（保守偏向止损）
+    - 支持移动止盈（take_profit == 0 时启用 trailing ATR stop）
+    - 手续费+滑点建模，计算权益曲线与常规指标
     """
 
     def __init__(
@@ -78,7 +82,7 @@ class BacktestEngine:
         """执行回测
 
         Args:
-            df: K 线 DataFrame，含 ts/open/high/low/close/vol
+            df: K 线 DataFrame，含 ts/open/high/low/close/vol，按时间升序
             strategy: 策略实例
             inst_id: 交易对
             warmup: 预热 K 线数（不参与交易的最初 N 根）
@@ -86,6 +90,9 @@ class BacktestEngine:
         Returns:
             BacktestResult
         """
+        if "open" not in df.columns:
+            raise ValueError("K 线 DataFrame 必须包含 open 列以支持下根 K 线开盘成交")
+
         capital = self.initial_capital
         position: Optional[Trade] = None
         trades: list[Trade] = []
@@ -95,15 +102,57 @@ class BacktestEngine:
         # 预计算 ATR 序列，供 trailing stop 使用
         atr_series = calc_atr(df)
 
-        for i in range(1, len(df)):
-            bar = df.iloc[i]
-            history = df.iloc[: i + 1]
-            ts = bar["ts"]
-            close = bar["close"]
-            high = bar["high"]
-            low = bar["low"]
+        # 待执行订单：由前一根 K 线收盘生成，于当前 K 线开盘成交
+        pending_entry: Optional[dict] = None  # {size_pct, sl, tp, reason}
+        pending_exit: bool = False
+        pending_exit_reason: str = ""
 
-            # 移动止盈：更新最高价并上移止损
+        n = len(df)
+        for i in range(n):
+            bar = df.iloc[i]
+            ts = bar["ts"]
+            open_px = float(bar["open"])
+            high = float(bar["high"])
+            low = float(bar["low"])
+            close = float(bar["close"])
+
+            # ---------- 1. 执行上一根 K 线生成的挂单 ----------
+            if pending_exit and position and position.is_open:
+                exit_price = open_px * (1 - self.slippage)
+                capital = self._close_position(position, exit_price, ts, pending_exit_reason, capital)
+                trades.append(position)
+                position = None
+                highest_since_entry = 0.0
+            pending_exit = False
+            pending_exit_reason = ""
+
+            if pending_entry and position is None:
+                entry_price = open_px * (1 + self.slippage)
+                cost = capital * pending_entry["size_pct"]
+                if cost > 0 and entry_price > 0:
+                    size = cost / entry_price
+                    fee = cost * self.fee_rate
+                    capital -= cost + fee
+
+                    sl = pending_entry["sl"]
+                    tp = pending_entry["tp"]
+                    position = Trade(
+                        open_ts=ts,
+                        close_ts=None,
+                        inst_id=inst_id,
+                        direction="long",
+                        entry_price=entry_price,
+                        size=size,
+                        fee=fee,
+                        reason_open=pending_entry["reason"],
+                        stop_loss=sl,
+                        take_profit=tp,
+                    )
+                    highest_since_entry = entry_price
+                    logger.debug("[%s] 开仓 %.6f @ %.4f  SL=%.4f TP=%.4f", ts, size, entry_price, sl, tp)
+            pending_entry = None
+
+            # ---------- 2. 持仓期间 trailing stop 调整 ----------
             if position and position.is_open:
                 if high > highest_since_entry:
                     highest_since_entry = high
@@ -115,63 +164,43 @@ class BacktestEngine:
                         if trailing_stop > position.stop_loss:
                             position.stop_loss = trailing_stop
 
-            # 检查止损/止盈（在生成信号前执行，模拟 K 线内触发）
+            # ---------- 3. 当根 K 线内检查 SL/TP 触发 ----------
             if position and position.is_open:
-                exit_price, exit_reason = self._check_sl_tp(position, high, low)
+                exit_price, exit_reason = self._check_sl_tp(position, open_px, high, low)
                 if exit_price:
                     capital = self._close_position(position, exit_price, ts, exit_reason, capital)
                     trades.append(position)
                     position = None
                     highest_since_entry = 0.0
 
-            # 跳过预热期
+            # ---------- 4. 基于当根 K 线收盘生成下一根 K 线的挂单 ----------
             if i < warmup:
                 equity_records.append((ts, capital))
                 continue
 
-            # 生成信号
-            signal = strategy.generate_signal(history, inst_id)
+            # 回测最后一根不再挂单（无下一根可执行）
+            if i < n - 1:
+                history = df.iloc[: i + 1]
+                signal = strategy.generate_signal(history, inst_id)
 
-            # 执行交易逻辑
-            if position is None:
-                if signal.is_buy:
-                    # 开仓，下一根 K 线开盘价成交（这里用当前收盘价近似）
-                    entry = close * (1 + self.slippage)
-                    cost = capital * signal.size_pct
-                    size = cost / entry
-                    fee = cost * self.fee_rate
-                    capital -= cost + fee
+                if position is None and signal.is_buy and signal.size_pct > 0:
+                    pending_entry = {
+                        "size_pct": min(max(signal.size_pct, 0.0), 1.0),
+                        "sl": signal.stop_loss,
+                        "tp": signal.take_profit,
+                        "reason": signal.reason,
+                    }
+                elif position is not None and signal.is_sell:
+                    pending_exit = True
+                    pending_exit_reason = signal.reason or "策略卖出"
 
-                    position = Trade(
-                        open_ts=ts,
-                        close_ts=None,
-                        inst_id=inst_id,
-                        direction="long",
-                        entry_price=entry,
-                        size=size,
-                        fee=fee,
-                        reason_open=signal.reason,
-                        stop_loss=signal.stop_loss,
-                        take_profit=signal.take_profit,
-                    )
-                    highest_since_entry = entry
-                    logger.debug("[%s] 开仓 %.4f @ %.4f  SL=%.4f", ts, size, entry, signal.stop_loss)
-
-            else:
-                if signal.is_sell:
-                    exit_price = close * (1 - self.slippage)
-                    capital = self._close_position(position, exit_price, ts, signal.reason, capital)
-                    trades.append(position)
-                    position = None
-                    highest_since_entry = 0.0
-
-            # 记录当前权益（持仓市值 + 现金）
+            # 记录当前权益（持仓市值按收盘价 + 现金）
             portfolio_value = capital + (position.size * close if position else 0)
             equity_records.append((ts, portfolio_value))
 
         # 回测结束，强制平仓
         if position and position.is_open:
-            final_close = df["close"].iloc[-1]
+            final_close = float(df["close"].iloc[-1])
             capital = self._close_position(
                 position, final_close, df["ts"].iloc[-1], "回测结束强制平仓", capital
             )
@@ -187,15 +216,38 @@ class BacktestEngine:
         return BacktestResult(trades=trades, equity_curve=equity_series, metrics=metrics)
 
     def _check_sl_tp(
-        self, pos: Trade, high: float, low: float
+        self, pos: Trade, open_px: float, high: float, low: float
     ) -> tuple[float, str]:
-        """判断 K 线内是否触发止损/止盈"""
-        if pos.stop_loss > 0 and low <= pos.stop_loss:
-            # take_profit == 0 时止损由 trailing stop 动态上移
-            reason = "止损触发（移动止盈）" if pos.take_profit == 0 else "止损触发"
-            return pos.stop_loss, reason
-        if pos.take_profit > 0 and high >= pos.take_profit:
-            return pos.take_profit, "止盈触发"
+        """判断 K 线内是否触发止损/止盈（路径不可知情形下保守取最差）
+
+        规则：
+          - 若开盘价已穿越 SL/TP，按开盘价立即触发。
+          - 若同根 K 线 high/low 同时触及两者，假设先到 SL（最坏情形）。
+          - 仅触及其一则按触及价触发。
+        """
+        sl = pos.stop_loss
+        tp = pos.take_profit
+
+        # 开盘跳空场景
+        if sl > 0 and open_px <= sl:
+            reason = "止损触发（跳空）"
+            return open_px, reason
+        if tp > 0 and open_px >= tp:
+            reason = "止盈触发（跳空）"
+            return open_px, reason
+
+        hit_sl = sl > 0 and low <= sl
+        hit_tp = tp > 0 and high >= tp
+
+        if hit_sl and hit_tp:
+            # 路径未知 → 保守按止损成交
+            reason = "止损触发（同K线双命中，保守假设）"
+            return sl, reason
+        if hit_sl:
+            reason = "止损触发（移动止盈）" if tp == 0 else "止损触发"
+            return sl, reason
+        if hit_tp:
+            return tp, "止盈触发"
         return 0.0, ""
 
     def _close_position(
@@ -206,12 +258,13 @@ class BacktestEngine:
         pos.exit_price = exit_price
         pos.close_ts = ts
         pos.pnl = round(pnl, 6)
-        pos.pnl_pct = round(pnl / (pos.entry_price * pos.size) * 100, 4)
+        denom = pos.entry_price * pos.size
+        pos.pnl_pct = round(pnl / denom * 100, 4) if denom > 0 else 0.0
         pos.fee += fee
         pos.reason_close = reason
         pos.is_open = False
         logger.debug(
-            "[%s] 平仓 %.4f @ %.4f  PnL=%.2f USDT (%.2f%%)",
+            "[%s] 平仓 %.6f @ %.4f  PnL=%.2f USDT (%.2f%%)",
             ts, pos.size, exit_price, pnl, pos.pnl_pct,
         )
         return capital + pos.size * exit_price - fee
