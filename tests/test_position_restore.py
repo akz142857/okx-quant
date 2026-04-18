@@ -79,3 +79,30 @@ def test_discover_positions_returns_empty_on_exchange_error():
 
     ex = BrokenExchange()
     assert discover_positions(ex, "USDT") == []
+
+
+@pytest.mark.unit
+def test_discover_positions_filters_dust():
+    """粉尘余额（< $1 USDT 估值）应被忽略"""
+    ex = _build_fake()
+    # 真实仓位：0.1 BTC @ 50000 = $5000 ✓
+    ex.set_holding("BTC", balance=0.1, available=0.1)
+    ex.set_ticker("BTC-USDT", last=50000.0)
+    # 粉尘：4.55e-07 CFX @ $0.06 = $0.00000003  ✗
+    ex.set_holding("CFX", balance=4.55e-07, available=4.55e-07)
+    ex.set_ticker("CFX-USDT", last=0.06)
+
+    out = discover_positions(ex, "USDT", min_usdt_value=1.0)
+    assert {inst for inst, _ in out} == {"BTC-USDT"}
+
+
+@pytest.mark.unit
+def test_restore_to_risk_skips_dust():
+    """粉尘持仓不应被登记到 RiskManager"""
+    ex = _build_fake()
+    ex.set_holding("CFX", balance=4.55e-07, available=4.55e-07)
+    ex.set_ticker("CFX-USDT", last=0.06)
+    risk = RiskManager(RiskConfig())
+    n = restore_to_risk(ex, risk, ["CFX-USDT"], min_usdt_value=1.0)
+    assert n == 0
+    assert not risk.has_position("CFX-USDT")

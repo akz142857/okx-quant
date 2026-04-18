@@ -15,10 +15,19 @@ from okx_quant.risk.manager import PositionInfo, RiskManager
 logger = logging.getLogger(__name__)
 
 
-def discover_positions(exchange: Exchange, quote_ccy: str = "USDT") -> list[tuple[str, float]]:
+def discover_positions(
+    exchange: Exchange,
+    quote_ccy: str = "USDT",
+    *,
+    min_usdt_value: float = 1.0,
+) -> list[tuple[str, float]]:
     """扫描账户余额，返回非计价币种持仓列表 [(inst_id, balance), ...]。
 
-    仅读取交易所状态，不修改任何内部状态。供 CLI 展示/扩展交易列表使用。
+    粉尘过滤：余额折算后低于 ``min_usdt_value`` 的持仓会被跳过，
+    避免 OKX 账户里残留的 token dust（0.000xxx ENA/APT/CFX 等）
+    被误认为真实仓位而占用 instrument slot。
+
+    仅读取交易所状态，不修改任何内部状态。
     """
     try:
         snap = exchange.get_balance()
@@ -28,6 +37,21 @@ def discover_positions(exchange: Exchange, quote_ccy: str = "USDT") -> list[tupl
     results: list[tuple[str, float]] = []
     for holding in snap.non_quote_holdings(quote_ccy):
         inst_id = f"{holding.ccy}-{quote_ccy}"
+        # 查 ticker 估算 USDT 价值 → 过滤粉尘
+        # price<=0 视为 ticker 不可靠，保守保留（后续 restore_to_risk 还会二次过滤）
+        if min_usdt_value > 0:
+            try:
+                price = exchange.get_ticker(inst_id).last
+                if price > 0:
+                    value_usdt = holding.balance * price
+                    if value_usdt < min_usdt_value:
+                        logger.info(
+                            "忽略粉尘持仓 %s（%.8f × $%.6f = $%.6f < $%.2f）",
+                            inst_id, holding.balance, price, value_usdt, min_usdt_value,
+                        )
+                        continue
+            except Exception:  # noqa: BLE001
+                pass
         results.append((inst_id, holding.balance))
     return results
 
@@ -38,6 +62,7 @@ def restore_to_risk(
     inst_ids: "list[str] | set[str]",
     *,
     quote_ccy: str = "USDT",
+    min_usdt_value: float = 1.0,
 ) -> int:
     """把在 inst_ids 范围内且已存在余额的持仓登记到 RiskManager。
 
@@ -77,6 +102,14 @@ def restore_to_risk(
         # 使用 available（非锁定余额）作为可卖数量；cashBal 包含冻结部分，
         # 作为仓位登记会高估可平数量
         size = holding.available if holding.available > 0 else holding.balance
+
+        # 粉尘过滤：总价值 < min_usdt_value 的忽略（OKX 账户残留）
+        if min_usdt_value > 0 and size * price < min_usdt_value:
+            logger.info(
+                "忽略粉尘持仓 %s（%.8f × $%.6f = $%.6f < $%.2f）",
+                inst_id, size, price, size * price, min_usdt_value,
+            )
+            continue
 
         sl = round(price * (1 - risk.config.stop_loss_pct), 8)
         tp = round(price * (1 + risk.config.take_profit_pct), 8)
