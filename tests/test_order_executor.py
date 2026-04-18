@@ -67,12 +67,48 @@ def test_sell_removes_position_and_orders():
     # 先买入
     oe.buy(price=50000, size_coin=0.01, sl=0, tp=0, reason="entry")
     assert risk.has_position("BTC-USDT")
-    # 再卖出
+    # 模拟 OKX 扣手续费后实际到账
+    ex.set_holding("BTC", balance=0.00999, available=0.00999)
+    # 卖出 —— 新逻辑会查 exchange.available 并取 min(pos.size, 0.00999)
     ok = oe.sell(last_price=51000, reason="tp")
     assert ok is True
     assert not risk.has_position("BTC-USDT")
-    # 最近一单是 sell
     assert ex.orders[-1].side == "sell"
+    # 实际卖单量应为 exchange 可用，而非 pos.size
+    assert ex.orders[-1].size == pytest.approx(0.00999)
+
+
+@pytest.mark.unit
+def test_sell_uses_exchange_available_not_pos_size():
+    """回归测试：买入 0.01 BTC，手续费后实际到账 0.00999；
+    sell 应当用 0.00999 而不是 0.01 下单，避免 OKX 51008。"""
+    oe, ex, risk = _build_order_executor(min_sz=0.0001)
+    from okx_quant.risk.manager import PositionInfo
+    risk.add_position(PositionInfo("BTC-USDT", size=0.01, entry_price=50000))
+    ex.set_holding("BTC", balance=0.00999, available=0.00999)
+
+    ok = oe.sell(last_price=50100, reason="死叉")
+    assert ok is True
+    placed = ex.orders[-1]
+    # 关键断言：下单量 ≤ 交易所实际可用
+    assert placed.size <= 0.00999 + 1e-9
+    assert placed.size < 0.01
+
+
+@pytest.mark.unit
+def test_sell_cleans_phantom_when_exchange_balance_dust():
+    """实际余额低于 minSz → 自动清除幻影仓位，不发订单"""
+    oe, ex, risk = _build_order_executor(min_sz=0.01)
+    from okx_quant.risk.manager import PositionInfo
+    risk.add_position(PositionInfo("BTC-USDT", size=0.01, entry_price=50000))
+    # 交易所只有粉尘余额（< minSz 0.01）
+    ex.set_holding("BTC", balance=0.005, available=0.005)
+
+    ok = oe.sell(last_price=50000, reason="死叉")
+    assert ok is False
+    assert not risk.has_position("BTC-USDT")
+    # 不应该向交易所发单
+    assert len(ex.orders) == 0
 
 
 @pytest.mark.unit

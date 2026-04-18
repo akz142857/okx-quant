@@ -142,23 +142,44 @@ class OrderExecutor:
     # ------------------ 卖 ------------------
 
     def sell(self, last_price: float, reason: str) -> bool:
-        """全仓卖出；成功返回 True"""
+        """全仓卖出；成功返回 True
+
+        关键修复：以交易所**实际可用余额**为准下单，不能用 pos.size。
+        原因：买入 market 单以 base_ccy 计时，OKX 会从 base_ccy 扣手续费
+        （约 0.1%），实际到账 < 下单数量。直接卖 pos.size 会触发 51008。
+        """
         pos = self.risk.get_position(self.inst_id)
         if not pos:
             logger.warning("[下单] 无持仓，跳过卖出")
             return False
 
-        sell_size = self.round_lot_size(pos.size)
-        if sell_size <= 0:
-            # 幽灵仓位：取整后低于 lotSz，交易所无实际持仓。
-            # 仅清理 RiskManager 本地状态，不触发 on_sell_success
-            # （那是成交回调；这里没有真实成交）
-            logger.warning("[下单] 卖出数量取整后为 0，清除幽灵仓位 %s", self.inst_id)
+        # 查实际可用余额并取 min（通常小于 pos.size，因为手续费扣减）
+        base_ccy = self.inst_id.split("-")[0]
+        try:
+            snap = self.exchange.get_balance()
+            holding = snap.holding(base_ccy)
+            exchange_available = holding.available if holding else 0.0
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[下单] 查询实际余额失败: %s；退化为 pos.size", e)
+            exchange_available = pos.size
+
+        effective_size = min(pos.size, exchange_available)
+        sell_size = self.round_lot_size(effective_size)
+
+        if sell_size <= 0 or (self._min_sz > 0 and sell_size < self._min_sz):
+            # 幽灵仓位：实际余额不足最小单量，交易所侧无法成交
+            logger.warning(
+                "[下单] 实际可用 %.8f / round %.8f 不足 minSz %.8f，清除幽灵仓位 %s",
+                exchange_available, sell_size, self._min_sz, self.inst_id,
+            )
             self.risk.remove_position(self.inst_id)
             self._mark_dirty()
             return False
 
-        logger.info("[下单] SELL %s  数量=%.6f  原因=%s", self.inst_id, sell_size, reason)
+        logger.info(
+            "[下单] SELL %s  数量=%.6f（pos.size=%.6f, exch_avail=%.6f）  原因=%s",
+            self.inst_id, sell_size, pos.size, exchange_available, reason,
+        )
         try:
             result = self.exchange.place_market_order(
                 inst_id=self.inst_id,
