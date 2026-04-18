@@ -238,3 +238,305 @@ SAHARA-USDT     27.1    1.97   1.09    2.37       64    0.665    ✓
 选中交易对: TRX-USDT, SAHARA-USDT
 确认使用以上交易对开始交易? (y/N):
 ```
+
+---
+
+## 生产部署（systemd + 密钥分离）
+
+已部署到 `root@64.23.157.26`，使用 systemd 托管、密钥走 env var、状态持久化到磁盘。
+
+### 目录结构
+
+| 位置 | 权限 | 内容 |
+|---|---|---|
+| `/opt/okx-quant/` | 755 root | 代码仓库（git clone）+ venv |
+| `/opt/okx-quant/config.yaml` | 640 root | 生产配置（密钥走 `${VAR}`，无明文） |
+| `/opt/okx-quant/state/` | 700 root | 运行状态（trailing stop、冷却、tick 计数） |
+| `/opt/okx-quant/logs/` | 750 root | 决策 CSV + quant.log |
+| `/opt/okx-quant/scripts/` | 755 root | summary.sh / verify_deploy.sh |
+| `/etc/okx-quant.env` | **600 root** | 密钥明文（`OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` / `LLM_API_KEY` / `OKX_LIVE_CONFIRMED=1`） |
+| `/etc/systemd/system/okx-quant.service` | 644 root | systemd unit |
+
+**安全要点**：
+- 所有凭证只存在 `/etc/okx-quant.env`（0600），systemd 注入到进程 env
+- `config.yaml` 本身不含任何密钥（全是 `${OKX_API_KEY}` 占位符）
+- `.gitignore` 已排除 `config.yaml` / `state/` / `logs/` / `*.env` / `*.key`
+- 实盘模式（`simulated: false`）需交互输入 `I UNDERSTAND`，systemd 通过 env `OKX_LIVE_CONFIRMED=1` 跳过
+
+### systemd 资源约束
+
+```ini
+MemoryMax=600M          # 1GB droplet 上硬上限
+MemoryHigh=500M         # 软警戒
+CPUQuota=80%            # 留 20% 给系统
+Restart=on-failure      # 异常退出 30s 后自动起
+NoNewPrivileges=true
+ProtectSystem=full      # 只读 /usr /etc
+ProtectHome=read-only   # /root 只读 → 所以用 venv 不用 uv run
+ReadWritePaths=/opt/okx-quant/state /opt/okx-quant/logs
+```
+
+---
+
+## 日常运维命令
+
+### 一键健康检查（最常用）
+
+```bash
+ssh root@64.23.157.26 '/opt/okx-quant/scripts/summary.sh'
+```
+
+覆盖：服务状态 / 账户权益变化 / 每币信号分布 / 当前运行时状态 / 最近 20 条日志。
+
+### 实时日志跟踪
+
+```bash
+# 全部日志
+ssh root@64.23.157.26 'journalctl -u okx-quant -f'
+
+# 只看关键事件（过滤掉 HOLD 噪声）
+ssh root@64.23.157.26 'journalctl -u okx-quant -f | grep -vE "\| HOLD \|"'
+
+# 只看下单 / 止损 / 止盈 / 风控拒绝
+ssh root@64.23.157.26 'journalctl -u okx-quant -f | grep -E "下单|止损|止盈|风控|ERROR"'
+
+# 查最近 100 行
+ssh root@64.23.157.26 'journalctl -u okx-quant --no-pager -n 100'
+```
+
+### 服务管理
+
+```bash
+# 状态
+ssh root@64.23.157.26 'systemctl status okx-quant'
+
+# 停 / 启 / 重启
+ssh root@64.23.157.26 'systemctl stop okx-quant'
+ssh root@64.23.157.26 'systemctl start okx-quant'
+ssh root@64.23.157.26 'systemctl restart okx-quant'
+
+# 开机自启 / 取消
+ssh root@64.23.157.26 'systemctl enable okx-quant'
+ssh root@64.23.157.26 'systemctl disable okx-quant'
+```
+
+### 修改配置
+
+**修改密钥**（必须重启生效）：
+
+```bash
+ssh root@64.23.157.26 'vim /etc/okx-quant.env && systemctl restart okx-quant'
+```
+
+**修改交易对 / 策略 / 周期**（改 systemd unit）：
+
+```bash
+ssh root@64.23.157.26 'vim /etc/systemd/system/okx-quant.service'
+# 改 ExecStart 里的 --inst / --strategy / --bar / --interval
+ssh root@64.23.157.26 'systemctl daemon-reload && systemctl restart okx-quant'
+```
+
+**修改风控 / 策略参数 / 执行器参数**（改 config.yaml）：
+
+```bash
+ssh root@64.23.157.26 'vim /opt/okx-quant/config.yaml && systemctl restart okx-quant'
+```
+
+### 代码更新
+
+```bash
+ssh root@64.23.157.26 'cd /opt/okx-quant && git pull && /root/.local/bin/uv sync && systemctl restart okx-quant'
+```
+
+### 切回模拟盘
+
+编辑 `/opt/okx-quant/config.yaml` 把 `okx.simulated: false` 改为 `true`，重启。
+
+### 验证脚本
+
+```bash
+# 部署后第一次跑，或修改密钥后验证
+ssh root@64.23.157.26 '/opt/okx-quant/scripts/verify_deploy.sh'
+```
+
+会检查：env 加载 / pytest 通过 / 公共行情可用 / 私有余额查询通过 / systemd unit 存在。
+
+---
+
+## 量化策略验证流程
+
+### 工具链
+
+| 脚本 | 用途 |
+|---|---|
+| `scripts/backtest_grid.py` | 网格化回测 —— N 策略 × M 币 × K 周期 |
+| `scripts/backtest_report.py` | 结果汇总排序（按 raw Sharpe） |
+| `scripts/backtest_analyze_alpha.py` | **HODL-adjusted 分析**，按 alpha_sharpe 排序 |
+| `scripts/param_sweep.py` | 参数敏感性扫描，区分真 edge vs 过拟合 |
+| `scripts/summary.sh` | 实盘 bot 状态汇总 |
+| `scripts/verify_deploy.sh` | 部署后一键 health check |
+
+### Phase 1：网格回测
+
+```bash
+# 默认：6 策略 × 20 币 × 3 周期 × 2 年 = 360 组合
+uv run python scripts/backtest_grid.py
+
+# 自定义
+uv run python scripts/backtest_grid.py \
+  --strategies ma_cross,bollinger,ensemble \
+  --instruments BTC-USDT,ETH-USDT,SOL-USDT \
+  --bars 1H,4H \
+  --days 730 \
+  --outdir backtest_results \
+  --parallel 8
+
+# 续跑（跳过已完成组合）
+uv run python scripts/backtest_grid.py --resume
+
+# 只预览，不执行
+uv run python scripts/backtest_grid.py --dry-run
+```
+
+K 线缓存到 `backtest_results/candles/*.parquet`，避免重复下载。
+
+### Phase 1 分析（必须用 HODL-adjusted）
+
+```bash
+uv run python scripts/backtest_analyze_alpha.py \
+  --results backtest_results/results.csv \
+  --candles backtest_results/candles \
+  --min-alpha-sharpe 0.3 \
+  --min-trades 20
+```
+
+**关键指标**：`alpha_sharpe = strategy_sharpe - HODL_sharpe`。
+
+**只有 alpha_sharpe ≥ 0.3 且 total_return > 0 的组合才是真 edge**。单纯 raw Sharpe 正不算数 —— 大牛市里躺平持币就正 Sharpe，那是 beta 不是 alpha。
+
+### Phase 1.5：参数敏感性扫描
+
+```bash
+# 对 Phase 1 筛出的候选做参数扫描
+uv run python scripts/param_sweep.py \
+  --strategy ma_cross --inst AVAX-USDT --bar 4H \
+  --days 730 \
+  --cache-dirs backtest_results/candles
+
+# 从 grid 结果自动取 Top N
+uv run python scripts/param_sweep.py --from-grid --top 5 --min-sharpe 0.3
+```
+
+输出标记每个参数为 `robust`（扫描均正）或 `fragile`（多数崩盘）。fragile 的不要进实盘。
+
+### Phase 2：实盘部署
+
+把 Phase 1.5 验证 robust 的 `(strategy, inst, bar, 最优参数)` 组合写入 systemd unit + config.yaml，重启 bot。
+
+---
+
+## 故障排查
+
+### Bot 跑着跑着亏了很多
+
+1. 看 `summary.sh` 的 `journal 错误` 计数 —— 有无异常
+2. 看最近 `[下单]` 事件 —— 是正常止损还是异常执行
+3. 看 OKX 网页订单历史，对照 journal 时间戳
+4. **不要慌着手动干预** —— 策略可能在正常的回撤期；`max_drawdown_pct=0.15` 触发后会自动停盘
+
+### 卖单反复失败 (OKX 51008)
+
+现象：`[下单] 卖出失败 ... available CFX balance is insufficient`
+
+根因：OKX 现货 market buy 扣币种手续费后，实际到账 < 下单量。
+
+**已修复**（commit `85492a0`）：`sell()` 查交易所实际 available，取 `min(pos.size, available)`。
+
+如果还发生，说明历史 state 文件里记的 size 过大。清除：
+
+```bash
+ssh root@64.23.157.26 'systemctl stop okx-quant && rm /opt/okx-quant/state/state_<INST>.json && systemctl start okx-quant'
+```
+
+### 内存超过 600M 被 systemd 杀
+
+1GB droplet 上 LLM 策略容易吃内存。`MemoryMax=600M` 会 OOM-kill。对策：
+
+- 换非 LLM 策略（`ma_cross` / `bollinger` / `adaptive`）
+- 或升级 droplet 到 2GB/2vCPU
+- 或调低 `max_total_tokens` 限制 LLM 批量
+
+### 实盘确认卡住（非交互环境）
+
+如果改了 `simulated: false` 但 bot 启动卡在 `输入 'I UNDERSTAND'` 提示：
+
+```bash
+# env 里必须有这行（已默认有）
+ssh root@64.23.157.26 'grep OKX_LIVE_CONFIRMED /etc/okx-quant.env'
+# 若无，加上：
+ssh root@64.23.157.26 'echo "OKX_LIVE_CONFIRMED=1" >> /etc/okx-quant.env && systemctl restart okx-quant'
+```
+
+### 状态文件损坏
+
+症状：启动后 `[状态] 加载失败` 警告。
+
+```bash
+ssh root@64.23.157.26 'systemctl stop okx-quant && rm /opt/okx-quant/state/*.json && systemctl start okx-quant'
+```
+
+Bot 会用交易所实际余额重建 position 记录。
+
+### 代码拉取后 bot 起不来
+
+```bash
+ssh root@64.23.157.26 'cd /opt/okx-quant && /root/.local/bin/uv sync 2>&1 | tail -5'
+# 如果依赖装失败：
+ssh root@64.23.157.26 'cd /opt/okx-quant && /root/.local/bin/uv lock --upgrade && /root/.local/bin/uv sync'
+```
+
+---
+
+## 项目结构速查
+
+```
+okx_quant/
+├── client/rest.py           OKX V5 REST（带限流重试、HMAC 签名）
+├── client/websocket.py      WS 客户端（未集成）
+├── exchange/                抽象层：Exchange Protocol + OKXExchange/FakeExchange
+├── data/market.py           K 线/Ticker 拉取（带缓存 + 分页）
+├── data/news.py             CryptoPanic 新闻（可选）
+├── data/screener.py         因子选币器
+├── indicators/              SMA/EMA/MACD/BBands/ATR/ADX/RSI（含回测预计算缓存）
+├── strategy/                8 策略：ma_cross / rsi_mean / bollinger / adaptive /
+│                            trend_momentum / llm / ensemble / multi_agent
+├── backtest/engine.py       回测引擎（next-bar open 成交，无 lookahead）
+├── risk/manager.py          风控（线程安全，止损/回撤/自动恢复）
+├── llm/client.py            OpenAI/Claude/DeepSeek 统一客户端
+├── agentic/                 多 Agent pipeline（4 分析师 + Bull/Bear 辩论）
+├── trading/executor.py      LiveTrader（tick 循环）
+├── trading/orders.py        OrderExecutor（下单+冷却+幽灵清理）
+├── trading/position_monitor.py  SL/TP + trailing stop
+├── trading/account.py       余额缓存
+├── trading/decision_log.py  决策 CSV
+├── trading/state.py         状态持久化（原子 JSON 写）
+├── trading/supervisor.py    多币 Supervisor
+├── trading/position_restore.py  启动时恢复已有持仓（过滤粉尘）
+├── utils/timeout.py         硬超时包装（保护主循环不被 LLM 阻塞）
+└── config.py                ${VAR} env 变量展开
+
+scripts/
+├── backtest_grid.py         Phase 1 网格回测
+├── backtest_report.py       raw Sharpe 排序
+├── backtest_analyze_alpha.py  HODL-adjusted 分析（推荐）
+├── param_sweep.py           参数敏感性扫描
+├── summary.sh               生产状态汇总
+└── verify_deploy.sh         部署 health check
+```
+
+73 个 pytest 测试用例，覆盖指标 / 回测路径 / 风控 / 状态持久化 / 订单执行 / 实盘集成 / 安全。
+
+```bash
+uv run pytest -q              # 全量
+uv run pytest tests/test_order_executor.py -v  # 单文件
+```
