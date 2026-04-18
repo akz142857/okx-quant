@@ -6,7 +6,7 @@ import pandas as pd
 
 from okx_quant.data.news import CryptoNewsFetcher
 from okx_quant.llm.client import LLMClient
-from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
+from okx_quant.strategy.base import BaseStrategy, Signal, SignalType, StrategyContext
 from okx_quant.strategy.bollinger import BollingerBandStrategy
 from okx_quant.strategy.llm_strategy import LLMStrategy
 from okx_quant.strategy.ma_cross import MACrossStrategy
@@ -30,26 +30,40 @@ class EnsembleStrategy(BaseStrategy):
 
     name = "Ensemble"
 
-    def __init__(self, params: dict | None = None):
+    def __init__(
+        self,
+        params: dict | None = None,
+        context: "StrategyContext | None" = None,
+    ):
         defaults = {"consensus_threshold": 2}
         merged = {**defaults, **(params or {})}
-        super().__init__(merged)
 
+        # 内部 LLMStrategy 需在 super().__init__（触发 _apply_context）前初始化
         self._traditional: list[BaseStrategy] = [
             MACrossStrategy(),
             RSIMeanReversionStrategy(),
             BollingerBandStrategy(),
         ]
-        self._llm = LLMStrategy()
+        # 子 LLMStrategy 也接收同一个 context，自动拿到 llm_client / news_fetcher
+        self._llm = LLMStrategy(context=context)
+
+        super().__init__(merged, context)
+
+    def _apply_context(self) -> None:
+        # context 已经传给内部 _llm 构造器，这里是 super().__init__ 触发的 hook
+        # 预留钩子，目前无额外动作
+        pass
 
     # ------------------------------------------------------------------
-    # 代理方法 — 让 make_strategy() 的注入逻辑直接复用
+    # 代理方法 — 兼容旧的 setter API（已 DEPRECATED）
     # ------------------------------------------------------------------
 
     def set_llm_client(self, client: LLMClient) -> None:
+        """DEPRECATED: 构造时通过 StrategyContext(llm_client=...) 注入"""
         self._llm.set_llm_client(client)
 
     def set_news_fetcher(self, fetcher: CryptoNewsFetcher) -> None:
+        """DEPRECATED: 构造时通过 StrategyContext(news_fetcher=...) 注入"""
         self._llm.set_news_fetcher(fetcher)
 
     @property
