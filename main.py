@@ -81,6 +81,14 @@ def make_strategy(name: str, params: dict | None = None, cfg: dict | None = None
     from okx_quant.strategy import StrategyContext
     from okx_quant.strategy.multi_agent_strategy import MultiAgentStrategy
 
+    # 从 config.yaml 的 strategies.<name> 读取自定义参数（Phase 2 用）
+    # 例如：strategies: { ma_cross: { fast_period: 5, slow_period: 13 } }
+    if cfg:
+        strategies_cfg = cfg.get("strategies") or {}
+        strat_params = strategies_cfg.get(name) or {}
+        if strat_params:
+            params = {**strat_params, **(params or {})}
+
     # 多 Agent 策略：合并 config.yaml 的 multi_agent 配置到 params
     if issubclass(cls, MultiAgentStrategy) and cfg:
         ma_cfg = cfg.get("multi_agent", {})

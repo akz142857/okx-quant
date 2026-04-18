@@ -68,6 +68,16 @@ multi_agent:
   confidence_threshold: 0.6     # 低于此置信度 → HOLD
   max_total_tokens: 0           # 单次会话 token 预算上限，0 表示不限
 
+# 策略自定义参数（覆盖各策略 __init__ 默认值）
+# Phase 1 backtest_grid / param_sweep 找到最优参数后在此配置
+# 例如 AVAX ma_cross 4H 的最优参数：
+# strategies:
+#   ma_cross:
+#     fast_period: 5
+#     slow_period: 13
+#     atr_sl_mult: 1.5
+strategies: {}
+
 # 因子选币器参数
 screener:
   min_vol_24h_usdt: 500000      # 最小 24H 成交额 (USDT)
