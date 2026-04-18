@@ -37,3 +37,4 @@ scratch.py
 
 # 操作系统临时
 Thumbs.db
+.claude/*
