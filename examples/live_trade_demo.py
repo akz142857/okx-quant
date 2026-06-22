@@ -4,7 +4,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-import yaml
+from okx_quant.config import load_yaml
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.trading.executor import LiveTrader
 from okx_quant.risk.manager import RiskConfig
@@ -18,15 +18,25 @@ def main():
         print("请先复制 config.yaml.example 为 config.yaml 并填写 API Key")
         return
 
-    with open(config_path) as f:
-        cfg = yaml.safe_load(f)
+    # 用 load_yaml 以支持 config.yaml 内的 ${VAR} 环境变量替换
+    cfg = load_yaml(config_path)
 
     okx_cfg = cfg.get("okx", {})
+    simulated = okx_cfg.get("simulated", True)  # 默认模拟盘
+
+    # 实盘二次确认：与 main.py cmd_live 一致，避免示例脚本绕过安全闸门
+    if not simulated and os.environ.get("OKX_LIVE_CONFIRMED") != "1":
+        print("\n⚠️  当前为【实盘模式】(simulated=false)，将使用真实资金下单。")
+        confirm = input("输入 'I UNDERSTAND' 以继续，或设置环境变量 OKX_LIVE_CONFIRMED=1: ").strip()
+        if confirm != "I UNDERSTAND":
+            print("已取消。")
+            return
+
     client = OKXRestClient(
         api_key=okx_cfg["api_key"],
         secret_key=okx_cfg["secret_key"],
         passphrase=okx_cfg["passphrase"],
-        simulated=okx_cfg.get("simulated", True),  # 默认模拟盘
+        simulated=simulated,
     )
 
     # 策略配置

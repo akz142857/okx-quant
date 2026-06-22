@@ -130,7 +130,9 @@ class MarketDataFetcher:
         if "confirm" in df.columns:
             df = df[df["confirm"] == "1"].drop(columns=["confirm"])
 
-        return df
+        # confirm 过滤后索引会出现断档；统一重置，保证"升序且索引连续"，
+        # 这样 backtest slice_cache 的 index.equals 断言以及 .iloc 切片都安全。
+        return df.reset_index(drop=True)
 
     # -------------------------------------------------------------------------
     # Ticker

@@ -1,6 +1,7 @@
 """统一 LLM 客户端 — 支持 OpenAI / DeepSeek / Claude"""
 
 import dataclasses
+import threading
 from dataclasses import dataclass
 from enum import Enum
 
@@ -73,15 +74,25 @@ class LLMClient:
     """
 
     def __init__(self, config: LLMConfig):
-        self.config = config
-        self._session = requests.Session()
-
-        # 应用提供商默认值
+        # 不就地修改调用方传入的 config（旧实现会把默认值写回共享的 LLMConfig，
+        # 造成意外副作用）；用 replace 生成私有副本。
         defaults = _PROVIDER_DEFAULTS.get(config.provider, {})
-        if not config.base_url:
-            self.config.base_url = defaults.get("base_url", "https://api.openai.com/v1")
-        if not config.model:
-            self.config.model = defaults.get("model", "gpt-4o-mini")
+        self.config = dataclasses.replace(
+            config,
+            base_url=config.base_url or defaults.get("base_url", "https://api.openai.com/v1"),
+            model=config.model or defaults.get("model", "gpt-4o-mini"),
+        )
+
+        # requests.Session 非线程安全；多 Agent 管线会从 4 个分析师线程并发
+        # 调用同一个 LLMClient，故每线程持有独立 Session。
+        self._local = threading.local()
+
+    def _session_for_thread(self) -> requests.Session:
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = requests.Session()
+            self._local.session = s
+        return s
 
     def chat(self, system: str, user: str) -> LLMResponse:
         """发送对话请求，返回 LLMResponse"""
@@ -110,7 +121,7 @@ class LLMClient:
         }
 
         try:
-            resp = self._session.post(
+            resp = self._session_for_thread().post(
                 url, json=payload, headers=headers, timeout=self.config.timeout
             )
             resp.raise_for_status()
@@ -153,7 +164,7 @@ class LLMClient:
         }
 
         try:
-            resp = self._session.post(
+            resp = self._session_for_thread().post(
                 url, json=payload, headers=headers, timeout=self.config.timeout
             )
             resp.raise_for_status()

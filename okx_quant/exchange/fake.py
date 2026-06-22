@@ -52,6 +52,7 @@ class FakeExchange(Exchange):
         self.orders: list[_PlacedOrder] = []
         self._order_counter: int = 0
         self._on_order: Optional[Callable[[_PlacedOrder], None]] = None
+        self._fill_price: float = 0.0  # 模拟市价成交均价，0 表示未知
 
     # ---------- 测试桩点 ----------
 
@@ -78,6 +79,10 @@ class FakeExchange(Exchange):
     def on_order(self, cb: Callable[[_PlacedOrder], None]) -> None:
         """下单时的回调（测试可在回调里调整余额模拟成交）"""
         self._on_order = cb
+
+    def set_fill_price(self, price: float) -> None:
+        """设置后续市价单的模拟成交均价（用于测试滑点/入场价锚定）"""
+        self._fill_price = price
 
     @property
     def quote_ccy(self) -> str:
@@ -137,4 +142,5 @@ class FakeExchange(Exchange):
             side=side,
             ord_id=f"fake-{self._order_counter}",
             size=size,
+            fill_price=self._fill_price,
         )

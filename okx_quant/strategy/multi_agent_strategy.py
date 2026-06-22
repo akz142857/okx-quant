@@ -130,10 +130,10 @@ class MultiAgentStrategy(BaseStrategy):
         if self._pipeline is None:
             from okx_quant.agentic import AgenticConfig, AgenticPipeline
 
-            ag_config = AgenticConfig(
-                debate_rounds=self.get_param("debate_rounds"),
-                confidence_threshold=self.get_param("confidence_threshold"),
-            )
+            # 从完整参数构建，确保 config.yaml 的 multi_agent.max_total_tokens /
+            # analyst_timeout / debate_timeout 真正传到 pipeline；旧实现只取了
+            # debate_rounds 与 confidence_threshold，token 预算上限被静默忽略。
+            ag_config = AgenticConfig.from_dict(self.params)
             self._pipeline = AgenticPipeline(
                 quick_llm=quick,
                 deep_llm=deep,

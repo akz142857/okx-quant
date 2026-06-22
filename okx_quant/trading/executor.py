@@ -54,6 +54,7 @@ class LiveTrader:
         *,
         exchange: Optional[Exchange] = None,
         decision_log_dir: str = "logs",
+        account: Optional[AccountSnapshot] = None,
     ):
         if exchange is None and client is None:
             raise ValueError("LiveTrader 需要 exchange 或 client 至少一个")
@@ -65,10 +66,6 @@ class LiveTrader:
         # Exchange 优先；未提供则把旧 client 包一层 OKXExchange（向后兼容）
         self.exchange: Exchange = exchange if exchange is not None else OKXExchange(
             client, quote_ccy=quote_ccy,
-        )
-        self.client: Optional[OKXRestClient] = (
-            client if client is not None
-            else getattr(self.exchange, "client", None)
         )
         self.strategy = strategy
         self.inst_id = inst_id
@@ -101,8 +98,11 @@ class LiveTrader:
         self._consecutive_errors: int = 0
         self._max_backoff: int = 300  # 最大退避 5 分钟
 
-        # 余额缓存
-        self._account = AccountSnapshot(self.exchange, ttl_seconds=300)
+        # 余额缓存：Supervisor 多币种模式下注入共享实例，避免各 worker 各持
+        # 一份缓存导致"A 买入后 B 仍读到过期可用余额"而超额下单。
+        self._account = account if account is not None else AccountSnapshot(
+            self.exchange, ttl_seconds=300,
+        )
 
         # 订单执行器
         self._orders = OrderExecutor(
@@ -476,15 +476,19 @@ class LiveTrader:
                 available, current_price, signal.size_pct,
             )
 
-            allowed, msg = self.risk.check_order(
-                self.inst_id, "buy", cost_usdt, current_price, equity,
+            # 原子预留槽位（检查 + 占位一次性完成），避免多 worker 竞态超额开仓
+            allowed, msg = self.risk.try_reserve_buy(
+                self.inst_id, cost_usdt, current_price, equity,
             )
             if not allowed:
                 logger.warning("[风控] 买入被拒: %s", msg)
                 return
 
             sl, tp = self.risk.calc_sl_tp(current_price, signal.stop_loss, signal.take_profit)
-            self._orders.buy(current_price, size_coin, sl, tp, signal.reason)
+            placed = self._orders.buy(current_price, size_coin, sl, tp, signal.reason)
+            if not placed:
+                # 下单未成功 → 释放预留槽位，否则该 inst_id 会被占位仓位永久占用
+                self.risk.remove_position(self.inst_id)
 
         elif signal.is_sell and not self.risk.has_position(self.inst_id):
             logger.debug("[信号] SELL 忽略: 当前无持仓")

@@ -1,5 +1,6 @@
 """自适应策略：根据市场状态自动切换子策略"""
 
+from dataclasses import replace
 from enum import Enum
 from typing import Optional
 
@@ -157,13 +158,11 @@ class AdaptiveStrategy(BaseStrategy):
         strategy = self._strategies[regime]
         signal = strategy.generate_signal(df, inst_id)
 
-        # 组装状态标签
+        # 组装状态标签。子策略返回的 Signal 不就地修改（遵守不可变约定，
+        # 避免子策略若缓存/复用 Signal 时产生别名 bug），用 replace 产生新对象。
         label = _REGIME_LABELS[regime]
         prefix = f"[{label}|ADX={curr_adx:.1f}|BW={curr_bw:.1f}]"
-        signal.reason = f"{prefix} {strategy.name}: {signal.reason}"
-
-        # 合并 extra
-        signal.extra = {
+        merged_extra = {
             **signal.extra,
             "regime": regime.value,
             "adx": round(curr_adx, 2),
@@ -172,5 +171,8 @@ class AdaptiveStrategy(BaseStrategy):
             "minus_di": round(adx_df["minus_di"].iloc[-1], 2),
             "sub_strategy": strategy.name,
         }
-
-        return signal
+        return replace(
+            signal,
+            reason=f"{prefix} {strategy.name}: {signal.reason}",
+            extra=merged_extra,
+        )

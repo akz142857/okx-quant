@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import logging
 import os
+import re
 from collections import OrderedDict
 from datetime import datetime
 from typing import Any, Optional
@@ -18,6 +19,10 @@ from typing import Any, Optional
 from okx_quant.strategy.base import Signal
 
 logger = logging.getLogger(__name__)
+
+# 文件名中允许出现的 inst_id 字符；其余一律替换为 '-'，防止路径穿越。
+# 与 state.py 的白名单保持一致（防御纵深，不依赖单一校验点）。
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9_\-]")
 
 
 class DecisionLogger:
@@ -43,10 +48,15 @@ class DecisionLogger:
         if self._file is not None:
             self._file.close()
 
-        os.makedirs(self._log_dir, exist_ok=True)
+        log_dir = os.path.abspath(self._log_dir)
+        os.makedirs(log_dir, exist_ok=True)
         date_str = datetime.now().strftime("%Y%m%d")
-        safe_id = self._inst_id.replace("/", "-")
-        path = os.path.join(self._log_dir, f"decisions_{safe_id}_{date_str}.csv")
+        # 全字符白名单清洗（不只是替换 '/'），杜绝 '..'、'\\'、空字节等穿越
+        safe_id = _UNSAFE_FILENAME_CHARS.sub("-", self._inst_id) or "unknown"
+        path = os.path.abspath(os.path.join(log_dir, f"decisions_{safe_id}_{date_str}.csv"))
+        # 二次防护：规范化后仍必须位于 log_dir 之内
+        if not path.startswith(log_dir + os.sep):
+            raise ValueError(f"非法的决策日志路径: inst_id={self._inst_id!r}")
 
         file_exists = os.path.isfile(path) and os.path.getsize(path) > 0
         self._file = open(path, "a", newline="", encoding="utf-8")

@@ -156,6 +156,44 @@ class RiskManager:
 
             return True, "通过"
 
+    def try_reserve_buy(
+        self,
+        inst_id: str,
+        size_usdt: float,
+        price: float,
+        current_equity: float,
+    ) -> tuple[bool, str]:
+        """原子地校验买入并预留持仓槽位。
+
+        在单个锁内完成「检查 + 占位」，消除 ``check_order`` 与 ``add_position``
+        之间的 TOCTOU 竞态：否则多个 worker 线程可能同时通过 max_open_positions
+        检查后各自下单，突破持仓上限与单币种资金占比。
+
+        预留成功后会插入一个 size=0 的占位仓位；调用方必须在下单成功时用
+        ``add_position`` 覆盖它，或在下单失败时用 ``remove_position`` 释放。
+        """
+        with self._lock:
+            if self._trading_halted:
+                return False, f"交易已暂停: {self._halt_reason}"
+            if inst_id in self._positions:
+                return False, f"{inst_id} 已有持仓或预留"
+            if len(self._positions) >= self.config.max_open_positions:
+                return False, f"持仓数已达上限 ({self.config.max_open_positions})"
+            if size_usdt < self.config.min_order_usdt:
+                return False, (
+                    f"下单金额 {size_usdt:.2f} USDT 低于最小值 {self.config.min_order_usdt}"
+                )
+            max_allowed = current_equity * self.config.max_position_pct
+            if size_usdt > max_allowed:
+                return False, (
+                    f"下单金额 {size_usdt:.2f} USDT 超过最大仓位限制 {max_allowed:.2f} USDT"
+                )
+            # 占位：用 size=0 标记槽位已被本次下单占用
+            self._positions[inst_id] = PositionInfo(
+                inst_id=inst_id, size=0.0, entry_price=price,
+            )
+            return True, "预留成功"
+
     def calc_position_size(
         self,
         available_usdt: float,

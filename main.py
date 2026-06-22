@@ -311,7 +311,9 @@ def cmd_live(args, cfg):
         simulated_raw = okx_cfg.get("simulated")
         simulated = bool(simulated_raw) if simulated_raw is not None else False
 
-    if not simulated and not os.environ.get("OKX_LIVE_CONFIRMED"):
+    # 仅当显式等于 "1" 才跳过确认；"0"/"false"/任意其它值都要求交互确认，
+    # 避免"我把它设成 0 来关闭"反而开启实盘的反直觉陷阱。
+    if not simulated and os.environ.get("OKX_LIVE_CONFIRMED") != "1":
         print("\n" + "=" * 60)
         print("  ⚠️  警告：当前为【实盘模式】(simulated=false)")
         print("     程序将使用真实账户资金执行真实订单。")

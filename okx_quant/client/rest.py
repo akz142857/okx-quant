@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional, Union
@@ -52,7 +53,10 @@ class OKXRestClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self._proxy = proxy
-        self._session = self._make_session()
+        # requests.Session 非线程安全；Supervisor 多 worker 线程共享同一个
+        # OKXRestClient，故每线程持有独立 Session。连接出错时只重建本线程的
+        # session，不影响其它线程的在途请求。
+        self._local = threading.local()
 
     def _make_session(self) -> requests.Session:
         s = requests.Session()
@@ -60,6 +64,24 @@ class OKXRestClient:
         if self._proxy:
             s.proxies = {"http": self._proxy, "https": self._proxy}
         return s
+
+    @property
+    def _session(self) -> requests.Session:
+        s = getattr(self._local, "session", None)
+        if s is None:
+            s = self._make_session()
+            self._local.session = s
+        return s
+
+    def _reset_session(self) -> None:
+        """关闭并重建当前线程的 session（连接/SSL 错误后调用）"""
+        s = getattr(self._local, "session", None)
+        if s is not None:
+            try:
+                s.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._local.session = self._make_session()
 
     # -------------------------------------------------------------------------
     # 内部签名方法
@@ -81,12 +103,13 @@ class OKXRestClient:
 
     def _auth_headers(self, method: str, path: str, body: str = "") -> dict:
         ts = self._timestamp()
+        # x-simulated-trading 由 _request 统一注入（auth/非 auth 路径都覆盖），
+        # 此处不再重复添加，避免两处维护。
         return {
             "OK-ACCESS-KEY": self.api_key,
             "OK-ACCESS-SIGN": self._sign(ts, method, path, body),
             "OK-ACCESS-TIMESTAMP": ts,
             "OK-ACCESS-PASSPHRASE": self.passphrase,
-            **({"x-simulated-trading": "1"} if self.simulated else {}),
         }
 
     # -------------------------------------------------------------------------
@@ -145,9 +168,8 @@ class OKXRestClient:
                 data = resp.json()
             except (requests.ConnectionError, requests.Timeout) as e:
                 last_exc = e
-                # SSL/连接错误后清理连接池，避免复用损坏的连接
-                self._session.close()
-                self._session = self._make_session()
+                # SSL/连接错误后清理本线程连接池，避免复用损坏的连接
+                self._reset_session()
                 if attempt < self.max_retries:
                     wait = self._backoff_delay(attempt)
                     logger.warning(
