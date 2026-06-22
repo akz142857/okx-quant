@@ -102,6 +102,11 @@ class OrderExecutor:
     def buy(self, price: float, size_coin: float, sl: float, tp: float, reason: str) -> bool:
         """执行买入；成功返回 True。失败进冷却，避免反复重试。"""
         size_coin = self.round_lot_size(size_coin)
+        # 取整后可能为 0（如计算金额 < price*lotSz）；独立于 minSz 显式拦截，
+        # 避免在 instrument 信息获取失败（_min_sz=0）时把 size=0 的单发给交易所。
+        if size_coin <= 0:
+            logger.warning("[下单] 取整后数量为 0，跳过买入")
+            return False
         if self._min_sz > 0 and size_coin < self._min_sz:
             logger.warning("[下单] 数量 %.8f 低于最小下单量 %s，跳过", size_coin, self._min_sz)
             return False
@@ -119,17 +124,26 @@ class OrderExecutor:
             )
             logger.info("[下单] 买入成功 ordId=%s", result.ord_id)
 
-            # 登记风控仓位
+            # 优先用真实成交均价做入场价；拿不到则退化为信号价。
+            # 成交价与信号价不一致时，按比例平移止损止盈，保持风控配置意图的
+            # 百分比缓冲（否则市价滑点会让实际止损幅度偏离设定值）。
+            entry_price = result.fill_price if result.fill_price > 0 else price
+            if entry_price > 0 and price > 0 and entry_price != price:
+                ratio = entry_price / price
+                sl = round(sl * ratio, 8) if sl > 0 else sl
+                tp = round(tp * ratio, 8) if tp > 0 else tp
+
+            # 登记风控仓位（覆盖 try_reserve_buy 的占位仓位）
             self.risk.add_position(PositionInfo(
                 inst_id=self.inst_id,
                 size=size_coin,
-                entry_price=price,
+                entry_price=entry_price,
                 stop_loss=sl,
                 take_profit=tp,
             ))
 
             if self._on_buy_success is not None:
-                self._on_buy_success(price, size_coin)
+                self._on_buy_success(entry_price, size_coin)
             self._mark_dirty()
             return True
         except Exception as e:  # noqa: BLE001

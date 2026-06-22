@@ -18,7 +18,12 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1 / period, adjust=False).mean()
 
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - (100 / (1 + rs))
+    rsi_series = 100 - (100 / (1 + rs))
+    # 纯上涨区间 avg_loss=0 → rs=NaN → RSI 应为 100（无下跌）；
+    # 否则 rsi_mean 等策略会在强势拉盘时静默 HOLD，prompt 也会出现 "RSI=nan"。
+    # 全平区间（avg_gain 也为 0）保持 NaN，交由调用方处理。
+    rsi_series = rsi_series.mask((avg_loss == 0) & (avg_gain > 0), 100.0)
+    return rsi_series
 
 
 def stochastic(
@@ -60,4 +65,6 @@ def cci(df: pd.DataFrame, period: int = 20) -> pd.Series:
     typical = (df["high"] + df["low"] + df["close"]) / 3
     ma = typical.rolling(window=period).mean()
     mean_dev = typical.rolling(window=period).apply(lambda x: abs(x - x.mean()).mean())
-    return (typical - ma) / (0.015 * mean_dev)
+    # 平价区间 mean_dev=0 会导致除零；显式置 NaN 表达"无定义"而非 inf/FP 伪影
+    denom = (0.015 * mean_dev).replace(0, np.nan)
+    return (typical - ma) / denom

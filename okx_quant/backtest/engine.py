@@ -181,6 +181,10 @@ class BacktestEngine:
             if position and position.is_open:
                 exit_price, exit_reason = self._check_sl_tp(position, open_px, high, low)
                 if exit_price:
+                    # 止损/止盈在实盘是市价单，必然有滑点。现货多头平仓=卖出，
+                    # 到手价低于触发价，故统一乘 (1 - slippage)。否则回测会
+                    # 系统性低估亏损、虚高胜率与盈亏比。
+                    exit_price *= (1 - self.slippage)
                     capital = self._close_position(position, exit_price, ts, exit_reason, capital)
                     trades.append(position)
                     position = None
@@ -220,6 +224,12 @@ class BacktestEngine:
                 position, final_close, df["ts"].iloc[-1], "回测结束强制平仓", capital
             )
             trades.append(position)
+            # 末根权益记录此前是按收盘价 mark-to-market（未扣强平手续费），
+            # 会让 final_capital 高估一笔出场费。用真实平仓后现金覆盖它。
+            if equity_records:
+                equity_records[-1] = (df["ts"].iloc[-1], capital)
+            else:
+                equity_records.append((df["ts"].iloc[-1], capital))
 
         equity_series = pd.Series(
             [v for _, v in equity_records],
@@ -307,9 +317,11 @@ class BacktestEngine:
         annual_return_pct = (1 + total_return_pct / 100) ** (365 / duration_days) - 1
 
         # Sharpe（简化版，用每日收益率）
+        # 加密货币 7×24 全年交易，年化因子用 365（而非股市 252），
+        # 否则与币圈原生 Sharpe 基准不可比，且系统性低估约 8.5%。
         daily_returns = equity.resample("1D").last().pct_change().dropna()
         sharpe = (
-            daily_returns.mean() / daily_returns.std() * (252 ** 0.5)
+            daily_returns.mean() / daily_returns.std() * (365 ** 0.5)
             if daily_returns.std() > 0
             else 0
         )

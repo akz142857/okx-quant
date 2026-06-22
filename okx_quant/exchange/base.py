@@ -82,6 +82,7 @@ class OrderResult:
     side: str            # "buy" | "sell"
     ord_id: str
     size: float          # 实际下单数量（基础币种）
+    fill_price: float = 0.0   # 实际成交均价（市价单回查得到，0 表示未知）
     raw: dict = field(default_factory=dict)  # 原始返回，诊断用
 
 

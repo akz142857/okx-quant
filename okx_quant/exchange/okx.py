@@ -80,6 +80,10 @@ class OKXExchange(Exchange):
         OKX V5 返回结构为 [{'totalEq': ..., 'details': [{'ccy': ..., 'cashBal': ..., 'availEq': ...}, ...]}]
         """
         raw_list = self._client.get_balance() or []
+        # 空列表代表 API 调用异常（真实账户即使空仓也会返回含 totalEq 的对象）。
+        # 抛错而非返回"零余额"，避免上层把临时故障误判为"无持仓"而清掉真实仓位。
+        if not raw_list:
+            raise RuntimeError("账户余额查询返回空，疑似临时故障")
         total_eq = 0.0
         avail_quote = 0.0
         holdings: list[Holding] = []
@@ -119,11 +123,24 @@ class OKXExchange(Exchange):
             sz=size_str,
             tgt_ccy=tgt_ccy if side == "buy" else None,
         ) or {}
+        ord_id = str(raw.get("ordId", ""))
+
+        # 市价单下单响应只含 ordId，不含成交均价；回查订单拿 avgPx，
+        # 让上层用真实成交价锚定入场价与止损止盈（市价单滑点可达 0.5~2%）。
+        fill_price = 0.0
+        if ord_id:
+            try:
+                order = self._client.get_order(inst_id, ord_id) or {}
+                fill_price = _to_float(order.get("avgPx")) or _to_float(order.get("fillPx"))
+            except Exception as e:  # noqa: BLE001 — 回查失败不影响下单本身
+                logger.debug("回查成交价失败 %s ordId=%s: %s", inst_id, ord_id, e)
+
         return OrderResult(
             inst_id=inst_id,
             side=side,
-            ord_id=str(raw.get("ordId", "")),
+            ord_id=ord_id,
             size=size,
+            fill_price=fill_price,
             raw=dict(raw),
         )
 

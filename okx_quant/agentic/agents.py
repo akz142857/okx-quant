@@ -34,17 +34,42 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_json(content: str) -> Optional[dict]:
-    """尝试从 LLM 返回内容中解析 JSON 决策"""
+    """从 LLM 返回内容中解析 JSON 决策。
+
+    依次尝试：直接解析 → 剥离 markdown 代码围栏 → 括号配对提取第一个
+    完整对象。旧实现用 ``\\{[^{}]*\\}`` 正则，遇到嵌套对象会被截断成第一个
+    平铺对象（如 ``{"a":1,"b":{...}}`` 解析失败），这里改为深度计数配对。
+    """
+    if not content:
+        return None
+    text = content.strip()
+
+    # 剥离 ```json ... ``` 代码围栏
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+
     try:
-        return json.loads(content)
+        return json.loads(text)
     except json.JSONDecodeError:
         pass
-    match = re.search(r"\{[^{}]*\}", content, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
+
+    # 括号配对：找到第一个 '{' 及其匹配的 '}'（支持嵌套）
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(text[start:i + 1])
+                except json.JSONDecodeError:
+                    return None
     return None
 
 

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Callable, TypeVar
 
@@ -22,9 +23,12 @@ class TimeoutError(Exception):  # noqa: A001 — 有意与 builtin 同名以便�
     """同步调用超时"""
 
 
-# 复用一个守护线程池，避免每次调用都创建/销毁线程
+# 复用一个守护线程池，避免每次调用都创建/销毁线程。
+# 超时的调用无法被强杀，会留下后台僵尸线程占用 worker；多币种 Supervisor
+# 下若 worker 数 > 池容量，新任务会排队而非真正并发。故按 CPU 放大池容量，
+# 降低被僵尸线程占满导致"排队即超时"的概率。
 _EXECUTOR = ThreadPoolExecutor(
-    max_workers=4,
+    max_workers=max(8, (os.cpu_count() or 4) * 2),
     thread_name_prefix="okxq-timeout",
 )
 

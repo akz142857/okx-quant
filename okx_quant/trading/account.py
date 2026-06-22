@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Optional
 
@@ -22,8 +23,11 @@ class AccountSnapshot:
         self._ttl = ttl_seconds
         self._snap: Optional[BalanceSnapshot] = None
         self._ts: float = 0.0
+        # Supervisor 多 worker 线程 + dashboard 线程会并发访问同一个实例，
+        # 用锁保护 _snap/_ts 的读写一致性，并避免重复并发刷新。
+        self._lock = threading.Lock()
 
-    def _refresh(self) -> None:
+    def _refresh_locked(self) -> None:
         try:
             self._snap = self._exchange.get_balance()
             self._ts = time.time()
@@ -32,9 +36,10 @@ class AccountSnapshot:
 
     def snapshot(self, force: bool = False) -> Optional[BalanceSnapshot]:
         """返回最新快照，默认使用 TTL 缓存"""
-        if force or self._snap is None or (time.time() - self._ts) >= self._ttl:
-            self._refresh()
-        return self._snap
+        with self._lock:
+            if force or self._snap is None or (time.time() - self._ts) >= self._ttl:
+                self._refresh_locked()
+            return self._snap
 
     def total_equity(self, force: bool = False) -> float:
         snap = self.snapshot(force=force)
@@ -46,4 +51,5 @@ class AccountSnapshot:
 
     def invalidate(self) -> None:
         """交易后清除缓存，下次查询将强制刷新"""
-        self._ts = 0.0
+        with self._lock:
+            self._ts = 0.0

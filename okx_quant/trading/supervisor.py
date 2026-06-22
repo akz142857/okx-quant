@@ -11,6 +11,7 @@ from dataclasses import replace
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.exchange import Exchange, OKXExchange
 from okx_quant.risk.manager import RiskConfig, RiskManager
+from okx_quant.trading.account import AccountSnapshot
 from okx_quant.trading.executor import LiveTrader
 from okx_quant.trading.position_restore import restore_to_risk
 from okx_quant.trading.state import StateStore
@@ -59,9 +60,9 @@ class Supervisor:
             raise ValueError("Supervisor 需要 instruments / strategy_factory / risk_config")
 
         self.exchange: Exchange = exchange if exchange is not None else OKXExchange(client)
-        self.client: "OKXRestClient | None" = (
-            client if client is not None else getattr(self.exchange, "client", None)
-        )
+        # 全账户共享一个余额缓存：账户权益/可用 USDT 是账户级状态，不应每个
+        # worker 各持一份（否则缓存彼此不一致，且 N 倍冗余 API 调用）。
+        self._account = AccountSnapshot(self.exchange, ttl_seconds=300)
         self.instruments = instruments
         self.bar = bar
         self.lookback = lookback
@@ -96,6 +97,7 @@ class Supervisor:
                 risk_manager=self.risk,
                 signal_timeout_s=self._signal_timeout_s,
                 state_store=self._state_store,
+                account=self._account,
             )
             self._workers.append(trader)
 
