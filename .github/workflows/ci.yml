@@ -1,0 +1,150 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --locked --dev
+
+      - name: Compile sources
+        run: uv run python -m compileall -q main.py okx_quant scripts tests
+
+      - name: Static lint
+        run: uv run ruff check main.py okx_quant scripts tests
+
+      - name: Validate shell entrypoints
+        run: |
+          bash -n scripts/*.sh
+          shellcheck scripts/*.sh
+
+      - name: Validate systemd units
+        run: |
+          sudo groupadd --system okxquant-data
+          sudo useradd --system --user-group --no-create-home okxquant-trader
+          sudo useradd --system --user-group --no-create-home okxquant-watchdog
+          sudo useradd --system --user-group --no-create-home okxquant-backup
+          sudo usermod -a -G okxquant-data okxquant-trader
+          sudo usermod -a -G okxquant-data okxquant-watchdog
+          sudo usermod -a -G okxquant-data okxquant-backup
+          sudo install -d \
+            /opt/okx-quant/venv/bin \
+            /opt/okx-quant/current/scripts \
+            /etc/okx-quant \
+            /etc/okx-quant/admission \
+            /etc/okx-quant/keys \
+            /var/lib/okx-quant/production \
+            /var/lib/okx-quant/admission \
+            /var/lib/okx-quant-backup/daily \
+            /var/log/okx-quant
+          sudo chown okxquant-trader:okxquant-data /var/lib/okx-quant/production
+          sudo chmod 2750 /var/lib/okx-quant/production
+          sudo touch \
+            /opt/okx-quant/venv/bin/python \
+            /opt/okx-quant/venv/bin/okx-quant-watchdog \
+            /opt/okx-quant/current/scripts/activate_release.py \
+            /opt/okx-quant/current/scripts/production_launch.py \
+            /opt/okx-quant/current/scripts/daily_archive.py \
+            /opt/okx-quant/current/scripts/page_service_failure.py \
+            /opt/okx-quant/current/REVISION \
+            /etc/okx-quant/config.yaml \
+            /etc/okx-quant/launch.json \
+            /etc/okx-quant/production.env \
+            /etc/okx-quant/backup.env \
+            /etc/okx-quant/watchdog.env
+          sudo chmod +x \
+            /opt/okx-quant/venv/bin/python \
+            /opt/okx-quant/venv/bin/okx-quant-watchdog
+          systemd-analyze verify \
+            deploy/systemd/*.service \
+            deploy/systemd/*.timer
+          sudo install -o okxquant-trader -g okxquant-data -m 0640 \
+            /dev/null /var/lib/okx-quant/production/permission-probe.db
+          sudo -u okxquant-trader python3 -c \
+            "import sqlite3; c=sqlite3.connect('/var/lib/okx-quant/production/permission-probe.db'); c.execute('CREATE TABLE permission_probe(value TEXT)'); c.execute(\"INSERT INTO permission_probe VALUES('readable')\"); c.commit(); c.close()"
+          sudo -u okxquant-trader test -w \
+            /var/lib/okx-quant/production/permission-probe.db
+          sudo -u okxquant-watchdog test -r \
+            /var/lib/okx-quant/production/permission-probe.db
+          sudo -u okxquant-watchdog python3 -c \
+            "import sqlite3; c=sqlite3.connect('file:/var/lib/okx-quant/production/permission-probe.db?mode=ro', uri=True); assert c.execute('SELECT value FROM permission_probe').fetchone()[0] == 'readable'; c.close()"
+          sudo -u okxquant-watchdog test ! -w \
+            /var/lib/okx-quant/production/permission-probe.db
+          sudo -u okxquant-backup test -r \
+            /var/lib/okx-quant/production/permission-probe.db
+          sudo -u okxquant-backup python3 -c \
+            "import sqlite3; c=sqlite3.connect('file:/var/lib/okx-quant/production/permission-probe.db?mode=ro', uri=True); assert c.execute('SELECT value FROM permission_probe').fetchone()[0] == 'readable'; c.close()"
+          sudo -u okxquant-backup test ! -w \
+            /var/lib/okx-quant/production/permission-probe.db
+
+      - name: Security scan
+        run: uv run bandit -q -r okx_quant scripts --severity-level high --confidence-level high
+
+      - name: Run tests and domain state-machine branch coverage gate
+        run: >-
+          uv run pytest -q
+          --cov=okx_quant
+          --cov-config=.coveragerc-core
+          --cov-branch
+          --cov-report=term-missing
+          --cov-fail-under=95
+
+      - name: Fault-injection evidence
+        run: uv run python scripts/fault_injection.py --output fault-injection.json
+
+      - name: Build immutable release artifact
+        run: uv build
+
+      - name: Bind deployment revision
+        run: printf '%s\n' "${GITHUB_SHA}" > REVISION
+
+      - name: Build deployment source snapshot
+        run: >-
+          git archive
+          --format=tar.gz
+          --prefix="okx-quant-${GITHUB_SHA}/"
+          --add-file=REVISION
+          --add-file=fault-injection.json
+          --output="dist/okx-quant-${GITHUB_SHA}.tar.gz"
+          "${GITHUB_SHA}"
+
+      - name: Publish standalone revision label
+        run: cp REVISION dist/REVISION
+
+      - name: Generate release checksums
+        run: >-
+          uv run python -c
+          "from pathlib import Path; import hashlib;
+          files=sorted(p for p in Path('dist').iterdir()
+          if p.is_file() and p.name != 'SHA256SUMS');
+          Path('dist/SHA256SUMS').write_text(''.join(
+          f'{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n'
+          for p in files), encoding='ascii')"
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: release-artifacts
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: fault-injection-evidence
+          path: fault-injection.json

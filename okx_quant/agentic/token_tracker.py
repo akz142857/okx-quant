@@ -1,7 +1,7 @@
 """Token 用量追踪器 — 线程安全，跨 Agent 累计统计"""
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

@@ -77,7 +77,7 @@ class Screener:
             (选中的交易对列表, 含所有评分的 DataFrame)
         """
         print(f"\n{'='*55}")
-        print(f"  因子选币器 — 三层漏斗筛选")
+        print("  因子选币器 — 三层漏斗筛选")
         print(f"  K 线周期: {self.cfg.bar}  回看: {self.cfg.lookback} 根")
         print(f"{'='*55}")
 
@@ -104,7 +104,7 @@ class Screener:
 
     def _hard_filter(self) -> list[str]:
         """流动性 + 上线时间 + 排除稳定币 → 按成交额排序取 top N"""
-        print(f"\n  [Layer 1] 硬过滤...")
+        print("\n  [Layer 1] 硬过滤...")
 
         # 拉取全量 ticker
         tickers = self.fetcher.get_all_tickers()
@@ -174,7 +174,7 @@ class Screener:
                       f"排除 {len(excluded_afford)} 个买不起的币种")
                 examples = excluded_afford[:5]
                 print(f"    排除示例: {', '.join(examples)}"
-                      + (f" 等" if len(excluded_afford) > 5 else ""))
+                      + (" 等" if len(excluded_afford) > 5 else ""))
 
         # 按 USDT 成交额排序，取 top N
         usdt = usdt.sort_values("vol_usdt", ascending=False)
@@ -358,7 +358,7 @@ class Screener:
             ])
 
         print(f"\n{'='*75}")
-        print(f"  因子评分表（按综合分排序）")
+        print("  因子评分表（按综合分排序）")
         print(f"{'='*75}")
         print(tabulate(rows, headers=headers, tablefmt="simple", stralign="right"))
         print()

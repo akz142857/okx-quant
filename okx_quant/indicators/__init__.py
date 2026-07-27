@@ -1,5 +1,3 @@
-from .trend import sma, ema, macd, bollinger_bands, atr, adx
-from .momentum import rsi, stochastic, cci
 from .cache import (
     cached_adx,
     cached_atr,
@@ -11,6 +9,8 @@ from .cache import (
     populate_cache,
     slice_cache,
 )
+from .momentum import cci, rsi, stochastic
+from .trend import adx, atr, bollinger_bands, ema, macd, sma
 
 __all__ = [
     "sma", "ema", "macd", "bollinger_bands", "atr", "adx",

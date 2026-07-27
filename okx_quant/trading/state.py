@@ -12,13 +12,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
 import tempfile
 from dataclasses import asdict, dataclass, field
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ class TraderState:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: dict) -> "TraderState":
+    def from_dict(cls, d: dict) -> TraderState:
         known = {
             "inst_id", "highest_since_entry", "buy_fail_until", "sell_fail_until",
             "last_signal_name", "last_signal_reason", "last_logged_signal",
@@ -80,7 +80,7 @@ class StateStore:
             raise ValueError(f"非法的 inst_id 路径逃逸: {inst_id!r}")
         return path
 
-    def load(self, inst_id: str) -> Optional[TraderState]:
+    def load(self, inst_id: str) -> TraderState | None:
         try:
             path = self._path(inst_id)
         except ValueError as e:
@@ -123,7 +123,5 @@ class StateStore:
         except ValueError:
             return
         if os.path.isfile(path):
-            try:
+            with contextlib.suppress(OSError):
                 os.remove(path)
-            except OSError:
-                pass

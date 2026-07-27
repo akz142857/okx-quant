@@ -11,29 +11,26 @@ from __future__ import annotations
 
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from typing import Callable, TypeVar
+import queue
+import threading
+from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T")
 
 
 class TimeoutError(Exception):  # noqa: A001 — 有意与 builtin 同名以便上层捕获
     """同步调用超时"""
 
 
-# 复用一个守护线程池，避免每次调用都创建/销毁线程。
-# 超时的调用无法被强杀，会留下后台僵尸线程占用 worker；多币种 Supervisor
-# 下若 worker 数 > 池容量，新任务会排队而非真正并发。故按 CPU 放大池容量，
-# 降低被僵尸线程占满导致"排队即超时"的概率。
-_EXECUTOR = ThreadPoolExecutor(
-    max_workers=max(8, (os.cpu_count() or 4) * 2),
-    thread_name_prefix="okxq-timeout",
-)
+# Python 无法安全杀死线程；用有界守护线程代替 ThreadPoolExecutor。
+# 标准 executor 的非守护 worker 会让“永不返回”的第三方调用阻止进程退出。
+_MAX_IN_FLIGHT = max(8, min(32, (os.cpu_count() or 4) * 2))
+_SLOTS = threading.BoundedSemaphore(_MAX_IN_FLIGHT)
 
 
-def run_with_timeout(func: Callable[..., T], timeout_s: float, *args, **kwargs) -> T:
+def run_with_timeout[T](
+    func: Callable[..., T], timeout_s: float, *args, **kwargs
+) -> T:
     """在独立线程中执行 func，最多等待 timeout_s 秒。
 
     Args:
@@ -48,10 +45,28 @@ def run_with_timeout(func: Callable[..., T], timeout_s: float, *args, **kwargs) 
     if timeout_s is None or timeout_s <= 0:
         return func(*args, **kwargs)
 
-    future = _EXECUTOR.submit(func, *args, **kwargs)
+    if not _SLOTS.acquire(blocking=False):
+        raise TimeoutError("超时调用槽已耗尽，拒绝排队")
+    outcome: queue.Queue[tuple[bool, object]] = queue.Queue(maxsize=1)
+
+    def target() -> None:
+        try:
+            outcome.put((True, func(*args, **kwargs)))
+        except BaseException as exc:
+            outcome.put((False, exc))
+        finally:
+            _SLOTS.release()
+
+    thread = threading.Thread(
+        target=target,
+        name="okxq-timeout-call",
+        daemon=True,
+    )
+    thread.start()
     try:
-        return future.result(timeout=timeout_s)
-    except FutureTimeout as exc:
-        # 不能强制终止线程，只能放任后台运行
-        future.cancel()
+        succeeded, value = outcome.get(timeout=timeout_s)
+    except queue.Empty as exc:
         raise TimeoutError(f"调用超时 {timeout_s}s") from exc
+    if succeeded:
+        return value  # type: ignore[return-value]
+    raise value  # type: ignore[misc]

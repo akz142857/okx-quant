@@ -32,35 +32,26 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import logging
 import os
 import sys
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
 # 让 scripts/ 可以 import 项目代码
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from okx_quant.backtest import BacktestEngine, BacktestReport
+from okx_quant.backtest import BacktestEngine
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.config import load_yaml
 from okx_quant.data.market import MarketDataFetcher
 from okx_quant.strategy import (
     STRATEGY_REGISTRY,
-    BollingerBandStrategy,
-    EnsembleStrategy,
-    MACrossStrategy,
-    RSIMeanReversionStrategy,
     StrategyContext,
-    AdaptiveStrategy,
-    TrendMomentumStrategy,
 )
 
 logging.basicConfig(
@@ -123,7 +114,7 @@ def fetch_candles(
     bar: str,
     days: int,
     cache_dir: Path,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     """优先读本地缓存；过期或缺失则重新拉。"""
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = candle_cache_path(cache_dir, inst, bar, days)
@@ -157,7 +148,7 @@ def fetch_candles(
 # 单个回测执行
 # ============================================================================
 
-def build_strategy(name: str, llm_cfg: Optional[dict] = None):
+def build_strategy(name: str, llm_cfg: dict | None = None):
     """按策略名实例化；LLM 类策略注入客户端（仅技术面模式，不接入新闻）"""
     entry = STRATEGY_REGISTRY.get(name)
     if not entry:
@@ -181,7 +172,7 @@ def run_one(
     inst: str,
     bar: str,
     df: pd.DataFrame,
-    llm_cfg: Optional[dict],
+    llm_cfg: dict | None,
     fee_rate: float,
     slippage: float,
     initial_capital: float,
@@ -447,7 +438,7 @@ def main() -> int:
     elapsed_min = (time.perf_counter() - t0) / 60
     print(f"\n=== 完成 {done_count} 组合，用时 {elapsed_min:.1f} 分钟 ===")
     print(f"结果: {csv_path}")
-    print(f"下一步: uv run python scripts/backtest_report.py  # 生成汇总")
+    print("下一步: uv run python scripts/backtest_report.py  # 生成汇总")
     return 0
 
 

@@ -4,13 +4,12 @@ import json
 import logging
 import re
 import unicodedata
-from typing import Optional
 
 import pandas as pd
 
-from okx_quant.data.news import CryptoNewsFetcher, NewsItem
+from okx_quant.data.news import CryptoNewsFetcher
 from okx_quant.indicators import atr, bollinger_bands, ema, macd, rsi
-from okx_quant.llm.client import LLMClient, LLMResponse
+from okx_quant.llm.client import LLMClient
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType, StrategyContext
 
 logger = logging.getLogger(__name__)
@@ -103,8 +102,8 @@ class LLMStrategy(BaseStrategy):
         self.total_output_tokens: int = 0
         self.total_calls: int = 0
         self._budget_exceeded_logged: bool = False
-        self._llm_client: Optional[LLMClient] = None
-        self._news_fetcher: Optional[CryptoNewsFetcher] = None
+        self._llm_client: LLMClient | None = None
+        self._news_fetcher: CryptoNewsFetcher | None = None
         super().__init__(merged, context)
 
     def _apply_context(self) -> None:
@@ -304,7 +303,7 @@ class LLMStrategy(BaseStrategy):
     _MAX_JSON_ATTEMPTS = 8
 
     @staticmethod
-    def _parse_decision(content: str) -> Optional[dict]:
+    def _parse_decision(content: str) -> dict | None:
         """尝试从 LLM 返回内容中解析交易决策 JSON
 
         防御三道闸：

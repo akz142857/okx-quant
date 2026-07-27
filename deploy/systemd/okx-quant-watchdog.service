@@ -1,0 +1,25 @@
+[Unit]
+Description=Independent OKX Quant heartbeat watchdog
+After=network-online.target
+
+[Service]
+Type=simple
+User=okxquant-watchdog
+Group=okxquant-data
+EnvironmentFile=/etc/okx-quant/watchdog.env
+ExecStart=/opt/okx-quant/venv/bin/okx-quant-watchdog --heartbeat /var/lib/okx-quant/production/heartbeat --database /var/lib/okx-quant/production/trading.db --webhook-env OKX_QUANT_ALERT_WEBHOOK
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/lib/okx-quant
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

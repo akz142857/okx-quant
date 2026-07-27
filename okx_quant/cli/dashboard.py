@@ -1,14 +1,20 @@
 """实盘交易仪表盘 — ANSI 终端面板，每 tick 重绘"""
 
-import os
-import sys
 import shutil
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from okx_quant.cli.colors import (
-    bold, cyan, dim, green, red, yellow, gray,
-    colored_pnl, colored_pnl_pct, colored_signal, colored_regime,
+    bold,
+    colored_pnl,
+    colored_pnl_pct,
+    colored_regime,
+    colored_signal,
+    dim,
+    gray,
+    green,
+    red,
 )
 
 
@@ -221,7 +227,7 @@ class Dashboard:
                 row2(bold("指标"), bold("布林带"))
                 row2(f" %B: {pct_b:.1f}", f" 上轨: ${upper:.6f}")
                 row2(f" RSI: {rsi_val:.1f}", f" 中轨: ${middle:.6f}")
-                row2(f" 买入触发: %B≤0 且 RSI<40", f" 下轨: ${lower:.6f}")
+                row2(" 买入触发: %B≤0 且 RSI<40", f" 下轨: ${lower:.6f}")
             # MA Cross 指标
             elif "fast_ma" in ind:
                 fast = ind["fast_ma"]
@@ -233,9 +239,9 @@ class Dashboard:
                 row2(f" EMA快: ${fast:.6f}", f" 差值: {gap_color}")
                 row2(f" EMA慢: ${slow:.6f}", f" ATR: ${atr_val:.6f}")
                 if gap_pct < 0:
-                    row2(f" 买入触发: 快线上穿慢线", "")
+                    row2(" 买入触发: 快线上穿慢线", "")
                 else:
-                    row2(f" 卖出触发: 快线下穿慢线", "")
+                    row2(" 卖出触发: 快线下穿慢线", "")
             # Adaptive 策略指标
             elif "regime" in ind:
                 regime_label = ind.get("regime", "")

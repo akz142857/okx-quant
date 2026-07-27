@@ -1,0 +1,51 @@
+[Unit]
+Description=OKX Quant production trader
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+Requires=okx-quant-watchdog.service okx-quant-daily-backup.timer
+After=okx-quant-watchdog.service okx-quant-daily-backup.timer
+RequiresMountsFor=/var/lib/okx-quant-backup
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=okxquant-trader
+Group=okxquant-data
+WorkingDirectory=/opt/okx-quant/current
+EnvironmentFile=/etc/okx-quant/production.env
+ExecStartPre=-+/opt/okx-quant/venv/bin/python /opt/okx-quant/current/scripts/activate_release.py --config /etc/okx-quant/config.yaml --release-commit-file /opt/okx-quant/current/REVISION --launch-manifest /etc/okx-quant/launch.json --receipt /var/lib/okx-quant/admission/deployment-receipt.json --ledger /var/lib/okx-quant/admission/demo-observations.json --evidence /etc/okx-quant/admission/evidence.json --max-slippage ${OKX_QUANT_APPROVED_MAX_SLIPPAGE} --approved-max-stress-loss ${OKX_QUANT_APPROVED_MAX_STRESS_LOSS} --observation-public-key /etc/okx-quant/keys/demo-monitor-public.pem --research-public-key /etc/okx-quant/keys/research-policy-public.pem --approval /etc/okx-quant/admission/approval.json --approval-public-key /etc/okx-quant/keys/risk-approval-public.pem
+ExecStart=/opt/okx-quant/venv/bin/python /opt/okx-quant/current/scripts/production_launch.py --config /etc/okx-quant/config.yaml --release-commit-file /opt/okx-quant/current/REVISION --launch-manifest /etc/okx-quant/launch.json --receipt /var/lib/okx-quant/admission/deployment-receipt.json --evidence /etc/okx-quant/admission/evidence.json --approval /etc/okx-quant/admission/approval.json --approval-public-key /etc/okx-quant/keys/risk-approval-public.pem
+Restart=on-failure
+RestartSec=5
+WatchdogSec=20
+TimeoutStartSec=180
+TimeoutStopSec=30
+UMask=0027
+StateDirectory=okx-quant/production
+StateDirectoryMode=2750
+LogsDirectory=okx-quant
+LogsDirectoryMode=0750
+MemoryHigh=500M
+MemoryMax=600M
+CPUQuota=80%
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/okx-quant /var/log/okx-quant
+ReadOnlyPaths=/etc/okx-quant/admission /etc/okx-quant/keys
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

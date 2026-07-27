@@ -1,5 +1,7 @@
 """OrderExecutor 单元测试 —— 使用 FakeExchange 完全本地化"""
 
+from decimal import Decimal
+
 import pytest
 
 from okx_quant.exchange import InstrumentInfo
@@ -75,7 +77,7 @@ def test_sell_removes_position_and_orders():
     assert not risk.has_position("BTC-USDT")
     assert ex.orders[-1].side == "sell"
     # 实际卖单量应为 exchange 可用，而非 pos.size
-    assert ex.orders[-1].size == pytest.approx(0.00999)
+    assert ex.orders[-1].size == Decimal("0.00999")
 
 
 @pytest.mark.unit
@@ -109,6 +111,22 @@ def test_sell_cleans_phantom_when_exchange_balance_dust():
     assert not risk.has_position("BTC-USDT")
     # 不应该向交易所发单
     assert len(ex.orders) == 0
+
+
+@pytest.mark.unit
+def test_sell_preserves_position_when_balance_is_locked():
+    """available=0 但总余额存在通常表示被挂单冻结，不能误删真实仓位。"""
+    oe, ex, risk = _build_order_executor(min_sz=0.01)
+    from okx_quant.risk.manager import PositionInfo
+
+    risk.add_position(PositionInfo("BTC-USDT", size=0.02, entry_price=50000))
+    ex.set_holding("BTC", balance=0.02, available=0.0)
+
+    ok = oe.sell(last_price=50000, reason="exit")
+    assert ok is False
+    assert risk.has_position("BTC-USDT")
+    assert oe.in_sell_cooldown()
+    assert not ex.orders
 
 
 @pytest.mark.unit

@@ -12,10 +12,14 @@ from okx_quant.exchange.base import (
     BalanceSnapshot,
     Candle,
     Exchange,
+    ExchangeReader,
+    ExchangeTrader,
     Holding,
     InstrumentInfo,
     OrderResult,
     Ticker,
+    price_on_tick,
+    tradable_base_quantity,
 )
 from okx_quant.exchange.okx import OKXExchange
 
@@ -23,9 +27,13 @@ __all__ = [
     "BalanceSnapshot",
     "Candle",
     "Exchange",
+    "ExchangeReader",
+    "ExchangeTrader",
     "Holding",
     "InstrumentInfo",
     "OKXExchange",
     "OrderResult",
     "Ticker",
+    "price_on_tick",
+    "tradable_base_quantity",
 ]

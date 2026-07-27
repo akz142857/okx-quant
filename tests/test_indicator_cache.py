@@ -5,19 +5,31 @@ import pytest
 
 from okx_quant.indicators import (
     adx as raw_adx,
+)
+from okx_quant.indicators import (
     atr as raw_atr,
+)
+from okx_quant.indicators import (
     bollinger_bands as raw_bb,
+)
+from okx_quant.indicators import (
     cached_adx,
     cached_atr,
     cached_bollinger,
     cached_ema,
     cached_macd,
     cached_rsi,
-    ema as raw_ema,
-    macd as raw_macd,
     populate_cache,
-    rsi as raw_rsi,
     slice_cache,
+)
+from okx_quant.indicators import (
+    ema as raw_ema,
+)
+from okx_quant.indicators import (
+    macd as raw_macd,
+)
+from okx_quant.indicators import (
+    rsi as raw_rsi,
 )
 
 

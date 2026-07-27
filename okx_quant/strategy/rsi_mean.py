@@ -1,8 +1,9 @@
 """RSI 均值回归策略"""
 
 import pandas as pd
-from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
+
 from okx_quant.indicators import cached_atr, cached_rsi
+from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
 
 
 class RSIMeanReversionStrategy(BaseStrategy):

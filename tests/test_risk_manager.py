@@ -16,6 +16,19 @@ def test_check_order_rejects_when_halted():
 
 
 @pytest.mark.unit
+def test_check_order_allows_sell_when_halted():
+    """停盘只能阻止加仓，不能把已有风险仓位锁住。"""
+    rm = RiskManager(RiskConfig(max_drawdown_pct=0.1), initial_equity=10000)
+    rm.add_position(PositionInfo("BTC-USDT", size=0.1, entry_price=50000))
+    rm.update_equity(8900)
+    assert rm.is_halted
+
+    ok, reason = rm.check_order("BTC-USDT", "sell", 0, 50000, 8900)
+    assert ok
+    assert reason == "通过"
+
+
+@pytest.mark.unit
 def test_drawdown_auto_recovery():
     rm = RiskManager(
         RiskConfig(max_drawdown_pct=0.2, drawdown_recover_ratio=0.5),

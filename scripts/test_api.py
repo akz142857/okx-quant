@@ -20,9 +20,9 @@ import time
 # 项目根目录加入 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-import yaml
+from main import load_env_file
 from okx_quant.client.rest import OKXRestClient
-
+from okx_quant.config import load_yaml
 
 # ── 输出辅助 ──────────────────────────────────────────────
 
@@ -59,13 +59,11 @@ def _header(title: str):
 
 # ── 加载配置 ─────────────────────────────────────────────
 
-def load_config() -> dict:
-    path = "config.yaml"
+def load_config(path: str = "config.yaml") -> dict:
     if not os.path.exists(path):
         print(f"{_RED}错误: 找不到 {path}，请从 config.yaml.example 复制并填写{_RESET}")
         sys.exit(1)
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    return load_yaml(path)
 
 
 # ── 测试步骤 ─────────────────────────────────────────────
@@ -79,8 +77,12 @@ def test_connectivity(client: OKXRestClient, inst_id: str) -> bool:
         t0 = time.time()
         data = client.get("/api/v5/public/time")
         latency = (time.time() - t0) * 1000
-        server_ts = int(data[0]["ts"])
-        _ok(f"服务器时间获取成功  延迟={latency:.0f}ms")
+        server_time = int(data[0]["ts"]) / 1000
+        skew_ms = abs(time.time() - server_time) * 1000
+        _ok(
+            f"服务器时间获取成功  延迟={latency:.0f}ms "
+            f"时钟偏差={skew_ms:.0f}ms"
+        )
     except Exception as e:
         _fail(f"无法连接 OKX 服务器: {e}")
         _info("请检查网络/VPN/代理设置")
@@ -159,79 +161,25 @@ def test_auth(client: OKXRestClient) -> tuple[bool, float]:
 def test_trade(client: OKXRestClient, inst_id: str, available: float) -> bool:
     """测试 3: 下单能力测试
 
-    模拟盘: 市价买入 → 查询 → 卖出（约 1 USDT）
-    实  盘: 限价挂单（远低于市价，不会成交）→ 查询 → 立即撤单
+    仅模拟盘: 市价买入 → 查询 → 卖出（约 1 USDT）
     """
     _header("测试 3: 交易能力（下单测试）")
 
     if client.simulated:
         return _test_trade_simulated(client, inst_id, available)
-    else:
-        return _test_trade_live(client, inst_id)
+    _fail(
+        "--trade 严格禁止实盘写操作；实盘只能使用持久化 "
+        "ProductionRuntime/控制面"
+    )
+    return False
 
 
 def _test_trade_live(client: OKXRestClient, inst_id: str) -> bool:
-    """实盘安全测试: 限价挂单（不会成交）→ 查询 → 撤单"""
-    _info("实盘模式 — 使用限价挂单 + 立即撤单测试，不会实际成交")
-
-    # 获取当前价格
-    try:
-        ticker = client.get_ticker(inst_id)
-        price = float(ticker.get("last", 0))
-    except Exception as e:
-        _fail(f"获取价格失败: {e}")
-        return False
-
-    if price <= 0:
-        _fail("价格异常，无法测试")
-        return False
-
-    # 挂一个远低于市价 50% 的限价买单，绝不会成交
-    test_price = price * 0.5
-    # 计算最小下单量（约 1 USDT）
-    min_usdt = 1.0
-    size = min_usdt / test_price
-    size_str = f"{size:.4f}" if test_price < 1 else f"{size:.8f}".rstrip("0").rstrip(".")
-    px_str = f"{test_price:.6f}" if test_price < 1 else f"{test_price:.4f}"
-
-    _info(f"挂限价买单: 价格=${px_str}（市价的50%，不会成交）数量={size_str}")
-
-    # 3a. 限价挂单
-    ord_id = ""
-    try:
-        result = client.place_order(
-            inst_id=inst_id,
-            side="buy",
-            ord_type="limit",
-            sz=size_str,
-            px=px_str,
-        )
-        ord_id = result.get("ordId", "")
-        _ok(f"限价挂单成功  ordId={ord_id}")
-    except Exception as e:
-        _fail(f"挂单失败: {e}")
-        _info("可能原因: 最小下单量限制 / 账户模式不匹配 / IP 白名单限制")
-        return False
-
-    # 3b. 查询订单
-    time.sleep(0.5)
-    try:
-        order = client.get_order(inst_id, ord_id)
-        state = order.get("state", "unknown")
-        _ok(f"订单查询成功  状态={state}")
-    except Exception as e:
-        _warn(f"订单查询失败: {e}")
-
-    # 3c. 立即撤单
-    try:
-        client.cancel_order(inst_id, ord_id)
-        _ok("撤单成功  无资金变动")
-    except Exception as e:
-        _fail(f"撤单失败: {e}")
-        _info(f"请手动撤销订单 ordId={ord_id}")
-        return False
-
-    return True
+    """保留兼容入口，但任何实盘调用都 fail closed。"""
+    del client, inst_id
+    raise RuntimeError(
+        "scripts/test_api.py 禁止实盘写；使用 ProductionRuntime"
+    )
 
 
 def _test_trade_simulated(client: OKXRestClient, inst_id: str, available: float) -> bool:
@@ -316,6 +264,12 @@ def _test_trade_simulated(client: OKXRestClient, inst_id: str, available: float)
 
 def main():
     parser = argparse.ArgumentParser(description="OKX API 连通性与交易能力诊断")
+    parser.add_argument("--config", default="config.yaml", help="配置文件路径")
+    parser.add_argument(
+        "--env-file",
+        default="",
+        help="安全读取 KEY=VALUE 环境文件（不执行 shell）",
+    )
     parser.add_argument("--trade", action="store_true", help="执行模拟盘交易测试（买入→卖出）")
     parser.add_argument("--inst", default="DOGE-USDT", help="测试交易对 (默认 DOGE-USDT)")
     args = parser.parse_args()
@@ -323,14 +277,18 @@ def main():
     print(f"\n{_BOLD}OKX API 诊断工具{_RESET}")
     print(f"交易对: {args.inst}")
 
-    cfg = load_config()
+    load_env_file(args.env_file)
+    cfg = load_config(args.config)
     okx_cfg = cfg.get("okx", {})
     client = OKXRestClient(
         api_key=okx_cfg.get("api_key", ""),
         secret_key=okx_cfg.get("secret_key", ""),
         passphrase=okx_cfg.get("passphrase", ""),
         simulated=okx_cfg.get("simulated", True),
-        timeout=10,
+        base_url=okx_cfg.get("base_url", ""),
+        proxy=okx_cfg.get("proxy", ""),
+        timeout=int(okx_cfg.get("timeout", 10)),
+        max_retries=int(okx_cfg.get("max_retries", 3)),
     )
 
     results = {}
@@ -354,6 +312,8 @@ def main():
             results["trade"] = test_trade(client, args.inst, available)
 
     _print_summary(results)
+    if not all(results.values()):
+        sys.exit(1)
 
 
 def _print_summary(results: dict):

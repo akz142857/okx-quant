@@ -1,0 +1,237 @@
+{
+  "evidence_metadata": {
+    "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "config_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cost_model_hash": "eb85ad83dc7ffa7b897630c1047ba852ab479ee85e879d977911566155c357d8",
+    "cost_model_manifest": {
+      "model": "okx_quant.research.costs.DynamicCostModel",
+      "fee_rate": 0.001,
+      "minimum_slippage": 0.0005,
+      "range_fraction": 0.05,
+      "impact_coefficient": 0.1,
+      "maximum_slippage": 0.01,
+      "stress_multiplier": 1.0
+    },
+    "dataset_provenance": {
+      "walk_forward": {
+        "version": 2,
+        "kind": "walk_forward",
+        "provider": "OKX",
+        "source_uri": "s3://replace-me/raw/walk-forward.json",
+        "source_version_id": "replace-with-s3-version-id",
+        "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+        "source_artifact": {
+          "version": 1,
+          "kind": "walk_forward",
+          "provider": "OKX",
+          "bar": "1D",
+          "datasets": {}
+        },
+        "dataset_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "retrieved_at": "2026-07-26T00:00:00+00:00",
+        "start_at": "2024-01-01T00:00:00+00:00",
+        "end_at": "2026-01-01T00:00:00+00:00",
+        "instruments": ["BTC-USDT"],
+        "bar": "1D",
+        "rows": 731
+      },
+      "portfolio": {
+        "version": 2,
+        "kind": "portfolio",
+        "provider": "OKX",
+        "source_uri": "s3://replace-me/raw/portfolio.json",
+        "source_version_id": "replace-with-s3-version-id",
+        "source_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "source_artifact": {
+          "version": 1,
+          "kind": "portfolio",
+          "provider": "OKX",
+          "bar": "1D",
+          "datasets": {}
+        },
+        "dataset_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "retrieved_at": "2026-07-26T00:00:00+00:00",
+        "start_at": "2024-01-01T00:00:00+00:00",
+        "end_at": "2026-01-01T00:00:00+00:00",
+        "instruments": ["BTC-USDT", "ETH-USDT"],
+        "bar": "1D",
+        "rows": 1462
+      }
+    },
+    "research_manifest_hash": "18bd2934713c941b37962265d943ac9e96d9d0e10a90e7991a0eda3caeb6ffdf",
+    "approved_max_slippage_ratio": 0.01,
+    "monitor_key_fingerprint": "3333333333333333333333333333333333333333333333333333333333333333",
+    "research_policy_key_fingerprint": "4444444444444444444444444444444444444444444444444444444444444444",
+    "account_id": "replace-with-canary-subaccount",
+    "environment": "canary",
+    "evidence_uri": "s3://replace-me/immutable-evidence/manifest.json",
+    "generated_at": "2026-07-27T00:00:00+00:00",
+    "expires_at": "2026-07-28T00:00:00+00:00",
+    "operator": "replace-with-operator",
+    "risk_approver": "replace-with-independent-risk-approver"
+  },
+  "walk_forward_metrics": {
+    "folds": 0,
+    "positive_folds": 0,
+    "oos_sharpe_ratio": 0,
+    "oos_return_pct": 0,
+    "oos_observations": 0,
+    "oos_duration_days": 0,
+    "oos_total_trades": 0,
+    "oos_max_drawdown_pct": 0,
+    "cost_model_hash": "eb85ad83dc7ffa7b897630c1047ba852ab479ee85e879d977911566155c357d8",
+    "dataset_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "strategy_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "strategy_family_manifest": {
+      "version": 1,
+      "strategy_types": ["replace.with.module.Strategy"]
+    },
+    "strategy_family_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "evaluation_manifest_hash": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "portfolio_metrics": {
+    "total_return_pct": 0,
+    "covers_full_cycle": false,
+    "shared_cash": true,
+    "cycle_duration_days": 0,
+    "cycle_observations": 0,
+    "cycle_coverage": 0,
+    "cycle_max_gap_days": 0,
+    "cycle_window_days": 90,
+    "cycle_max_return": 0,
+    "cycle_min_return": 0,
+    "cycle_regime_threshold": 0.2,
+    "cycle_daily_benchmark": [],
+    "cycle_benchmark_weights": {
+      "BTC-USDT": 0.5,
+      "ETH-USDT": 0.5
+    },
+    "cost_model_hash": "eb85ad83dc7ffa7b897630c1047ba852ab479ee85e879d977911566155c357d8",
+    "dataset_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "strategy_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "evaluation_manifest_hash": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "robustness": {
+    "plateau": false,
+    "positive_ratio": 0,
+    "connected_positive_ratio": 0,
+    "mean_sharpe": 0,
+    "sharpe_std": 0,
+    "rows": [],
+    "cost_model_hash": "eb85ad83dc7ffa7b897630c1047ba852ab479ee85e879d977911566155c357d8",
+    "dataset_hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "strategy_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "strategy_family_manifest": {
+      "version": 1,
+      "strategy_types": ["replace.with.module.Strategy"]
+    },
+    "strategy_family_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "evaluation_manifest_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+    "parameter_grid_manifest": {
+      "version": 1,
+      "parameters": {
+        "period": [5, 10, 15, 20, 25]
+      },
+      "point_count": 5
+    },
+    "parameter_grid_hash": "8888888888888888888888888888888888888888888888888888888888888888"
+  },
+  "stress_evidence": {
+    "loss_usdt": 0,
+    "cost_model_hash": "eb85ad83dc7ffa7b897630c1047ba852ab479ee85e879d977911566155c357d8",
+    "dataset_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "strategy_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "scenario_manifest": [
+      {
+        "name": "liquidity-gap",
+        "gap_ratio": 0.1,
+        "volume_multiplier": 0.1,
+        "volatility_multiplier": 3.0
+      }
+    ],
+    "scenario_manifest_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "initial_capital": 10000,
+    "scenarios": [
+      {
+        "name": "liquidity-gap",
+        "scenario": {
+          "name": "liquidity-gap",
+          "gap_ratio": 0.1,
+          "volume_multiplier": 0.1,
+          "volatility_multiplier": 3.0
+        },
+        "scenario_hash": "9999999999999999999999999999999999999999999999999999999999999999",
+        "final_capital": 10000,
+        "loss_usdt": 0,
+        "stressed_dataset_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "research_policy": {
+    "payload": {
+      "version": 1,
+      "action": "pre-register-research-policy",
+      "policy_id": "replace-with-policy-id",
+      "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "strategy_family_hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "parameter_grid_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "stress_scenario_manifest_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "dataset_sources": {
+        "walk_forward": {
+          "source_uri": "s3://replace-me/raw/walk-forward.json",
+          "source_version_id": "replace-with-s3-version-id",
+          "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+        },
+        "portfolio": {
+          "source_uri": "s3://replace-me/raw/portfolio.json",
+          "source_version_id": "replace-with-s3-version-id",
+          "source_sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+        }
+      },
+      "evaluation_started_at": "2026-07-27T01:00:00+00:00",
+      "issued_at": 1785112200
+    },
+    "signature": "replace-with-base64-ed25519-signature"
+  },
+  "stress_runner_attestation": {
+    "payload": {
+      "version": 1,
+      "action": "attest-stress-run",
+      "policy_id": "replace-with-policy-id",
+      "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "dataset_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "cost_model_hash": "eb85ad83dc7ffa7b897630c1047ba852ab479ee85e879d977911566155c357d8",
+      "portfolio_evaluation_manifest_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+      "scenario_manifest_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+      "stress_evidence_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "runner": "replace-with-independent-runner",
+      "issued_at": 1785117600
+    },
+    "signature": "replace-with-base64-ed25519-signature"
+  },
+  "engineering_checks": {
+    "ci": false,
+    "state_machine_coverage": false,
+    "static_scan": false,
+    "migration_restore": false,
+    "fault_injection": false,
+    "demo_contract": false,
+    "response_loss": false,
+    "partial_fill": false,
+    "ws_recovery": false
+  },
+  "operational_checks": {
+    "alerts": false,
+    "runbook": true,
+    "restore_rto": false,
+    "audit_chain": false,
+    "api_key_permissions": false,
+    "ip_whitelist": false,
+    "heartbeat_page": false,
+    "kill_switch": false,
+    "flatten_drill": false,
+    "environment_isolation": false,
+    "canary_approval": false,
+    "llm_shadow_or_disabled": false
+  }
+}

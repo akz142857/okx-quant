@@ -1,11 +1,11 @@
-from .base import BaseStrategy, Signal, SignalType, StrategyContext
-from .ma_cross import MACrossStrategy
-from .rsi_mean import RSIMeanReversionStrategy
-from .bollinger import BollingerBandStrategy
-from .llm_strategy import LLMStrategy
-from .ensemble import EnsembleStrategy
-from .multi_agent_strategy import MultiAgentStrategy
 from .adaptive import AdaptiveStrategy
+from .base import BaseStrategy, Signal, SignalType, StrategyContext
+from .bollinger import BollingerBandStrategy
+from .ensemble import EnsembleStrategy
+from .llm_strategy import LLMStrategy
+from .ma_cross import MACrossStrategy
+from .multi_agent_strategy import MultiAgentStrategy
+from .rsi_mean import RSIMeanReversionStrategy
 from .trend_momentum import TrendMomentumStrategy
 
 # 策略注册表：key -> (class, 中文名, 描述)

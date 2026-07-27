@@ -1,9 +1,12 @@
 """Exchange Protocol / FakeExchange 行为测试"""
 
+from decimal import Decimal
+
 import pandas as pd
 import pytest
+import requests
 
-from okx_quant.exchange import BalanceSnapshot, InstrumentInfo
+from okx_quant.exchange import BalanceSnapshot, InstrumentInfo, OKXExchange
 from okx_quant.exchange.fake import FakeExchange
 
 
@@ -71,3 +74,91 @@ def test_fake_exchange_candles_returns_set_data():
     out = ex.get_candles("BTC-USDT", "1H", 3)
     assert len(out) == 3
     assert out["close"].tolist() == [3, 4, 5]
+
+
+@pytest.mark.unit
+def test_okx_algo_ack_without_query_fact_is_never_active():
+    class AckOnlyClient:
+        def place_algo_order(self, **_kwargs):
+            return {"algoId": "ack-only"}
+
+        def get_algo_order(self, **_kwargs):
+            raise requests.ConnectionError("detail unavailable")
+
+    exchange = OKXExchange(AckOnlyClient())
+    with pytest.raises(requests.ConnectionError, match="unavailable"):
+        exchange.place_protection_order(
+            "BTC-USDT",
+            size=0.1,
+            stop_loss=49_000,
+            take_profit=52_000,
+            algo_cl_ord_id="QACKONLY01",
+        )
+    with pytest.raises(ValueError, match="algo.sz"):
+        OKXExchange._map_algo({})
+
+
+@pytest.mark.unit
+def test_okx_balance_rejects_malformed_monetary_fact():
+    class MalformedBalanceClient:
+        def get_balance(self):
+            return [{
+                "totalEq": "100",
+                "details": [{
+                    "ccy": "BTC",
+                    "cashBal": "malformed",
+                    "availBal": "1",
+                }],
+            }]
+
+    with pytest.raises(ValueError, match="cashBal"):
+        OKXExchange(MalformedBalanceClient()).get_balance()
+
+
+@pytest.mark.unit
+def test_okx_order_decimal_serialization_never_truncates_precision():
+    class CaptureClient:
+        def __init__(self):
+            self.size = ""
+
+        def place_order(self, **kwargs):
+            self.size = kwargs["sz"]
+            return {"ordId": "o-precise"}
+
+        def get_order(self, *_args, **_kwargs):
+            return {
+                "state": "live",
+                "accFillSz": "0",
+                "avgPx": "",
+                "fee": "0",
+            }
+
+    client = CaptureClient()
+    result = OKXExchange(client).place_market_order(
+        "BTC-USDT",
+        "buy",
+        Decimal("0.000000001234567890"),
+    )
+    assert client.size == "0.00000000123456789"
+    assert result.size == Decimal("0.000000001234567890")
+
+
+@pytest.mark.unit
+def test_okx_sell_does_not_send_unsupported_slippage_contract():
+    class CaptureClient:
+        def __init__(self):
+            self.kwargs = {}
+
+        def place_order(self, **kwargs):
+            self.kwargs = kwargs
+            return {"ordId": "o-sell"}
+
+    client = CaptureClient()
+    OKXExchange(client).place_market_order(
+        "BTC-USDT",
+        "sell",
+        Decimal("0.1"),
+        max_slippage=Decimal("0.01"),
+    )
+    assert client.kwargs["tgt_ccy"] is None
+    assert client.kwargs["max_slippage"] is None

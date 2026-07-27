@@ -1,0 +1,8 @@
+[run]
+branch = True
+source = okx_quant
+
+[report]
+include =
+    okx_quant/domain/orders.py
+show_missing = True

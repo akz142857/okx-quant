@@ -6,7 +6,6 @@ AgenticPipeline 协调 8 个 Agent 的完整流程：
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
 
 from okx_quant.llm.client import LLMClient
 
@@ -190,7 +189,7 @@ class AgenticPipeline:
                         reports[display] = "(分析师调用失败)"
             except TimeoutError:
                 # 部分分析师超时，保留已完成的结果
-                for future, fn_name in futures.items():
+                for _future, fn_name in futures.items():
                     display = _DISPLAY_NAMES.get(fn_name, fn_name)
                     if display not in reports:
                         logger.warning("[Pipeline] 分析师 %s 超时", display)

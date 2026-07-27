@@ -1,6 +1,5 @@
 """回测引擎单元测试"""
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -66,6 +65,51 @@ def test_buy_hold_executes_on_next_bar_open(synthetic_ohlcv):
     # 信号在第 0 根 K 线结束产生 → 在第 1 根 K 线 open 成交
     expected_entry = synthetic_ohlcv["open"].iloc[1]
     assert trade.entry_price == pytest.approx(expected_entry, rel=1e-6)
+
+
+@pytest.mark.unit
+def test_full_position_budget_includes_entry_fee(synthetic_ohlcv):
+    engine = BacktestEngine(initial_capital=10000, fee_rate=0.001, slippage=0.0)
+    result = engine.run(synthetic_ohlcv, BuyHoldStrategy(), "BTC-USDT")
+    trade = result.trades[0]
+
+    # 100% 仓位表示“成交额 + 买入费”不超过现金，不能产生负现金。
+    entry_notional = trade.entry_price * trade.size
+    assert entry_notional * (1 + engine.fee_rate) == pytest.approx(10000.0)
+
+
+@pytest.mark.unit
+def test_sl_tp_shift_with_next_open_fill_price():
+    df = pd.DataFrame({
+        "ts": pd.date_range("2026-01-01", periods=3, freq="1h", tz="UTC"),
+        "open": [100.0, 110.0, 110.0],
+        "high": [101.0, 111.0, 111.0],
+        "low": [99.0, 109.0, 109.0],
+        "close": [100.0, 110.0, 110.0],
+        "vol": [100, 100, 100],
+    })
+
+    class FixedProtection(BaseStrategy):
+        name = "FixedProtection"
+
+        def generate_signal(self, hist, inst_id):
+            if len(hist) == 1:
+                return Signal(
+                    SignalType.BUY,
+                    inst_id,
+                    price=100.0,
+                    size_pct=0.5,
+                    stop_loss=90.0,
+                    take_profit=120.0,
+                )
+            return Signal(SignalType.HOLD, inst_id, price=float(hist["close"].iloc[-1]))
+
+    trade = BacktestEngine(fee_rate=0.0, slippage=0.0).run(
+        df, FixedProtection(), "BTC-USDT"
+    ).trades[0]
+    assert trade.entry_price == pytest.approx(110.0)
+    assert trade.stop_loss == pytest.approx(99.0)
+    assert trade.take_profit == pytest.approx(132.0)
 
 
 @pytest.mark.unit

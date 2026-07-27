@@ -35,7 +35,6 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Optional
 
 import pandas as pd
 
@@ -46,7 +45,6 @@ from okx_quant.client.rest import OKXRestClient
 from okx_quant.config import load_yaml
 from okx_quant.data.market import MarketDataFetcher
 from okx_quant.strategy import STRATEGY_REGISTRY, StrategyContext
-
 
 # ============================================================================
 # 每策略的扫描维度（保守范围：默认值 ±约 50%）
@@ -113,7 +111,7 @@ def get_df(
     days: int,
     cache_dirs: list[Path],
     fetcher: MarketDataFetcher,
-) -> Optional[pd.DataFrame]:
+) -> pd.DataFrame | None:
     """尝试从多个 cache_dirs 找已缓存的 parquet；找不到则拉取"""
     for cache_dir in cache_dirs:
         path = cache_dir / f"{inst}_{bar}_{days}d.parquet"
@@ -141,7 +139,7 @@ def get_df(
 # 单参数扫描
 # ============================================================================
 
-def build_strategy(name: str, params: dict, llm_cfg: Optional[dict]):
+def build_strategy(name: str, params: dict, llm_cfg: dict | None):
     entry = STRATEGY_REGISTRY[name]
     cls = entry[0]
     ctx = None
@@ -215,14 +213,14 @@ def sweep(
     bar: str,
     days: int,
     df_path: Path,
-    llm_cfg: Optional[dict],
+    llm_cfg: dict | None,
     fee_rate: float,
     slippage: float,
     initial_capital: float,
     outdir: Path,
     parallel: int,
-    sweep_params: Optional[list[str]] = None,
-    custom_values: Optional[dict[str, list]] = None,
+    sweep_params: list[str] | None = None,
+    custom_values: dict[str, list] | None = None,
 ) -> Path:
     """对单个 (strategy, inst, bar) 做 OAT 扫描，返回输出 CSV 路径"""
     sweep_spec = STRATEGY_SWEEP.get(strategy, {})
@@ -277,7 +275,7 @@ def sweep(
     return out_csv
 
 
-def analyze(csv_path: Path, baseline_sharpe: Optional[float] = None):
+def analyze(csv_path: Path, baseline_sharpe: float | None = None):
     """读 sweep CSV，输出每参数的 Sharpe 曲线 + robustness 评分"""
     df = pd.read_csv(csv_path, keep_default_na=False)
     df["error"] = df["error"].fillna("").astype(str)

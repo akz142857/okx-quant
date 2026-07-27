@@ -2,8 +2,7 @@
 
 import logging
 import threading
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +41,7 @@ class RiskManager:
     每次 K 线结束后调用 `update_equity()` 更新净值，监控回撤。
     """
 
-    def __init__(self, config: Optional[RiskConfig] = None, initial_equity: float = 0.0):
+    def __init__(self, config: RiskConfig | None = None, initial_equity: float = 0.0):
         self.config = config or RiskConfig()
         self.initial_equity = initial_equity
         self.peak_equity = initial_equity
@@ -78,7 +77,7 @@ class RiskManager:
         with self._lock:
             return inst_id in self._positions
 
-    def get_position(self, inst_id: str) -> Optional[PositionInfo]:
+    def get_position(self, inst_id: str) -> PositionInfo | None:
         """返回持仓引用。
 
         注意：返回的是内部 PositionInfo 的引用（非拷贝），调用方**不应**
@@ -87,6 +86,14 @@ class RiskManager:
         """
         with self._lock:
             return self._positions.get(inst_id)
+
+    def list_positions(self) -> list[PositionInfo]:
+        """返回仓位快照副本，供 durable journal 投影桥接。"""
+        with self._lock:
+            return [
+                PositionInfo(**position.__dict__)
+                for position in self._positions.values()
+            ]
 
     def update_stop_loss(self, inst_id: str, new_sl: float) -> bool:
         """线程安全地更新止损价（上移）。返回是否发生了更新。"""
@@ -131,10 +138,12 @@ class RiskManager:
             (allowed, reason) — allowed=False 时附带拒绝原因
         """
         with self._lock:
-            if self._trading_halted:
-                return False, f"交易已暂停: {self._halt_reason}"
-
             if side == "buy":
+                # 停盘只禁止增加风险。已有仓位的卖出/减仓必须始终允许，
+                # 否则最大回撤保护反而会把风险仓位锁在账户里。
+                if self._trading_halted:
+                    return False, f"交易已暂停: {self._halt_reason}"
+
                 # 最大持仓数检查
                 if len(self._positions) >= self.config.max_open_positions:
                     return False, f"持仓数已达上限 ({self.config.max_open_positions})"

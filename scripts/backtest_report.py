@@ -121,7 +121,7 @@ def main() -> int:
             total_in = llm_df["llm_input_tokens"].sum()
             total_out = llm_df["llm_output_tokens"].sum()
             cost = (total_in * 0.14 + total_out * 0.28) / 1_000_000
-            print(f"\n\n## 7. LLM 成本（DeepSeek 定价）\n")
+            print("\n\n## 7. LLM 成本（DeepSeek 定价）\n")
             print(f"  LLM 组合:   {len(llm_df)}")
             print(f"  总调用数:   {llm_df['llm_calls'].sum()}")
             print(f"  input tokens:  {int(total_in):,}")

@@ -2,7 +2,7 @@
 
 import logging
 import time
-from typing import Optional
+
 import pandas as pd
 
 from okx_quant.client.rest import OKXRestClient
@@ -20,7 +20,7 @@ _BAR_MINUTES = {
 }
 
 
-def _bar_to_timedelta(bar: str) -> Optional[pd.Timedelta]:
+def _bar_to_timedelta(bar: str) -> pd.Timedelta | None:
     minutes = _BAR_MINUTES.get(bar)
     return pd.Timedelta(minutes=minutes) if minutes else None
 
@@ -66,7 +66,7 @@ class MarketDataFetcher:
         翻页间使用轻量退避防限流；REST 客户端自身也会在 429 / 50011 时重试。
         """
         all_raw: list = []
-        after: Optional[str] = None
+        after: str | None = None
         seen_after: set[str] = set()
         batch = min(300, total)
 
@@ -219,7 +219,11 @@ class MarketDataFetcher:
     @staticmethod
     def _pct(open_price, last_price) -> float:
         try:
-            o, l = float(open_price), float(last_price)
-            return round((l - o) / o * 100, 4) if o else 0.0
+            open_value, last_value = float(open_price), float(last_price)
+            return (
+                round((last_value - open_value) / open_value * 100, 4)
+                if open_value
+                else 0.0
+            )
         except (TypeError, ValueError, ZeroDivisionError):
             return 0.0

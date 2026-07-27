@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from decimal import Decimal
 
 import pandas as pd
 
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.data.market import MarketDataFetcher
+from okx_quant.domain.orders import (
+    ExchangeAlgoOrder,
+    ExchangeFill,
+    ExchangeOrder,
+    OrderState,
+    map_exchange_algo_state,
+    map_exchange_order_state,
+    parse_decimal_fact,
+)
 from okx_quant.exchange.base import (
     BalanceSnapshot,
     Exchange,
@@ -54,9 +63,30 @@ class OKXExchange(Exchange):
         raw = self._client.get_ticker(inst_id) or {}
         return Ticker(
             inst_id=raw.get("instId", inst_id),
-            last=_to_float(raw.get("last")),
-            bid=_to_float(raw.get("bidPx")),
-            ask=_to_float(raw.get("askPx")),
+            last=parse_decimal_fact(
+                raw.get("last"),
+                "ticker.last",
+                positive=True,
+            ),
+            bid=parse_decimal_fact(
+                raw.get("bidPx"),
+                "ticker.bid",
+                default="0",
+                nonnegative=True,
+            ),
+            ask=parse_decimal_fact(
+                raw.get("askPx"),
+                "ticker.ask",
+                default="0",
+                nonnegative=True,
+            ),
+            quote_volume_24h=parse_decimal_fact(
+                raw.get("volCcy24h") or raw.get("volCcyQuote24h"),
+                "ticker.quote_volume_24h",
+                default="0",
+                nonnegative=True,
+            ),
+            timestamp=_timestamp_seconds(raw.get("ts")),
         )
 
     def get_instrument(self, inst_id: str) -> InstrumentInfo:
@@ -67,10 +97,25 @@ class OKXExchange(Exchange):
             inst_id=inst_id,
             base_ccy=base,
             quote_ccy=quote,
-            lot_size=_to_float(raw.get("lotSz")),
-            min_size=_to_float(raw.get("minSz")),
-            tick_size=_to_float(raw.get("tickSz")),
+            lot_size=parse_decimal_fact(
+                raw.get("lotSz"),
+                "instrument.lotSz",
+                positive=True,
+            ),
+            min_size=parse_decimal_fact(
+                raw.get("minSz"),
+                "instrument.minSz",
+                positive=True,
+            ),
+            tick_size=parse_decimal_fact(
+                raw.get("tickSz"),
+                "instrument.tickSz",
+                positive=True,
+            ),
         )
+
+    def get_server_time(self) -> float:
+        return self._client.get_server_time()
 
     # ------------------ 账户 ------------------
 
@@ -84,18 +129,37 @@ class OKXExchange(Exchange):
         # 抛错而非返回"零余额"，避免上层把临时故障误判为"无持仓"而清掉真实仓位。
         if not raw_list:
             raise RuntimeError("账户余额查询返回空，疑似临时故障")
-        total_eq = 0.0
-        avail_quote = 0.0
+        total_eq = Decimal("0")
+        avail_quote = Decimal("0")
         holdings: list[Holding] = []
         for item in raw_list:
-            total_eq = _to_float(item.get("totalEq")) or total_eq
+            total_eq = parse_decimal_fact(
+                item.get("totalEq"),
+                "balance.totalEq",
+                nonnegative=True,
+            )
             for detail in item.get("details", []):
                 ccy = detail.get("ccy", "")
                 if not ccy:
-                    continue
-                bal = _to_float(detail.get("cashBal"))
+                    raise ValueError("balance.details[].ccy 缺失")
+                bal = parse_decimal_fact(
+                    detail.get("cashBal"),
+                    f"balance.{ccy}.cashBal",
+                    nonnegative=True,
+                )
                 # 现货场景下 availEq 与 availBal 都代表可用，一般都存在
-                avail = _to_float(detail.get("availEq")) or _to_float(detail.get("availBal"))
+                avail_raw = detail.get("availEq")
+                if avail_raw in (None, ""):
+                    avail_raw = detail.get("availBal")
+                avail = parse_decimal_fact(
+                    avail_raw,
+                    f"balance.{ccy}.available",
+                    nonnegative=True,
+                )
+                if avail > bal:
+                    raise ValueError(
+                        f"balance.{ccy}.available 不得大于 cashBal"
+                    )
                 holdings.append(Holding(ccy=ccy, balance=bal, available=avail))
                 if ccy == self._quote:
                     avail_quote = avail
@@ -105,53 +169,368 @@ class OKXExchange(Exchange):
             holdings=tuple(holdings),
         )
 
+    def get_account_identity(self) -> str:
+        uid = str(self._client.get_account_config().get("uid", "")).strip()
+        if not uid:
+            raise RuntimeError("OKX account config 缺少 uid")
+        return uid
+
     # ------------------ 交易 ------------------
 
     def place_market_order(
         self,
         inst_id: str,
         side: str,
-        size: float,
+        size: Decimal,
         *,
         tgt_ccy: str = "base_ccy",
+        cl_ord_id: str = "",
+        max_slippage: Decimal | None = None,
     ) -> OrderResult:
-        size_str = _fmt_size(size)
+        size = parse_decimal_fact(size, "order.size", positive=True)
+        size_str = _fmt_decimal(size)
+        if max_slippage is not None:
+            max_slippage = parse_decimal_fact(
+                max_slippage,
+                "order.max_slippage",
+                nonnegative=True,
+            )
         raw = self._client.place_order(
             inst_id=inst_id,
             side=side,
             ord_type="market",
             sz=size_str,
             tgt_ccy=tgt_ccy if side == "buy" else None,
+            cl_ord_id=cl_ord_id or None,
+            max_slippage=(
+                _fmt_decimal(max_slippage)
+                if side == "buy" and max_slippage is not None
+                else None
+            ),
         ) or {}
         ord_id = str(raw.get("ordId", ""))
+        if not ord_id:
+            raise RuntimeError(f"下单响应缺少 ordId: {raw}")
 
-        # 市价单下单响应只含 ordId，不含成交均价；回查订单拿 avgPx，
-        # 让上层用真实成交价锚定入场价与止损止盈（市价单滑点可达 0.5~2%）。
-        fill_price = 0.0
-        if ord_id:
-            try:
-                order = self._client.get_order(inst_id, ord_id) or {}
-                fill_price = _to_float(order.get("avgPx")) or _to_float(order.get("fillPx"))
-            except Exception as e:  # noqa: BLE001 — 回查失败不影响下单本身
-                logger.debug("回查成交价失败 %s ordId=%s: %s", inst_id, ord_id, e)
-
+        # POST ACK 只证明 OKX 接纳请求。不要在共享执行锁内同步 GET：
+        # 慢查询会阻塞已经到达的私有 WS fill，直接侵蚀保护单 10s SLO。
+        # 成交/费用事实统一由 WS 或 Reconciler 的严格映射推进。
         return OrderResult(
             inst_id=inst_id,
             side=side,
             ord_id=ord_id,
             size=size,
-            fill_price=fill_price,
+            fill_price=Decimal("0"),
+            state="",
+            acc_fill_size=Decimal("0"),
+            fee=Decimal("0"),
+            raw=dict(raw),
+        )
+
+    def get_order_status(
+        self, inst_id: str, *, ord_id: str = "", cl_ord_id: str = ""
+    ) -> ExchangeOrder:
+        raw = self._client.get_order(
+            inst_id,
+            ord_id=ord_id or None,
+            cl_ord_id=cl_ord_id or None,
+        ) or {}
+        return self._map_order(raw, inst_id)
+
+    def get_pending_orders(self, inst_id: str = "") -> list[ExchangeOrder]:
+        return [
+            self._map_order(raw, str(raw.get("instId", inst_id)))
+            for raw in self._client.get_open_orders(inst_id or None)
+        ]
+
+    def get_recent_orders(self, inst_id: str = "") -> list[ExchangeOrder]:
+        return [
+            self._map_order(raw, str(raw.get("instId", inst_id)))
+            for raw in self._client.get_order_history(inst_id=inst_id or None)
+        ]
+
+    def get_recent_fills(self, inst_id: str = "") -> list[ExchangeFill]:
+        return [
+            ExchangeFill(
+                inst_id=str(raw.get("instId", inst_id)),
+                ord_id=str(raw.get("ordId", "")),
+                trade_id=str(raw.get("tradeId", "")),
+                side=str(raw.get("side", "")),
+                fill_qty=parse_decimal_fact(
+                    raw.get("fillSz"),
+                    "fill.fillSz",
+                    positive=True,
+                ),
+                fill_px=parse_decimal_fact(
+                    raw.get("fillPx"),
+                    "fill.fillPx",
+                    positive=True,
+                ),
+                fee=parse_decimal_fact(
+                    raw.get("fee"),
+                    "fill.fee",
+                    default="0",
+                ),
+                fee_ccy=str(raw.get("feeCcy", "")),
+                cl_ord_id=str(raw.get("clOrdId", "")),
+                exchange_ts=_timestamp_seconds(raw.get("ts")),
+                raw=dict(raw),
+            )
+            for raw in self._client.get_fills(inst_id=inst_id or None, limit=100)
+        ]
+
+    def cancel_order(
+        self,
+        inst_id: str,
+        ord_id: str = "",
+        *,
+        cl_ord_id: str = "",
+    ) -> ExchangeOrder:
+        self._client.cancel_order(
+            inst_id,
+            ord_id or None,
+            cl_ord_id=cl_ord_id or None,
+        )
+        return self.get_order_status(
+            inst_id,
+            ord_id=ord_id,
+            cl_ord_id=cl_ord_id,
+        )
+
+    def amend_order(
+        self,
+        inst_id: str,
+        ord_id: str = "",
+        *,
+        cl_ord_id: str = "",
+        new_size: Decimal | None = None,
+        new_price: Decimal | None = None,
+    ) -> ExchangeOrder:
+        self._client.amend_order(
+            inst_id,
+            ord_id or None,
+            cl_ord_id=cl_ord_id or None,
+            new_size=(
+                _fmt_decimal(
+                    parse_decimal_fact(
+                        new_size,
+                        "amend.new_size",
+                        positive=True,
+                    )
+                )
+                if new_size is not None
+                else None
+            ),
+            new_price=(
+                _fmt_decimal(
+                    parse_decimal_fact(
+                        new_price,
+                        "amend.new_price",
+                        positive=True,
+                    )
+                )
+                if new_price is not None
+                else None
+            ),
+        )
+        return self.get_order_status(
+            inst_id,
+            ord_id=ord_id,
+            cl_ord_id=cl_ord_id,
+        )
+
+    def place_protection_order(
+        self,
+        inst_id: str,
+        *,
+        size: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal = Decimal("0"),
+        algo_cl_ord_id: str = "",
+    ) -> ExchangeAlgoOrder:
+        raw = self._client.place_algo_order(
+            inst_id=inst_id,
+            side="sell",
+            ord_type="oco" if take_profit > 0 else "conditional",
+            sz=_fmt_decimal(
+                parse_decimal_fact(size, "protection.size", positive=True)
+            ),
+            algo_cl_ord_id=algo_cl_ord_id,
+            stop_loss=_fmt_decimal(
+                parse_decimal_fact(
+                    stop_loss,
+                    "protection.stop_loss",
+                    positive=True,
+                )
+            ),
+            take_profit=_fmt_decimal(
+                parse_decimal_fact(
+                    take_profit,
+                    "protection.take_profit",
+                    positive=True,
+                )
+            ) if take_profit > 0 else "",
+        ) or {}
+        algo_id = str(raw.get("algoId", ""))
+        if not algo_id:
+            raise RuntimeError(f"保护单响应缺少 algoId: {raw}")
+        # POST ACK 只证明请求被接收，不能证明保护已 ACTIVE。详情查询
+        # 失败必须上抛给 ProtectionManager 的 UNKNOWN resolver。
+        return self.get_algo_order(algo_id=algo_id)
+
+    def get_algo_order(
+        self, *, algo_id: str = "", algo_cl_ord_id: str = ""
+    ) -> ExchangeAlgoOrder:
+        raw = self._client.get_algo_order(
+            algo_id=algo_id,
+            algo_cl_ord_id=algo_cl_ord_id,
+        ) or {}
+        return self._map_algo(raw)
+
+    def get_pending_algo_orders(self, inst_id: str = "") -> list[ExchangeAlgoOrder]:
+        rows = []
+        for kind in ("oco", "conditional"):
+            rows.extend(self._client.get_pending_algo_orders(
+                inst_id=inst_id, ord_type=kind
+            ))
+        return [self._map_algo(raw) for raw in rows]
+
+    def cancel_algo_order(self, inst_id: str, algo_id: str) -> ExchangeAlgoOrder:
+        self._client.cancel_algo_order(inst_id, algo_id)
+        # cancel ACK 后仍可能与触发竞态；必须取得 canceled/effective 事实。
+        return self.get_algo_order(algo_id=algo_id)
+
+    def amend_algo_order(
+        self,
+        inst_id: str,
+        algo_id: str,
+        *,
+        size: Decimal,
+        stop_loss: Decimal,
+        take_profit: Decimal = Decimal("0"),
+        req_id: str = "",
+    ) -> ExchangeAlgoOrder:
+        self._client.amend_algo_order(
+            inst_id=inst_id,
+            algo_id=algo_id,
+            size=_fmt_decimal(
+                parse_decimal_fact(size, "protection.size", positive=True)
+            ),
+            stop_loss=_fmt_decimal(
+                parse_decimal_fact(
+                    stop_loss,
+                    "protection.stop_loss",
+                    positive=True,
+                )
+            ),
+            take_profit=_fmt_decimal(
+                parse_decimal_fact(
+                    take_profit,
+                    "protection.take_profit",
+                    positive=True,
+                )
+            ) if take_profit > 0 else "",
+            req_id=req_id,
+        )
+        return self.get_algo_order(algo_id=algo_id)
+
+    @staticmethod
+    def _map_order(raw: dict, fallback_inst_id: str = "") -> ExchangeOrder:
+        raw_state = str(raw.get("state", ""))
+        state = map_exchange_order_state(raw_state)
+        if state is OrderState.UNKNOWN:
+            raise ValueError(f"未知交易所订单状态: {raw_state!r}")
+        requested_qty = parse_decimal_fact(
+            raw.get("sz"),
+            "order.sz",
+            positive=True,
+        )
+        acc_fill_qty = parse_decimal_fact(
+            raw.get("accFillSz"),
+            "order.accFillSz",
+            default="0",
+            nonnegative=True,
+        )
+        avg_fill_px = parse_decimal_fact(
+            raw.get("avgPx") or raw.get("fillPx"),
+            "order.avgPx",
+            default="0",
+            nonnegative=True,
+        )
+        if state in {OrderState.FILLED, OrderState.PARTIALLY_FILLED} and (
+            acc_fill_qty <= 0 or avg_fill_px <= 0
+        ):
+            raise ValueError(
+                "已成交订单必须包含正数 accFillSz 和 avgPx"
+            )
+        return ExchangeOrder(
+            inst_id=str(raw.get("instId", fallback_inst_id)),
+            side=str(raw.get("side", "")),
+            state=state,
+            ord_id=str(raw.get("ordId", "")),
+            cl_ord_id=str(raw.get("clOrdId", "")),
+            requested_qty=requested_qty,
+            acc_fill_qty=acc_fill_qty,
+            avg_fill_px=avg_fill_px,
+            fee=parse_decimal_fact(
+                raw.get("fee"),
+                "order.fee",
+                default="0",
+            ),
+            fee_ccy=str(raw.get("feeCcy", "")),
+            trade_id=str(raw.get("tradeId", "")),
+            update_ts=_timestamp_seconds(raw.get("uTime")),
+            raw=dict(raw),
+        )
+
+    @staticmethod
+    def _map_algo(raw: dict) -> ExchangeAlgoOrder:
+        sl = raw.get("slTriggerPx") or raw.get("triggerPx")
+        tp = raw.get("tpTriggerPx")
+        return ExchangeAlgoOrder(
+            inst_id=str(raw.get("instId", "")),
+            kind=str(raw.get("ordType", "")),
+            state=map_exchange_algo_state(str(raw.get("state", ""))),
+            protected_qty=parse_decimal_fact(
+                raw.get("sz"),
+                "algo.sz",
+                positive=True,
+            ),
+            trigger_px=parse_decimal_fact(
+                sl or tp,
+                "algo.triggerPx",
+                positive=True,
+            ),
+            take_profit_px=parse_decimal_fact(
+                tp,
+                "algo.takeProfitPx",
+                default="0",
+                nonnegative=True,
+            ),
+            order_px=parse_decimal_fact(
+                raw.get("slOrdPx") or raw.get("orderPx"),
+                "algo.orderPx",
+                default="-1",
+            ),
+            algo_id=str(raw.get("algoId", "")),
+            algo_cl_ord_id=str(raw.get("algoClOrdId", "")),
+            actual_order_id=str(raw.get("ordId", "")),
+            update_ts=_timestamp_seconds(raw.get("uTime") or raw.get("cTime")),
             raw=dict(raw),
         )
 
 
-def _to_float(v: Optional[str | float]) -> float:
+def _timestamp_seconds(v: object) -> float:
     try:
-        return float(v) if v not in (None, "") else 0.0
+        return float(v) / 1000 if v not in (None, "") else 0.0
     except (TypeError, ValueError):
         return 0.0
 
 
-def _fmt_size(size: float) -> str:
-    """避免科学计数法"""
-    return f"{size:.8f}".rstrip("0").rstrip(".")
+def _fmt_decimal(value: Decimal) -> str:
+    """保留交易所十进制事实的全部有效位，禁止科学计数法和 8 位截断。"""
+    parsed = parse_decimal_fact(value, "request.decimal")
+    rendered = format(parsed, "f")
+    if "." in rendered:
+        rendered = rendered.rstrip("0").rstrip(".")
+    return rendered or "0"

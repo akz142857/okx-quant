@@ -1,5 +1,9 @@
 # OKX 量化交易系统
 
+项目当前的实盘安全、回测可信度和后续建设路线，见
+[项目综合评估](docs/PROJECT_EVALUATION.md)；生产升级的具体架构和实施阶段见
+[生产级升级方案](docs/PRODUCTION_PLAN.md)。
+
 ## 安装
 
 需要 Python 3.12+，使用 [uv](https://docs.astral.sh/uv/) 管理依赖。
@@ -62,7 +66,7 @@ uv run python main.py list-strategies
 
 单币种走 `LiveTrader`，多币种自动切换为 `Supervisor + Worker` 架构：
 
-- 每个交易对一个 Worker 线程，独立运行策略和下单
+- 每个交易对一个 Worker 线程独立运行策略；订单统一进入持久化单写者
 - 共享同一个 `RiskManager`（线程安全），统一监控账户回撤
 - `max_position_pct` 自动均分（如配置 0.95，2 个币种时每个 0.475）
 - `max_open_positions` 自动设为币种数
@@ -115,15 +119,17 @@ cp config.yaml.example config.yaml
 | `secret_key` | OKX Secret Key | 必填 |
 | `passphrase` | OKX Passphrase | 必填 |
 | `simulated` | `true` 模拟盘 / `false` 实盘 | `true` |
-| `base_url` | API 地址 | `https://www.okx.com` |
+| `base_url` | API 地址 | `https://openapi.okx.com` |
 | `proxy` | HTTP 代理（可选，留空直连） | 空 |
+| `timeout` | 单次 HTTP 请求超时（秒） | `15` |
+| `max_retries` | 连接失败或限速后的重试次数 | `3` |
 
 ### 风控 (`risk`)
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
 | `max_position_pct` | 单笔最大仓位占总资产比例 | `0.5` (50%) |
-| `max_drawdown_pct` | 最大回撤触发停止 | `0.15` (15%) |
+| `max_drawdown_pct` | 最大回撤触发停止开新仓（已有仓位仍可退出） | `0.15` (15%) |
 | `stop_loss_pct` | 默认止损比例 | `0.02` (2%) |
 | `take_profit_pct` | 默认止盈比例 | `0.04` (4%) |
 | `max_open_positions` | 最大同时持仓数 | `1` |
@@ -241,125 +247,43 @@ SAHARA-USDT     27.1    1.97   1.09    2.37       64    0.665    ✓
 
 ---
 
-## 生产部署（systemd + 密钥分离）
+## 生产部署与运行
 
-已部署到 `root@64.23.157.26`，使用 systemd 托管、密钥走 env var、状态持久化到磁盘。
+仓库包含生产候选内核，但不因代码测试通过而自动取得实盘准入。所有环境必须先经过
+`local fake → CI → OKX demo → shadow → canary → limited production`，并满足连续
+30 日 demo 与人工安全证据。
 
-### 目录结构
+关键资料：
 
-| 位置 | 权限 | 内容 |
-|---|---|---|
-| `/opt/okx-quant/` | 755 root | 代码仓库（git clone）+ venv |
-| `/opt/okx-quant/config.yaml` | 640 root | 生产配置（密钥走 `${VAR}`，无明文） |
-| `/opt/okx-quant/state/` | 700 root | 运行状态（trailing stop、冷却、tick 计数） |
-| `/opt/okx-quant/logs/` | 750 root | 决策 CSV + quant.log |
-| `/opt/okx-quant/scripts/` | 755 root | summary.sh / verify_deploy.sh |
-| `/etc/okx-quant.env` | **600 root** | 密钥明文（`OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` / `LLM_API_KEY` / `OKX_LIVE_CONFIRMED=1`） |
-| `/etc/systemd/system/okx-quant.service` | 644 root | systemd unit |
+- [实施与证据矩阵](docs/IMPLEMENTATION_STATUS.md)
+- [生产运行手册](docs/RUNBOOK.md)
+- [生产准入清单](docs/RELEASE_CHECKLIST.md)
+- [安全模型](docs/SECURITY.md)
+- [生产升级方案](docs/PRODUCTION_PLAN.md)
 
-**安全要点**：
-- 所有凭证只存在 `/etc/okx-quant.env`（0600），systemd 注入到进程 env
-- `config.yaml` 本身不含任何密钥（全是 `${OKX_API_KEY}` 占位符）
-- `.gitignore` 已排除 `config.yaml` / `state/` / `logs/` / `*.env` / `*.key`
-- 实盘模式（`simulated: false`）需交互输入 `I UNDERSTAND`，systemd 通过 env `OKX_LIVE_CONFIRMED=1` 跳过
+生产使用彼此隔离的 `okxquant-trader`、`okxquant-watchdog`、`okxquant-backup`
+非 root 身份，以及 `/etc/okx-quant` 配置、`/var/lib/okx-quant` 交易状态和
+`/var/log/okx-quant` 日志。模板位于 `deploy/`；systemd unit 已配置
+`ProtectSystem=strict`、`NoNewPrivileges`、资源上限、独立 watchdog、5 分钟加密
+异地归档，并在启动 trader 前强制验证 30 日证据与独立风险审批签名。
 
-### systemd 资源约束
-
-```ini
-MemoryMax=600M          # 1GB droplet 上硬上限
-MemoryHigh=500M         # 软警戒
-CPUQuota=80%            # 留 20% 给系统
-Restart=on-failure      # 异常退出 30s 后自动起
-NoNewPrivileges=true
-ProtectSystem=full      # 只读 /usr /etc
-ProtectHome=read-only   # /root 只读 → 所以用 venv 不用 uv run
-ReadWritePaths=/opt/okx-quant/state /opt/okx-quant/logs
-```
-
----
-
-## 日常运维命令
-
-### 一键健康检查（最常用）
+常用安全命令：
 
 ```bash
-ssh root@64.23.157.26 '/opt/okx-quant/scripts/summary.sh'
+okx-quant --config /etc/okx-quant/config.yaml production-status
+okx-quant --config /etc/okx-quant/config.yaml audit-order <clOrdId>
+okx-quant --config /etc/okx-quant/config.yaml halt-entries --actor <operator>
+okx-quant --config /etc/okx-quant/config.yaml reconcile-now --wait 30
+okx-quant --config /etc/okx-quant/config.yaml backup-now
 ```
 
-覆盖：服务状态 / 账户权益变化 / 每币信号分布 / 当前运行时状态 / 最近 20 条日志。
+全新生产账户必须先按运行手册执行一次 `init-journal`；正常 `live` 不会在数据库
+缺失或为空时创建新账本。解除 `HALTED` 需要 operator 生成短效请求、独立风险审批人
+用离线 Ed25519 私钥签名，再提交一次性批准文件；交易主机仅保存公钥。
 
-### 实时日志跟踪
-
-```bash
-# 全部日志
-ssh root@64.23.157.26 'journalctl -u okx-quant -f'
-
-# 只看关键事件（过滤掉 HOLD 噪声）
-ssh root@64.23.157.26 'journalctl -u okx-quant -f | grep -vE "\| HOLD \|"'
-
-# 只看下单 / 止损 / 止盈 / 风控拒绝
-ssh root@64.23.157.26 'journalctl -u okx-quant -f | grep -E "下单|止损|止盈|风控|ERROR"'
-
-# 查最近 100 行
-ssh root@64.23.157.26 'journalctl -u okx-quant --no-pager -n 100'
-```
-
-### 服务管理
-
-```bash
-# 状态
-ssh root@64.23.157.26 'systemctl status okx-quant'
-
-# 停 / 启 / 重启
-ssh root@64.23.157.26 'systemctl stop okx-quant'
-ssh root@64.23.157.26 'systemctl start okx-quant'
-ssh root@64.23.157.26 'systemctl restart okx-quant'
-
-# 开机自启 / 取消
-ssh root@64.23.157.26 'systemctl enable okx-quant'
-ssh root@64.23.157.26 'systemctl disable okx-quant'
-```
-
-### 修改配置
-
-**修改密钥**（必须重启生效）：
-
-```bash
-ssh root@64.23.157.26 'vim /etc/okx-quant.env && systemctl restart okx-quant'
-```
-
-**修改交易对 / 策略 / 周期**（改 systemd unit）：
-
-```bash
-ssh root@64.23.157.26 'vim /etc/systemd/system/okx-quant.service'
-# 改 ExecStart 里的 --inst / --strategy / --bar / --interval
-ssh root@64.23.157.26 'systemctl daemon-reload && systemctl restart okx-quant'
-```
-
-**修改风控 / 策略参数 / 执行器参数**（改 config.yaml）：
-
-```bash
-ssh root@64.23.157.26 'vim /opt/okx-quant/config.yaml && systemctl restart okx-quant'
-```
-
-### 代码更新
-
-```bash
-ssh root@64.23.157.26 'cd /opt/okx-quant && git pull && /root/.local/bin/uv sync && systemctl restart okx-quant'
-```
-
-### 切回模拟盘
-
-编辑 `/opt/okx-quant/config.yaml` 把 `okx.simulated: false` 改为 `true`，重启。
-
-### 验证脚本
-
-```bash
-# 部署后第一次跑，或修改密钥后验证
-ssh root@64.23.157.26 '/opt/okx-quant/scripts/verify_deploy.sh'
-```
-
-会检查：env 加载 / pytest 通过 / 公共行情可用 / 私有余额查询通过 / systemd unit 存在。
+`flatten-and-cancel` 是破坏性资金操作，必须先生成绑定具体交易对集合的短效请求，
+由独立风险审批人签名，再使用账户绑定的精确确认词提交。禁止通过删除状态文件、
+覆盖交易数据库或重复提交 UNKNOWN 订单来“恢复”。
 
 ---
 
@@ -429,9 +353,11 @@ uv run python scripts/param_sweep.py --from-grid --top 5 --min-sharpe 0.3
 
 输出标记每个参数为 `robust`（扫描均正）或 `fragile`（多数崩盘）。fragile 的不要进实盘。
 
-### Phase 2：实盘部署
+### Phase 2：生成生产候选
 
-把 Phase 1.5 验证 robust 的 `(strategy, inst, bar, 最优参数)` 组合写入 systemd unit + config.yaml，重启 bot。
+参数扫描只能生成候选，不能直接批准实盘。候选还必须依次通过 walk-forward、组合共享
+现金回测、压力测试、OKX demo、shadow、连续 30 日证据、canary 与
+[`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md) 人工审批。
 
 ---
 
@@ -534,7 +460,9 @@ scripts/
 └── verify_deploy.sh         部署 health check
 ```
 
-73 个 pytest 测试用例，覆盖指标 / 回测路径 / 风控 / 状态持久化 / 订单执行 / 实盘集成 / 安全。
+测试数量和覆盖率以 CI 与
+[`docs/IMPLEMENTATION_STATUS.md`](docs/IMPLEMENTATION_STATUS.md) 的最新门禁结果为准，
+覆盖指标、回测、风控、持久化订单、恢复、保护、运维与安全。
 
 ```bash
 uv run pytest -q              # 全量

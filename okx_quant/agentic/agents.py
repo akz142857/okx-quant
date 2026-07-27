@@ -7,7 +7,6 @@ BaseAgent 封装 LLM 调用 + token 追踪。
 import json
 import logging
 import re
-from typing import Optional
 
 from okx_quant.llm.client import LLMClient, LLMResponse
 
@@ -33,7 +32,7 @@ from .token_tracker import TokenTracker
 logger = logging.getLogger(__name__)
 
 
-def _parse_json(content: str) -> Optional[dict]:
+def _parse_json(content: str) -> dict | None:
     """从 LLM 返回内容中解析 JSON 决策。
 
     依次尝试：直接解析 → 剥离 markdown 代码围栏 → 括号配对提取第一个
@@ -163,7 +162,7 @@ class TraderAgent(BaseAgent):
     """交易员 — 综合所有分析做出交易决策"""
 
     def decide(self, analyst_reports: dict[str, str], debate_transcript: str,
-               inst_id: str) -> Optional[dict]:
+               inst_id: str) -> dict | None:
         user_prompt = build_trader_prompt(analyst_reports, debate_transcript, inst_id)
         content = self.run(TRADER_AGENT_SYSTEM, user_prompt)
         if not content:
@@ -174,7 +173,7 @@ class TraderAgent(BaseAgent):
 class RiskManagerAgent(BaseAgent):
     """风控经理 — 审核交易信号，可否决或调整"""
 
-    def review(self, proposed_signal: dict, portfolio_state: dict) -> Optional[dict]:
+    def review(self, proposed_signal: dict, portfolio_state: dict) -> dict | None:
         user_prompt = build_risk_manager_prompt(proposed_signal, portfolio_state)
         content = self.run(RISK_MANAGER_SYSTEM, user_prompt)
         if not content:

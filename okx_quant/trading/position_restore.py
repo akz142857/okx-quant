@@ -20,6 +20,7 @@ def discover_positions(
     quote_ccy: str = "USDT",
     *,
     min_usdt_value: float = 1.0,
+    strict: bool = False,
 ) -> list[tuple[str, float]]:
     """扫描账户余额，返回非计价币种持仓列表 [(inst_id, balance), ...]。
 
@@ -32,37 +33,41 @@ def discover_positions(
     try:
         snap = exchange.get_balance()
     except Exception as e:  # noqa: BLE001
+        if strict:
+            raise RuntimeError("无法读取账户持仓，拒绝启动交易") from e
         logger.warning("检测已有持仓失败: %s", e)
         return []
     results: list[tuple[str, float]] = []
     for holding in snap.non_quote_holdings(quote_ccy):
         inst_id = f"{holding.ccy}-{quote_ccy}"
+        balance = float(holding.balance)
         # 查 ticker 估算 USDT 价值 → 过滤粉尘
         # price<=0 视为 ticker 不可靠，保守保留（后续 restore_to_risk 还会二次过滤）
         if min_usdt_value > 0:
             try:
-                price = exchange.get_ticker(inst_id).last
+                price = float(exchange.get_ticker(inst_id).last)
                 if price > 0:
-                    value_usdt = holding.balance * price
+                    value_usdt = balance * price
                     if value_usdt < min_usdt_value:
                         logger.info(
                             "忽略粉尘持仓 %s（%.8f × $%.6f = $%.6f < $%.2f）",
-                            inst_id, holding.balance, price, value_usdt, min_usdt_value,
+                            inst_id, balance, price, value_usdt, min_usdt_value,
                         )
                         continue
             except Exception:  # noqa: BLE001
                 pass
-        results.append((inst_id, holding.balance))
+        results.append((inst_id, balance))
     return results
 
 
 def restore_to_risk(
     exchange: Exchange,
     risk: RiskManager,
-    inst_ids: "list[str] | set[str]",
+    inst_ids: list[str] | set[str],
     *,
     quote_ccy: str = "USDT",
     min_usdt_value: float = 1.0,
+    strict: bool = False,
 ) -> int:
     """把在 inst_ids 范围内且已存在余额的持仓登记到 RiskManager。
 
@@ -80,6 +85,8 @@ def restore_to_risk(
     try:
         snap = exchange.get_balance()
     except Exception as e:  # noqa: BLE001
+        if strict:
+            raise RuntimeError("无法恢复账户持仓，拒绝启动交易") from e
         logger.warning("恢复持仓失败（获取余额）: %s", e)
         return 0
 
@@ -92,16 +99,22 @@ def restore_to_risk(
         if risk.has_position(inst_id):
             continue
         try:
-            price = exchange.get_ticker(inst_id).last
-        except Exception:  # noqa: BLE001
+            price = float(exchange.get_ticker(inst_id).last)
+        except Exception as e:  # noqa: BLE001
+            if strict:
+                raise RuntimeError(f"无法取得已有持仓 {inst_id} 的价格，拒绝启动交易") from e
             price = 0.0
         if price <= 0:
+            if strict:
+                raise RuntimeError(f"已有持仓 {inst_id} 的价格无效，拒绝启动交易")
             logger.debug("恢复持仓跳过 %s：ticker 取不到价格", inst_id)
             continue
 
         # 使用 available（非锁定余额）作为可卖数量；cashBal 包含冻结部分，
         # 作为仓位登记会高估可平数量
-        size = holding.available if holding.available > 0 else holding.balance
+        size = float(
+            holding.available if holding.available > 0 else holding.balance
+        )
 
         # 粉尘过滤：总价值 < min_usdt_value 的忽略（OKX 账户残留）
         if min_usdt_value > 0 and size * price < min_usdt_value:

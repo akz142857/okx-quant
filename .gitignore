@@ -15,6 +15,13 @@ logs/
 
 # 运行时状态（含持仓 / 冷却时间戳）
 state/
+backups/
+evidence/
+.coverage
+htmlcov/
+fault-injection.json
+demo-contract-evidence.json
+restore-drill.json
 
 # Config (含 API Key 等敏感信息)
 config.yaml

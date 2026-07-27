@@ -10,11 +10,13 @@
 """
 
 import logging
+import math
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional
 
 import pandas as pd
 
+from okx_quant.backtest.validation import validate_ohlcv
 from okx_quant.indicators import atr as calc_atr
 from okx_quant.indicators import populate_cache, slice_cache
 from okx_quant.strategy.base import BaseStrategy
@@ -27,7 +29,7 @@ class Trade:
     """单笔交易记录"""
 
     open_ts: pd.Timestamp
-    close_ts: Optional[pd.Timestamp]
+    close_ts: pd.Timestamp | None
     inst_id: str
     direction: str           # "long" | "short"
     entry_price: float
@@ -67,11 +69,13 @@ class BacktestEngine:
         fee_rate: float = 0.001,
         slippage: float = 0.0005,
         trailing_atr_mult: float = 2.0,
+        cost_model: Callable[[str, pd.Series, float], tuple[float, float]] | None = None,
     ):
         self.initial_capital = initial_capital
         self.fee_rate = fee_rate
         self.slippage = slippage
         self.trailing_atr_mult = trailing_atr_mult
+        self.cost_model = cost_model
 
     def run(
         self,
@@ -91,11 +95,10 @@ class BacktestEngine:
         Returns:
             BacktestResult
         """
-        if "open" not in df.columns:
-            raise ValueError("K 线 DataFrame 必须包含 open 列以支持下根 K 线开盘成交")
+        validate_ohlcv(df, context="回测")
 
         capital = self.initial_capital
-        position: Optional[Trade] = None
+        position: Trade | None = None
         trades: list[Trade] = []
         equity_records: list[tuple] = []
         highest_since_entry: float = 0.0
@@ -116,7 +119,7 @@ class BacktestEngine:
         )
 
         # 待执行订单：由前一根 K 线收盘生成，于当前 K 线开盘成交
-        pending_entry: Optional[dict] = None  # {size_pct, sl, tp, reason}
+        pending_entry: dict | None = None  # {size_pct, signal_price, sl, tp, reason}
         pending_exit: bool = False
         pending_exit_reason: str = ""
 
@@ -131,8 +134,18 @@ class BacktestEngine:
 
             # ---------- 1. 执行上一根 K 线生成的挂单 ----------
             if pending_exit and position and position.is_open:
-                exit_price = open_px * (1 - self.slippage)
-                capital = self._close_position(position, exit_price, ts, pending_exit_reason, capital)
+                fee_rate, slippage = self._costs(
+                    "sell", bar, position.size * open_px
+                )
+                exit_price = open_px * (1 - slippage)
+                capital = self._close_position(
+                    position,
+                    exit_price,
+                    ts,
+                    pending_exit_reason,
+                    capital,
+                    fee_rate=fee_rate,
+                )
                 trades.append(position)
                 position = None
                 highest_since_entry = 0.0
@@ -140,15 +153,31 @@ class BacktestEngine:
             pending_exit_reason = ""
 
             if pending_entry and position is None:
-                entry_price = open_px * (1 + self.slippage)
-                cost = capital * pending_entry["size_pct"]
+                estimated_notional = capital * pending_entry["size_pct"]
+                fee_rate, slippage = self._costs(
+                    "buy", bar, estimated_notional
+                )
+                entry_price = open_px * (1 + slippage)
+                # size_pct 表示本次最多占用的“总现金预算”（成交额 + 买入费）。
+                # 原实现先用全部预算买币、再额外扣手续费，size_pct=1 时会产生
+                # 负现金，相当于在现货回测中隐式融资。
+                cash_budget = capital * pending_entry["size_pct"]
+                cost = cash_budget / (1 + fee_rate)
                 if cost > 0 and entry_price > 0:
                     size = cost / entry_price
-                    fee = cost * self.fee_rate
+                    fee = cost * fee_rate
                     capital -= cost + fee
 
                     sl = pending_entry["sl"]
                     tp = pending_entry["tp"]
+                    # 信号在上一根收盘产生，实际于本根开盘成交。发生跳空/滑点
+                    # 时按真实入场价同比平移保护价，保持策略原本的百分比距离，
+                    # 与实盘 OrderExecutor 的处理一致。
+                    signal_price = pending_entry["signal_price"]
+                    if signal_price > 0 and entry_price != signal_price:
+                        ratio = entry_price / signal_price
+                        sl = sl * ratio if sl > 0 else sl
+                        tp = tp * ratio if tp > 0 else tp
                     position = Trade(
                         open_ts=ts,
                         close_ts=None,
@@ -184,8 +213,18 @@ class BacktestEngine:
                     # 止损/止盈在实盘是市价单，必然有滑点。现货多头平仓=卖出，
                     # 到手价低于触发价，故统一乘 (1 - slippage)。否则回测会
                     # 系统性低估亏损、虚高胜率与盈亏比。
-                    exit_price *= (1 - self.slippage)
-                    capital = self._close_position(position, exit_price, ts, exit_reason, capital)
+                    fee_rate, slippage = self._costs(
+                        "sell", bar, position.size * exit_price
+                    )
+                    exit_price *= (1 - slippage)
+                    capital = self._close_position(
+                        position,
+                        exit_price,
+                        ts,
+                        exit_reason,
+                        capital,
+                        fee_rate=fee_rate,
+                    )
                     trades.append(position)
                     position = None
                     highest_since_entry = 0.0
@@ -205,6 +244,11 @@ class BacktestEngine:
                 if position is None and signal.is_buy and signal.size_pct > 0:
                     pending_entry = {
                         "size_pct": min(max(signal.size_pct, 0.0), 1.0),
+                        "signal_price": (
+                            float(signal.price)
+                            if signal.price > 0
+                            else float(history["close"].iloc[-1])
+                        ),
                         "sl": signal.stop_loss,
                         "tp": signal.take_profit,
                         "reason": signal.reason,
@@ -219,9 +263,21 @@ class BacktestEngine:
 
         # 回测结束，强制平仓
         if position and position.is_open:
-            final_close = float(df["close"].iloc[-1])
+            # 强平同样是卖出市价单，计入与其它退出路径一致的滑点。
+            final_bar = df.iloc[-1]
+            fee_rate, slippage = self._costs(
+                "sell",
+                final_bar,
+                position.size * float(final_bar["close"]),
+            )
+            final_close = float(df["close"].iloc[-1]) * (1 - slippage)
             capital = self._close_position(
-                position, final_close, df["ts"].iloc[-1], "回测结束强制平仓", capital
+                position,
+                final_close,
+                df["ts"].iloc[-1],
+                "回测结束强制平仓",
+                capital,
+                fee_rate=fee_rate,
             )
             trades.append(position)
             # 末根权益记录此前是按收盘价 mark-to-market（未扣强平手续费），
@@ -276,9 +332,17 @@ class BacktestEngine:
         return 0.0, ""
 
     def _close_position(
-        self, pos: Trade, exit_price: float, ts, reason: str, capital: float
+        self,
+        pos: Trade,
+        exit_price: float,
+        ts,
+        reason: str,
+        capital: float,
+        *,
+        fee_rate: float | None = None,
     ) -> float:
-        fee = pos.size * exit_price * self.fee_rate
+        effective_fee_rate = self.fee_rate if fee_rate is None else fee_rate
+        fee = pos.size * exit_price * effective_fee_rate
         pnl = pos.size * (exit_price - pos.entry_price) - pos.fee - fee
         pos.exit_price = exit_price
         pos.close_ts = ts
@@ -293,6 +357,25 @@ class BacktestEngine:
             ts, pos.size, exit_price, pnl, pos.pnl_pct,
         )
         return capital + pos.size * exit_price - fee
+
+    def _costs(
+        self, side: str, bar: pd.Series, notional: float
+    ) -> tuple[float, float]:
+        if self.cost_model is None:
+            return self.fee_rate, self.slippage
+        fee_rate, slippage = self.cost_model(side, bar, notional)
+        fee_rate = float(fee_rate)
+        slippage = float(slippage)
+        if (
+            not math.isfinite(fee_rate)
+            or not math.isfinite(slippage)
+            or not 0 <= fee_rate < 1
+            or not 0 <= slippage < 1
+        ):
+            raise ValueError(
+                "cost_model 必须返回 [0, 1) 内有限费率/滑点"
+            )
+        return fee_rate, slippage
 
     def _calc_metrics(self, trades: list[Trade], equity: pd.Series) -> dict:
         closed = [t for t in trades if not t.is_open]

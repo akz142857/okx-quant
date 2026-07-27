@@ -9,8 +9,11 @@
         --candles /tmp/bt_phase1/candles
 """
 from __future__ import annotations
-import argparse, sys
+
+import argparse
+import sys
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -61,7 +64,12 @@ def main():
 
     # 把 HODL 列 join 到结果表
     for col in ["hodl_return_pct", "hodl_sharpe", "hodl_mdd"]:
-        df[col] = df.apply(lambda r: hodl_cache.get((r["inst_id"], r["bar"]), {}).get(col, 0), axis=1)
+        df[col] = df.apply(
+            lambda row, column=col: hodl_cache.get(
+                (row["inst_id"], row["bar"]), {}
+            ).get(column, 0),
+            axis=1,
+        )
 
     df["alpha_sharpe"] = df["sharpe_ratio"] - df["hodl_sharpe"]
     df["alpha_return_pct"] = df["total_return_pct"] - df["hodl_return_pct"]
@@ -74,10 +82,10 @@ def main():
     ].sort_values("alpha_sharpe", ascending=False)
 
     print(f"\n# 回测网格 HODL-adjusted 分析  {total} 成功组合\n")
-    print(f"## 筛选标准")
+    print("## 筛选标准")
     print(f"  - n_trades >= {args.min_trades}")
     print(f"  - alpha_sharpe (strategy_sharpe - hodl_sharpe) >= {args.min_alpha_sharpe}")
-    print(f"  - total_return_pct > 0（绝对收益为正）")
+    print("  - total_return_pct > 0（绝对收益为正）")
     print()
     print(f"## 真 edge 候选: {len(real_edge)} / {len(valid)} 个样本量达标的组合\n")
 

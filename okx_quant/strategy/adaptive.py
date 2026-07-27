@@ -2,14 +2,13 @@
 
 from dataclasses import replace
 from enum import Enum
-from typing import Optional
 
 import pandas as pd
 
 from okx_quant.indicators import cached_adx, cached_bollinger
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
-from okx_quant.strategy.ma_cross import MACrossStrategy
 from okx_quant.strategy.bollinger import BollingerBandStrategy
+from okx_quant.strategy.ma_cross import MACrossStrategy
 from okx_quant.strategy.rsi_mean import RSIMeanReversionStrategy
 
 
@@ -39,7 +38,7 @@ class AdaptiveStrategy(BaseStrategy):
 
     name = "Adaptive"
 
-    def __init__(self, params: Optional[dict] = None):
+    def __init__(self, params: dict | None = None):
         defaults = {
             "adx_period": 14,
             "adx_trend_thresh": 25,
@@ -61,7 +60,7 @@ class AdaptiveStrategy(BaseStrategy):
 
         # 状态追踪
         self._current_regime: MarketRegime = MarketRegime.TRENDING
-        self._pending_regime: Optional[MarketRegime] = None
+        self._pending_regime: MarketRegime | None = None
         self._pending_count: int = 0
 
     def _compute_indicators(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -72,7 +71,7 @@ class AdaptiveStrategy(BaseStrategy):
 
     def _detect_regime(
         self, adx_df: pd.DataFrame, bb_df: pd.DataFrame,
-    ) -> Optional[MarketRegime]:
+    ) -> MarketRegime | None:
         """检测当前市场状态
 
         Args:
@@ -104,7 +103,7 @@ class AdaptiveStrategy(BaseStrategy):
         # ADX 在 range_thresh ~ trend_thresh 之间（过渡区），不切换
         return None
 
-    def _apply_cooldown(self, detected: Optional[MarketRegime]) -> MarketRegime:
+    def _apply_cooldown(self, detected: MarketRegime | None) -> MarketRegime:
         """冷却过滤：连续 cooldown_bars 根确认才切换"""
         cooldown = self.get_param("cooldown_bars")
 

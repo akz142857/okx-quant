@@ -3,12 +3,12 @@
 import dataclasses
 import threading
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 import requests
 
 
-class LLMProvider(str, Enum):
+class LLMProvider(StrEnum):
     """支持的 LLM 提供商"""
 
     OPENAI = "openai"

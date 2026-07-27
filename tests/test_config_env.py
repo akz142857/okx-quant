@@ -1,6 +1,5 @@
 """配置环境变量替换测试"""
 
-import os
 
 import pytest
 

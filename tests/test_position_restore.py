@@ -82,6 +82,37 @@ def test_discover_positions_returns_empty_on_exchange_error():
 
 
 @pytest.mark.unit
+def test_discover_positions_strict_raises_on_exchange_error():
+    class BrokenExchange(FakeExchange):
+        def get_balance(self):  # type: ignore[override]
+            raise RuntimeError("network down")
+
+    with pytest.raises(RuntimeError, match="拒绝启动"):
+        discover_positions(BrokenExchange(), "USDT", strict=True)
+
+
+@pytest.mark.unit
+def test_restore_to_risk_strict_raises_on_exchange_error():
+    class BrokenExchange(FakeExchange):
+        def get_balance(self):  # type: ignore[override]
+            raise RuntimeError("network down")
+
+    risk = RiskManager(RiskConfig())
+    with pytest.raises(RuntimeError, match="拒绝启动"):
+        restore_to_risk(BrokenExchange(), risk, ["BTC-USDT"], strict=True)
+
+
+@pytest.mark.unit
+def test_restore_to_risk_strict_rejects_unpriced_existing_position():
+    ex = _build_fake()
+    ex.set_holding("BTC", balance=0.1, available=0.1)
+    risk = RiskManager(RiskConfig())
+
+    with pytest.raises(RuntimeError, match="价格无效"):
+        restore_to_risk(ex, risk, ["BTC-USDT"], strict=True)
+
+
+@pytest.mark.unit
 def test_discover_positions_filters_dust():
     """粉尘余额（< $1 USDT 估值）应被忽略"""
     ex = _build_fake()

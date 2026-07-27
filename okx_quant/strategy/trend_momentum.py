@@ -1,10 +1,15 @@
 """趋势动量策略：多指标趋势确认 + 移动止盈"""
 
 import pandas as pd
-from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
+
 from okx_quant.indicators import (
-    cached_adx, cached_atr, cached_ema, cached_macd, cached_rsi,
+    cached_adx,
+    cached_atr,
+    cached_ema,
+    cached_macd,
+    cached_rsi,
 )
+from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
 
 
 class TrendMomentumStrategy(BaseStrategy):

@@ -10,12 +10,18 @@ LiveTrader 只负责主循环和协调；具体职责拆分到：
 
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 import logging
+import marshal
+import re
 import threading
 import time
 from collections import deque
 from datetime import datetime
-from typing import Optional
+from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.exchange import Exchange, OKXExchange
@@ -27,9 +33,53 @@ from okx_quant.trading.orders import OrderExecutor
 from okx_quant.trading.position_monitor import PositionMonitor
 from okx_quant.trading.position_restore import restore_to_risk
 from okx_quant.trading.state import StateStore, TraderState
-from okx_quant.utils.timeout import run_with_timeout, TimeoutError as SignalTimeout
+from okx_quant.utils.timeout import TimeoutError as SignalTimeout
+from okx_quant.utils.timeout import run_with_timeout
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from okx_quant.cli.dashboard import Dashboard
+
+
+def _strategy_implementation_hash(strategy: BaseStrategy) -> str:
+    """Hash source plus executable signal code; source-unavailable is explicit."""
+    strategy_type = type(strategy)
+    signal = strategy.generate_signal
+    source_file = inspect.getsourcefile(strategy_type)
+    module_source_hash = ""
+    if source_file:
+        try:
+            with open(source_file, "rb") as source:  # noqa: PTH123
+                module_source_hash = hashlib.sha256(source.read()).hexdigest()
+        except OSError:
+            module_source_hash = ""
+    try:
+        class_source_hash = hashlib.sha256(
+            inspect.getsource(strategy_type).encode()
+        ).hexdigest()
+    except (OSError, TypeError):
+        class_source_hash = ""
+    code = getattr(signal, "__code__", None)
+    code_hash = (
+        hashlib.sha256(marshal.dumps(code)).hexdigest()
+        if code is not None
+        else ""
+    )
+    identity = {
+        "module_source_sha256": module_source_hash,
+        "class_source_sha256": class_source_hash,
+        "generate_signal_code_sha256": code_hash,
+    }
+    if not any(identity.values()):
+        raise ValueError("无法取得策略源码或可执行代码身份")
+    return hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 class LiveTrader:
@@ -41,20 +91,22 @@ class LiveTrader:
 
     def __init__(
         self,
-        client: Optional[OKXRestClient] = None,
-        strategy: Optional[BaseStrategy] = None,
+        client: OKXRestClient | None = None,
+        strategy: BaseStrategy | None = None,
         inst_id: str = "",
-        risk_config: Optional[RiskConfig] = None,
+        risk_config: RiskConfig | None = None,
         quote_ccy: str = "USDT",
         dashboard: bool = False,
         simulated: bool = True,
-        risk_manager: Optional[RiskManager] = None,
+        risk_manager: RiskManager | None = None,
         signal_timeout_s: float = 20.0,
-        state_store: Optional[StateStore] = None,
+        state_store: StateStore | None = None,
         *,
-        exchange: Optional[Exchange] = None,
+        exchange: Exchange | None = None,
         decision_log_dir: str = "logs",
-        account: Optional[AccountSnapshot] = None,
+        account: AccountSnapshot | None = None,
+        production_runtime=None,
+        strategy_revision: str = "",
     ):
         if exchange is None and client is None:
             raise ValueError("LiveTrader 需要 exchange 或 client 至少一个")
@@ -76,6 +128,38 @@ class LiveTrader:
         self._stop_event = threading.Event()
         self._simulated = simulated
         self._signal_timeout_s = signal_timeout_s
+        self._production = production_runtime
+        strategy_revision = strategy_revision.strip().lower()
+        if strategy_revision and not re.fullmatch(
+            r"[0-9a-f]{40}",
+            strategy_revision,
+        ):
+            raise ValueError("strategy_revision 必须是完整 40 位 commit SHA")
+        implementation_hash = _strategy_implementation_hash(self.strategy)
+        self._strategy_version = hashlib.sha256(
+            json.dumps(
+                {
+                    "class": (
+                        f"{type(self.strategy).__module__}."
+                        f"{type(self.strategy).__qualname__}"
+                    ),
+                    "name": self.strategy.name,
+                    "params": self.strategy.params,
+                    "implementation_sha256": implementation_hash,
+                    "release_commit": strategy_revision,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        ).hexdigest()
+        self._strategy_instance_id = (
+            f"{self.strategy.name}:{self.inst_id}:"
+            f"{self._strategy_version[:16]}"
+        )
+        if self._production is not None:
+            self._production.register_risk_manager(self.risk)
 
         # 状态持久化（跨进程 / 崩溃恢复）
         self._state_store = state_store if state_store is not None else StateStore()
@@ -86,7 +170,7 @@ class LiveTrader:
 
         # Dashboard 相关（部分字段由持久化状态恢复）
         self._use_dashboard = dashboard
-        self._dashboard: Optional["Dashboard"] = None
+        self._dashboard: Dashboard | None = None
         self._last_price: float = 0.0
         self._last_signal_name: str = self._state.last_signal_name
         self._last_signal_reason: str = self._state.last_signal_reason
@@ -114,6 +198,7 @@ class LiveTrader:
             on_buy_success=self._on_buy_success,
             on_sell_success=self._on_sell_success,
             on_state_change=self._mark_state_dirty,
+            production_runtime=self._production,
         )
 
         # 持仓监控
@@ -232,7 +317,13 @@ class LiveTrader:
     # ------------------------------------------------------------------
 
     def _restore_existing_position(self) -> None:
-        restore_to_risk(self.exchange, self.risk, [self.inst_id], quote_ccy=self.quote_ccy)
+        restore_to_risk(
+            self.exchange,
+            self.risk,
+            [self.inst_id],
+            quote_ccy=self.quote_ccy,
+            strict=True,
+        )
 
     # ------------------------------------------------------------------
     # Dashboard 状态构建
@@ -400,18 +491,44 @@ class LiveTrader:
 
         current_price = df["close"].iloc[-1]
         self._last_price = current_price
+        candle_ts = df["ts"].iloc[-1]
+
+        if self._production is not None:
+            valid, reason = self._production.validate_candle(
+                self._strategy_instance_id,
+                self.inst_id,
+                bar,
+                candle_ts,
+                market_data=df,
+            )
+            if not valid:
+                logger.info("[K线] %s %s，跳过策略执行", self.inst_id, reason)
+                return
+            # 在任何策略/退出副作用前先 durable claim。崩溃时宁可漏过一根，
+            # 也不能让同一根已完成 K 线再次产生订单或重复 LLM 成本。
+            self._production.mark_candle_processed(
+                self._strategy_instance_id,
+                self.inst_id,
+                bar,
+                candle_ts,
+            )
 
         equity = self.get_equity()
         self.risk.update_equity(equity)
 
-        if self.risk.is_halted:
-            logger.warning("[风控] %s，跳过交易", self.risk.halt_reason)
-            return
-
-        # 止损/止盈检查（可能触发 sell）
+        # 先检查退出，再处理停盘。停盘的语义是“禁止增加风险”，绝不能
+        # 阻止已有仓位止损、止盈或由策略主动退出。
         if self._monitor.check(current_price, df):
             self._persist_state()
             return
+
+        # 无仓位时停盘不再调用策略（尤其避免无意义的 LLM 调用）；有仓位时
+        # 继续生成信号，只允许 SELL 路径通过风控。
+        if self.risk.is_halted and not self.risk.has_position(self.inst_id):
+            logger.warning("[风控] %s，禁止开新仓", self.risk.halt_reason)
+            return
+        if self.risk.is_halted:
+            logger.warning("[风控] %s，仅允许退出已有仓位", self.risk.halt_reason)
 
         # 生成策略信号（带硬超时；超时则视为 HOLD，保护主循环）
         try:
@@ -432,6 +549,14 @@ class LiveTrader:
                 price=current_price,
                 reason=f"策略调用超时 (>{self._signal_timeout_s:.0f}s)",
             )
+            if self._production is not None:
+                self._production.record_strategy_warning(
+                    strategy_name=self.strategy.name,
+                    strategy_version=self._strategy_version,
+                    inst_id=self.inst_id,
+                    warning_kind="timeout",
+                    detail=signal.reason,
+                )
         except Exception as e:  # noqa: BLE001
             logger.error("[信号] %s 策略异常: %s", self.inst_id, e, exc_info=True)
             signal = Signal(
@@ -440,6 +565,14 @@ class LiveTrader:
                 price=current_price,
                 reason=f"策略异常: {e}",
             )
+            if self._production is not None:
+                self._production.record_strategy_warning(
+                    strategy_name=self.strategy.name,
+                    strategy_version=self._strategy_version,
+                    inst_id=self.inst_id,
+                    warning_kind="error",
+                    detail=str(e),
+                )
 
         self._last_signal_name = signal.signal.value.upper()
         self._last_signal_reason = signal.reason
@@ -455,16 +588,40 @@ class LiveTrader:
             self._last_logged_signal = sig_key
 
         # 记录决策日志
-        candle_ts = df["ts"].iloc[-1]
         self._decision_logger.log(signal, candle_ts)
 
+        decision_id = ""
+        if self._production is not None:
+            inputs_hash = hashlib.sha256(
+                repr(df.tail(3).to_dict("records")).encode()
+            ).hexdigest()
+            decision_id = self._production.persist_decision(
+                strategy_instance_id=self._strategy_instance_id,
+                strategy_name=self.strategy.name,
+                strategy_version=self._strategy_version,
+                inst_id=self.inst_id,
+                candle_ts=str(candle_ts),
+                signal=signal.signal.value,
+                requested_size_pct=Decimal(str(signal.size_pct)),
+                reason=signal.reason,
+                inputs_hash=inputs_hash,
+            ) or ""
+            if not decision_id:
+                logger.info("[决策] 同一已完成 K 线已存在，跳过执行")
+                return
         # 执行信号
-        self._dispatch_signal(signal, current_price, equity)
+        self._dispatch_signal(signal, current_price, equity, decision_id)
 
         # 本轮结束后持久化一次状态
         self._persist_state()
 
-    def _dispatch_signal(self, signal: Signal, current_price: float, equity: float) -> None:
+    def _dispatch_signal(
+        self,
+        signal: Signal,
+        current_price: float,
+        equity: float,
+        decision_id: str = "",
+    ) -> None:
         if signal.is_buy and not self.risk.has_position(self.inst_id):
             if self._orders.in_buy_cooldown():
                 remaining = int(self._orders.buy_fail_until - time.time())
@@ -485,7 +642,14 @@ class LiveTrader:
                 return
 
             sl, tp = self.risk.calc_sl_tp(current_price, signal.stop_loss, signal.take_profit)
-            placed = self._orders.buy(current_price, size_coin, sl, tp, signal.reason)
+            placed = self._orders.buy(
+                current_price,
+                size_coin,
+                sl,
+                tp,
+                signal.reason,
+                decision_id=decision_id,
+            )
             if not placed:
                 # 下单未成功 → 释放预留槽位，否则该 inst_id 会被占位仓位永久占用
                 self.risk.remove_position(self.inst_id)

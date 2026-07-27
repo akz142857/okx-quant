@@ -1,0 +1,16 @@
+[Unit]
+Description=Page on OKX Quant backup unit failure for %i
+
+[Service]
+Type=oneshot
+User=okxquant-backup
+Group=okxquant-backup
+EnvironmentFile=/etc/okx-quant/backup.env
+ExecStart=/opt/okx-quant/venv/bin/python /opt/okx-quant/current/scripts/page_service_failure.py --service %i --webhook-env OKX_QUANT_ALERT_WEBHOOK
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

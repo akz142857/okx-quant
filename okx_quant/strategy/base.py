@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
@@ -25,9 +25,9 @@ class StrategyContext:
     使用 ``context.extra_dict()``。
     """
 
-    llm_client: "Optional[LLMClient]" = None           # 廉价模型（单 LLM 策略主用）
-    deep_llm_client: "Optional[LLMClient]" = None      # 强力模型（多 Agent 辩论+决策）
-    news_fetcher: "Optional[CryptoNewsFetcher]" = None
+    llm_client: LLMClient | None = None           # 廉价模型（单 LLM 策略主用）
+    deep_llm_client: LLMClient | None = None      # 强力模型（多 Agent 辩论+决策）
+    news_fetcher: CryptoNewsFetcher | None = None
     extra: tuple[tuple[str, Any], ...] = ()
 
     def extra_dict(self) -> dict[str, Any]:
@@ -38,11 +38,11 @@ class StrategyContext:
     def from_dict_extra(
         cls,
         *,
-        llm_client: "Optional[LLMClient]" = None,
-        deep_llm_client: "Optional[LLMClient]" = None,
-        news_fetcher: "Optional[CryptoNewsFetcher]" = None,
-        extra: "Optional[dict[str, Any]]" = None,
-    ) -> "StrategyContext":
+        llm_client: LLMClient | None = None,
+        deep_llm_client: LLMClient | None = None,
+        news_fetcher: CryptoNewsFetcher | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> StrategyContext:
         return cls(
             llm_client=llm_client,
             deep_llm_client=deep_llm_client,
@@ -102,8 +102,8 @@ class BaseStrategy(ABC):
 
     def __init__(
         self,
-        params: Optional[dict] = None,
-        context: Optional[StrategyContext] = None,
+        params: dict | None = None,
+        context: StrategyContext | None = None,
     ):
         self.params = params or {}
         self._context: StrategyContext = context or StrategyContext()
@@ -115,6 +115,7 @@ class BaseStrategy(ABC):
 
     def _apply_context(self) -> None:
         """子类可覆写以将 StrategyContext 字段分发到自己的内部句柄"""
+        return None
 
     @abstractmethod
     def generate_signal(self, df: pd.DataFrame, inst_id: str) -> Signal:

@@ -11,14 +11,13 @@ import pytest
 
 from okx_quant.agentic.agents import _parse_json
 from okx_quant.backtest.engine import BacktestEngine
-from okx_quant.exchange.fake import FakeExchange
 from okx_quant.exchange.base import InstrumentInfo
+from okx_quant.exchange.fake import FakeExchange
 from okx_quant.indicators.momentum import cci, rsi
 from okx_quant.llm.client import LLMClient, LLMConfig
 from okx_quant.risk.manager import RiskConfig, RiskManager
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType
 from okx_quant.trading.orders import OrderExecutor
-
 
 # ----------------------------------------------------------------------
 # RSI 纯上涨返回 100（而非 NaN）
@@ -207,5 +206,9 @@ def test_backtest_sl_exit_applies_slippage():
     assert closed, "应至少有一笔平仓交易"
     sl_trade = closed[0]
     assert "止损" in sl_trade.reason_close
-    # 出场价应为触发价 90 * (1 - slippage)，而非精确 90
-    assert sl_trade.exit_price == pytest.approx(90.0 * (1 - slippage), rel=1e-6)
+    # 入场由 100 滑到 101，保护价同比上移至 90.9；出场再承受卖出滑点。
+    assert sl_trade.stop_loss == pytest.approx(90.0 * (1 + slippage), rel=1e-6)
+    assert sl_trade.exit_price == pytest.approx(
+        90.0 * (1 + slippage) * (1 - slippage),
+        rel=1e-6,
+    )

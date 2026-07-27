@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "strategy": "ma_cross",
+  "bar": "1H",
+  "instruments": ["BTC-USDT"],
+  "interval_seconds": 60
+}

@@ -20,22 +20,37 @@
 """
 
 import argparse
+import atexit
+import grp
+import json
 import logging
 import os
+import pwd
 import sys
-
-logger = logging.getLogger(__name__)
+import tempfile
+import time
+from pathlib import Path
 
 from okx_quant.config import load_yaml
 from okx_quant.strategy import STRATEGY_REGISTRY, is_llm_strategy
 
+logger = logging.getLogger(__name__)
+
 VALID_BARS = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D", "1W"]
 
 
-def setup_logging(level: str = "INFO", log_file: str = ""):
+def setup_logging(
+    level: str = "INFO",
+    log_file: str = "",
+    *,
+    structured: bool = False,
+    secrets: list[str] | None = None,
+):
     handlers = [logging.StreamHandler(sys.stdout)]
     if log_file:
-        os.makedirs(os.path.dirname(log_file), exist_ok=True)
+        log_directory = os.path.dirname(log_file)
+        if log_directory:
+            os.makedirs(log_directory, exist_ok=True)
         handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
 
     logging.basicConfig(
@@ -43,7 +58,19 @@ def setup_logging(level: str = "INFO", log_file: str = ""):
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=handlers,
+        force=True,
     )
+    if structured:
+        from okx_quant.infrastructure.logging import (
+            JsonFormatter,
+            SecretRedactionFilter,
+        )
+
+        formatter = JsonFormatter()
+        redaction = SecretRedactionFilter(secrets or [])
+        for handler in handlers:
+            handler.setFormatter(formatter)
+            handler.addFilter(redaction)
     # 静默噪音日志
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("websockets").setLevel(logging.WARNING)
@@ -58,6 +85,35 @@ def load_config(path: str = "config.yaml") -> dict:
     return load_yaml(path)
 
 
+def load_env_file(path: str) -> None:
+    """安全读取 systemd 风格 KEY=VALUE，不执行 shell 语法。"""
+    if not path:
+        return
+    with open(path, encoding="utf-8") as handle:
+        for line_number, raw in enumerate(handle, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                raise ValueError(f"环境文件第 {line_number} 行缺少 '='")
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if (
+                not key
+                or not key.replace("_", "").isalnum()
+                or not key[0].isalpha()
+            ):
+                raise ValueError(f"环境文件第 {line_number} 行变量名非法")
+            value = value.strip()
+            if (
+                len(value) >= 2
+                and value[0] == value[-1]
+                and value[0] in {"'", '"'}
+            ):
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+
+
 def make_client(cfg: dict):
     from okx_quant.client.rest import OKXRestClient
 
@@ -68,6 +124,9 @@ def make_client(cfg: dict):
         passphrase=okx_cfg.get("passphrase", ""),
         simulated=okx_cfg.get("simulated", True),
         proxy=okx_cfg.get("proxy", ""),
+        base_url=okx_cfg.get("base_url", ""),
+        timeout=int(okx_cfg.get("timeout", 15)),
+        max_retries=int(okx_cfg.get("max_retries", 3)),
     )
 
 
@@ -104,8 +163,8 @@ def make_strategy(name: str, params: dict | None = None, cfg: dict | None = None
     # 构造 StrategyContext —— 所有外部依赖在构造时一次性注入
     context: StrategyContext | None = None
     if is_llm_strategy(name) and cfg:
-        from okx_quant.llm import LLMClient, LLMConfig
         from okx_quant.data.news import CryptoNewsFetcher
+        from okx_quant.llm import LLMClient, LLMConfig
 
         llm_cfg = cfg.get("llm", {})
         if not llm_cfg.get("api_key"):
@@ -153,8 +212,9 @@ def _validate_inst(inst: str):
 # -------------------------------------------------------------------------
 
 def cmd_ticker(args, cfg):
-    from okx_quant.data.market import MarketDataFetcher
     from tabulate import tabulate
+
+    from okx_quant.data.market import MarketDataFetcher
 
     _validate_inst(args.inst)
     client = make_client(cfg)
@@ -182,8 +242,8 @@ def cmd_ticker(args, cfg):
 # -------------------------------------------------------------------------
 
 def cmd_backtest(args, cfg):
-    from okx_quant.data.market import MarketDataFetcher
     from okx_quant.backtest import BacktestEngine, BacktestReport
+    from okx_quant.data.market import MarketDataFetcher
 
     _validate_inst(args.inst)
     _validate_bar(args.bar)
@@ -292,10 +352,72 @@ def _run_screen(cfg, top_n: int, bar: str, max_price: float = 0) -> list[str]:
     return selected
 
 
+def _validate_production_deployment(args, cfg, settings) -> None:
+    """Ultimate in-process guard; direct console invocation cannot bypass it."""
+    release_root = Path(settings.release_root)
+    if not release_root.is_dir():
+        raise ValueError("生产 release_root 不存在")
+    release_root_text = str(release_root)
+    if release_root_text not in sys.path:
+        sys.path.insert(0, release_root_text)
+    from scripts.deployment_receipt import validate_deployment_receipt
+    from scripts.launch_manifest import load_launch_manifest
+    from scripts.production_gate import _actual_runtime_identity
+
+    launch = load_launch_manifest(Path(settings.launch_manifest_path))
+    requested_instruments = [
+        item.strip() for item in args.inst.split(",") if item.strip()
+    ]
+    if (
+        getattr(args, "screen", 0)
+        or args.strategy != launch["strategy"]
+        or args.bar != launch["bar"]
+        or requested_instruments != launch["instruments"]
+        or args.interval != launch["interval_seconds"]
+    ):
+        raise ValueError(
+            "实际 live argv 未精确匹配 root-owned launch manifest"
+        )
+    identity = _actual_runtime_identity(
+        config_path=Path(args.config),
+        release_commit_file=release_root / "REVISION",
+        strategy=launch["strategy"],
+        bar=launch["bar"],
+        instruments=launch["instruments"],
+        interval=float(launch["interval_seconds"]),
+    )
+    validate_deployment_receipt(
+        Path(settings.deployment_receipt_path),
+        identity=identity,
+        approval_path=Path(settings.admission_approval_path),
+        approval_public_key=Path(
+            settings.admission_approval_public_key
+        ),
+        evidence_path=Path(settings.admission_evidence_path),
+    )
+
+
+def _strategy_instruments(
+    requested: list[str],
+    existing_positions: list[str],
+    *,
+    production: bool,
+) -> list[str]:
+    instruments = list(requested)
+    if production:
+        return instruments
+    for inst_id in existing_positions:
+        if inst_id not in instruments:
+            instruments.append(inst_id)
+    return instruments
+
+
 def cmd_live(args, cfg):
+    from okx_quant.config import ProductionSettings
+    from okx_quant.domain.orders import SystemMode
+    from okx_quant.risk.manager import RiskConfig
     from okx_quant.trading.executor import LiveTrader
     from okx_quant.trading.state import StateStore
-    from okx_quant.risk.manager import RiskConfig
 
     _validate_bar(args.bar)
 
@@ -325,18 +447,186 @@ def cmd_live(args, cfg):
             print("已取消。如确需实盘请重试并输入完整确认语。")
             sys.exit(0)
 
+    production_cfg = ProductionSettings.from_config(cfg)
+    launch_authorized = True
+    launch_error = ""
+    if production_cfg.environment == "production":
+        try:
+            _validate_production_deployment(args, cfg, production_cfg)
+        except Exception as exc:  # safety kernel must still start fail-closed
+            launch_authorized = False
+            launch_error = f"{type(exc).__name__}: {exc}"
+            logger.critical(
+                "生产部署准入无效；仅启动 HALTED safety kernel: %s",
+                launch_error,
+            )
+    if getattr(args, "safety_only", False):
+        launch_authorized = False
+        launch_error = launch_error or "wrapper requested safety-only mode"
+
     from okx_quant.exchange import OKXExchange
     from okx_quant.trading.position_restore import discover_positions
 
     client = make_client(cfg)
     exchange = OKXExchange(client)
+    production_runtime = None
+    strategy_revision = ""
+    if production_cfg.enabled:
+        from okx_quant.application.approval import production_config_hash
+        from okx_quant.application.risk_service import ProductionRiskLimits
+        from okx_quant.application.runtime import ProductionRuntime
+        from okx_quant.client.websocket import OKXWebSocketClient
+        from okx_quant.infrastructure.db import SQLiteJournal
+
+        journal = SQLiteJournal(
+            production_cfg.journal_path,
+            must_exist=production_cfg.environment == "production",
+        )
+        if (
+            production_cfg.environment == "production"
+            and launch_authorized
+        ):
+            strategy_revision = (
+                Path(production_cfg.release_root) / "REVISION"
+            ).read_text(encoding="ascii").strip().lower()
+        if production_cfg.environment == "production":
+            journal.assert_identity(production_cfg.account_id)
+            if (
+                not launch_authorized
+                and journal.get_mode()
+                not in {
+                    SystemMode.HALTED,
+                    SystemMode.EMERGENCY_EXIT,
+                    SystemMode.MAINTENANCE,
+                }
+            ):
+                journal.set_mode(SystemMode.HALTED)
+        runtime_config_hash = production_config_hash(production_cfg, cfg)
+        risk_limits = ProductionRiskLimits(
+            max_order_loss_usdt=production_cfg.max_order_loss_usdt,
+            max_position_notional_usdt=production_cfg.max_position_notional_usdt,
+            max_total_exposure_usdt=production_cfg.max_total_exposure_usdt,
+            max_open_positions=production_cfg.max_open_positions,
+            max_daily_loss_usdt=production_cfg.max_daily_loss_usdt,
+            max_drawdown_ratio=production_cfg.max_drawdown_ratio,
+            max_order_intents_per_hour=production_cfg.max_order_intents_per_hour,
+            max_spread_ratio=production_cfg.max_spread_ratio,
+            max_slippage_ratio=production_cfg.max_slippage_ratio,
+            max_candle_range_ratio=(
+                production_cfg.max_candle_range_ratio
+            ),
+            min_24h_quote_volume_usdt=(
+                production_cfg.min_24h_quote_volume_usdt
+            ),
+            max_market_data_age_s=production_cfg.max_market_data_age_s,
+            max_account_snapshot_age_s=production_cfg.max_account_snapshot_age_s,
+            allowed_instruments=frozenset(
+                production_cfg.allowed_instruments
+            ),
+        )
+        ws = OKXWebSocketClient(
+            api_key=okx_cfg.get("api_key", ""),
+            secret_key=okx_cfg.get("secret_key", ""),
+            passphrase=okx_cfg.get("passphrase", ""),
+            simulated=simulated,
+        )
+        production_runtime = ProductionRuntime(
+            exchange,
+            journal,
+            risk_limits=risk_limits,
+            websocket=ws,
+            lock_path=production_cfg.lock_path,
+            reconciliation_interval_s=production_cfg.reconciliation_interval_s,
+            max_clock_skew_s=production_cfg.max_clock_skew_s,
+            ws_ready_timeout_s=production_cfg.ws_ready_timeout_s,
+            max_unprotected_position_s=(
+                production_cfg.max_unprotected_position_s
+            ),
+            max_consecutive_infrastructure_errors=(
+                production_cfg.max_consecutive_infrastructure_errors
+            ),
+            shadow_mode=production_cfg.shadow_mode,
+            safety_only=not launch_authorized,
+            heartbeat_path=production_cfg.heartbeat_path,
+            backup_dir=production_cfg.backup_dir,
+            backup_interval_s=production_cfg.backup_interval_s,
+            backup_retention_days=production_cfg.backup_retention_days,
+            offsite_backup_uri=production_cfg.offsite_backup_uri,
+            alert_webhook_url=os.environ.get(
+                production_cfg.alert_webhook_env, ""
+            ),
+            metrics_host=production_cfg.metrics_host,
+            metrics_port=production_cfg.metrics_port,
+            expected_account_id=production_cfg.account_id,
+            approval_public_key=production_cfg.resume_approval_public_key,
+            production_config_hash=runtime_config_hash,
+        )
+        public_instruments = list(production_cfg.allowed_instruments)
+        if not public_instruments and args.inst:
+            public_instruments = [
+                item.strip()
+                for item in args.inst.split(",")
+                if item.strip()
+            ]
+        if public_instruments:
+            production_runtime.register_public_market_data(
+                public_instruments,
+                args.bar,
+            )
+        journal.record_event(
+            "production_config_loaded",
+            payload={
+                "config_hash": ProductionRuntime.config_hash(cfg),
+                "environment": production_cfg.environment,
+                "shadow_mode": production_cfg.shadow_mode,
+            },
+        )
+        try:
+            production_runtime.start()
+        except Exception as exc:
+            logger.critical("生产恢复门禁失败，拒绝启动策略: %s", exc)
+            raise SystemExit(1) from exc
+        atexit.register(production_runtime.stop)
+        if (
+            production_cfg.environment == "production"
+            and not launch_authorized
+        ):
+            journal.record_event(
+                "production_safety_only_started",
+                severity="critical",
+                payload={"error": launch_error},
+            )
+            journal.enqueue_outbox(
+                "page.production_safety_only_started",
+                {"error": launch_error},
+            )
+            print(
+                "生产准入/receipt 无效：safety kernel 已以 HALTED 启动；"
+                "不会创建策略 worker 或执行 BUY。"
+            )
+            try:
+                while True:
+                    time.sleep(60)
+            except KeyboardInterrupt:
+                production_runtime.stop()
+                return
     executor_cfg = cfg.get("executor", {})
     signal_timeout_s = float(executor_cfg.get("signal_timeout_s", 20))
     state_store = StateStore(state_dir=executor_cfg.get("state_dir", "state"))
 
     # 优先检测已有持仓（无论选币结果如何，已有持仓必须纳入监控）
     existing_positions: list[str] = []
-    for inst_id, balance in discover_positions(exchange, exchange.quote_ccy):
+    try:
+        discovered = discover_positions(
+            exchange,
+            exchange.quote_ccy,
+            strict=True,
+        )
+    except RuntimeError as e:
+        logger.error("实盘启动前账户检查失败: %s", e)
+        print("错误: 无法确认账户现有持仓，已拒绝启动交易。请检查网络和 API 权限。")
+        raise SystemExit(1) from e
+    for inst_id, balance in discovered:
         existing_positions.append(inst_id)
         ccy = inst_id.split("-")[0]
         print(f"  检测到已有持仓: {inst_id}（{balance} {ccy}）")
@@ -369,15 +659,36 @@ def cmd_live(args, cfg):
         _validate_inst(args.inst)
 
     # 构建最终交易对列表，确保已有持仓始终包含在内
-    instruments = [s.strip() for s in args.inst.split(",")] if args.inst else []
+    requested_instruments = (
+        [s.strip() for s in args.inst.split(",")] if args.inst else []
+    )
     for pos_inst in existing_positions:
-        if pos_inst not in instruments:
-            instruments.append(pos_inst)
-            print(f"  已有持仓 {pos_inst} 自动加入交易列表")
+        if pos_inst not in requested_instruments:
+            if production_cfg.environment == "production":
+                print(
+                    f"  已有仓位 {pos_inst} 仅由 safety kernel/交易所保护监控；"
+                    "未在 launch manifest 中，不启动策略 worker"
+                )
+            else:
+                print(f"  已有持仓 {pos_inst} 自动加入交易列表")
+    instruments = _strategy_instruments(
+        requested_instruments,
+        existing_positions,
+        production=production_cfg.environment == "production",
+    )
 
     if not instruments:
         print("错误: 无交易对可监控")
         sys.exit(1)
+    if production_cfg.allowed_instruments:
+        unauthorized = sorted(
+            set(instruments) - set(production_cfg.allowed_instruments)
+        )
+        if unauthorized:
+            raise SystemExit(
+                "交易对不在 production.allowed_instruments: "
+                + ", ".join(unauthorized)
+            )
 
     risk_cfg_raw = cfg.get("risk", {})
     risk_config = RiskConfig(
@@ -396,7 +707,8 @@ def cmd_live(args, cfg):
     if len(instruments) > 1:
         from okx_quant.trading.supervisor import Supervisor
 
-        strategy_factory = lambda: make_strategy(args.strategy, cfg=cfg)
+        def strategy_factory():
+            return make_strategy(args.strategy, cfg=cfg)
 
         if not use_dashboard:
             mode = "【模拟盘】" if simulated else "【实盘】"
@@ -417,8 +729,12 @@ def cmd_live(args, cfg):
             simulated=simulated,
             signal_timeout_s=signal_timeout_s,
             state_store=state_store,
+            production_runtime=production_runtime,
+            strategy_revision=strategy_revision,
         )
         supervisor.run()
+        if production_runtime is not None:
+            production_runtime.stop()
         return
 
     # 单币种 → 现有 LiveTrader 逻辑（向后兼容）
@@ -439,8 +755,12 @@ def cmd_live(args, cfg):
         dashboard=use_dashboard, simulated=simulated,
         signal_timeout_s=signal_timeout_s,
         state_store=state_store,
+        production_runtime=production_runtime,
+        strategy_revision=strategy_revision,
     )
     trader.run(bar=args.bar, lookback=100, interval_seconds=args.interval)
+    if production_runtime is not None:
+        production_runtime.stop()
 
 
 # -------------------------------------------------------------------------
@@ -448,8 +768,9 @@ def cmd_live(args, cfg):
 # -------------------------------------------------------------------------
 
 def cmd_list_pairs(args, cfg):
-    from okx_quant.data.market import MarketDataFetcher
     from tabulate import tabulate
+
+    from okx_quant.data.market import MarketDataFetcher
 
     client = make_client(cfg)
     fetcher = MarketDataFetcher(client)
@@ -483,10 +804,362 @@ def cmd_list_strategies(args, cfg):
     from okx_quant.cli.colors import bold, cyan, dim, yellow
 
     print(cyan("\n可用策略:\n"))
-    for key, (cls, cn_name, desc) in STRATEGY_REGISTRY.items():
+    for key, (_cls, cn_name, desc) in STRATEGY_REGISTRY.items():
         tag = f" {yellow('[AI]')}" if is_llm_strategy(key) else ""
         print(f"  {bold(key):<20} {cn_name}{tag}")
         print(f"  {'':20} {dim(desc)}\n")
+
+
+def _open_production_journal(cfg, *, read_only: bool = False):
+    from okx_quant.config import ProductionSettings
+    from okx_quant.infrastructure.db import SQLiteJournal
+
+    settings = ProductionSettings.from_config(
+        cfg,
+        require_credentials=False,
+        require_external_controls=False,
+    )
+    path = Path(settings.journal_path)
+    if not path.is_file() or path.is_symlink():
+        raise SystemExit(f"交易日志不存在或不是普通文件: {path}")
+    journal = SQLiteJournal(
+        path,
+        must_exist=True,
+        read_only=read_only,
+    )
+    if settings.environment == "production":
+        if not settings.account_id:
+            journal.close()
+            raise SystemExit("生产运维命令必须加载 production.account_id")
+        try:
+            journal.assert_identity(settings.account_id)
+        except Exception:
+            journal.close()
+            raise
+    return settings, journal
+
+
+def cmd_init_journal(args, cfg):
+    from okx_quant.application.approval import production_config_hash
+    from okx_quant.config import ProductionSettings
+    from okx_quant.infrastructure.db import SQLiteJournal
+
+    settings = ProductionSettings.from_config(
+        cfg,
+        require_credentials=False,
+    )
+    expected = f"INIT {settings.account_id or settings.environment}"
+    provided = args.confirm
+    if not provided and sys.stdin.isatty():
+        provided = input(f"输入 '{expected}' 初始化全新交易日志: ").strip()
+    if provided != expected:
+        raise SystemExit(f"确认文本不匹配；必须是: {expected}")
+    path = Path(settings.journal_path)
+    if path.exists() or path.is_symlink():
+        raise SystemExit(f"拒绝覆盖既有交易日志路径: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise SystemExit("拒绝符号链接或非目录交易日志父路径")
+    owner_uid = None
+    owner_gid = None
+    if settings.environment == "production":
+        owner_user = getattr(args, "owner_user", "okxquant-trader")
+        owner_group = getattr(args, "owner_group", "okxquant-data")
+        owner_uid = pwd.getpwnam(owner_user).pw_uid
+        owner_gid = grp.getgrnam(owner_group).gr_gid
+        if os.geteuid() not in {0, owner_uid}:
+            raise PermissionError(
+                "生产交易日志只能由 root 或目标 trader 身份初始化"
+            )
+        os.chown(path.parent, owner_uid, owner_gid)
+        path.parent.chmod(0o2750)
+    with tempfile.NamedTemporaryFile(
+        prefix=f".{path.name}.init-",
+        suffix=".tmp",
+        dir=path.parent,
+        delete=False,
+    ) as temporary_handle:
+        temporary_path = Path(temporary_handle.name)
+    try:
+        journal = SQLiteJournal(temporary_path)
+        try:
+            journal.initialize_identity(
+                account_id=settings.account_id or settings.environment,
+                initial_config_hash=production_config_hash(settings, cfg),
+                actor=args.actor,
+            )
+        finally:
+            journal.close()
+        if settings.environment == "production":
+            if owner_uid is None or owner_gid is None:
+                raise RuntimeError("生产交易日志 owner 解析状态非法")
+            os.chown(temporary_path, owner_uid, owner_gid)
+            temporary_path.chmod(0o640)
+        else:
+            temporary_path.chmod(0o600)
+        with temporary_path.open("rb") as handle:
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary_path, path)
+        except FileExistsError as exc:
+            raise SystemExit(
+                f"拒绝覆盖并发创建的交易日志: {path}"
+            ) from exc
+        if settings.environment == "production":
+            path.parent.chmod(0o2750)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            Path(f"{temporary_path}{suffix}").unlink(missing_ok=True)
+    print(f"交易日志已初始化并锁存 HALTED: {path}")
+
+
+def cmd_resume_request(args, cfg):
+    from okx_quant.application.approval import build_resume_request
+    from okx_quant.config import ProductionSettings
+
+    settings = ProductionSettings.from_config(
+        cfg,
+        require_credentials=False,
+    )
+    request = build_resume_request(
+        settings,
+        cfg,
+        actor=args.actor,
+        lifetime_s=args.expires_in,
+    )
+    output = Path(args.output)
+    if output.exists() or output.is_symlink():
+        raise SystemExit(f"拒绝覆盖既有恢复请求: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    output.chmod(0o600)
+    print(f"恢复请求已生成（尚未批准）: {output}")
+
+
+def cmd_flatten_request(args, cfg):
+    from okx_quant.application.approval import build_control_request
+    from okx_quant.config import ProductionSettings
+
+    settings = ProductionSettings.from_config(
+        cfg,
+        require_credentials=False,
+    )
+    request = build_control_request(
+        settings,
+        cfg,
+        action="flatten-and-cancel",
+        actor=args.actor,
+        instruments=args.inst or [],
+        lifetime_s=args.expires_in,
+    )
+    output = Path(args.output)
+    if output.exists() or output.is_symlink():
+        raise SystemExit(f"拒绝覆盖既有 flatten 请求: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(request, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    output.chmod(0o600)
+    print(f"flatten 请求已生成（尚未批准）: {output}")
+
+
+def cmd_production_status(args, cfg):
+    from okx_quant.cli.operations import render_json, status
+
+    _, journal = _open_production_journal(cfg, read_only=True)
+    try:
+        print(render_json(status(journal)))
+    finally:
+        journal.close()
+
+
+def cmd_audit_order(args, cfg):
+    from okx_quant.cli.operations import render_json
+
+    _, journal = _open_production_journal(cfg, read_only=True)
+    try:
+        print(render_json(journal.audit_order_chain(args.cl_ord_id)))
+    finally:
+        journal.close()
+
+
+def cmd_halt_entries(args, cfg):
+    from okx_quant.cli.operations import halt_entries, render_json
+
+    _, journal = _open_production_journal(cfg)
+    try:
+        result = halt_entries(
+            journal,
+            actor=args.actor,
+            timeout_s=args.wait,
+        )
+        print(render_json(result))
+        if result["status"] != "completed":
+            raise SystemExit(2)
+    finally:
+        journal.close()
+
+
+def cmd_resume_entries(args, cfg):
+    from okx_quant.application.approval import (
+        ResumeApprovalVerifier,
+        production_config_hash,
+    )
+    from okx_quant.cli.operations import enqueue_and_wait, render_json
+
+    settings, journal = _open_production_journal(cfg)
+    approval_path = Path(args.approval)
+    if (
+        not approval_path.is_file()
+        or approval_path.is_symlink()
+        or approval_path.stat().st_size <= 0
+    ):
+        journal.close()
+        raise SystemExit("恢复批准必须是既有非空普通文件且不能是符号链接")
+    try:
+        artifact = json.loads(approval_path.read_text(encoding="utf-8"))
+        claims = artifact["payload"]
+        command_id = claims["command_id"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        journal.close()
+        raise SystemExit("恢复批准文件不是合法 artifact") from exc
+    expected = f"RESUME {settings.account_id or settings.environment}"
+    provided = args.confirm
+    if not provided and sys.stdin.isatty():
+        print("此操作会在全部安全检查通过后重新允许新增 BUY。")
+        provided = input(f"输入 '{expected}' 二次确认: ").strip()
+    if provided != expected:
+        journal.close()
+        raise SystemExit(f"确认文本不匹配；必须是: {expected}")
+    if not settings.resume_approval_public_key:
+        journal.close()
+        raise SystemExit("未配置独立风险审批公钥，禁止恢复交易")
+    verifier = ResumeApprovalVerifier(settings.resume_approval_public_key)
+    try:
+        verifier.verify(
+            artifact,
+            command_id=command_id,
+            expected_account_id=settings.account_id or settings.environment,
+            expected_config_hash=production_config_hash(settings, cfg),
+        )
+    except ValueError as exc:
+        journal.close()
+        raise SystemExit(str(exc)) from exc
+    try:
+        result = enqueue_and_wait(
+            journal,
+            "resume-entries",
+            {"approval": artifact},
+            timeout_s=args.wait,
+            command_id=command_id,
+        )
+        print(render_json(result))
+        if result["status"] != "completed":
+            raise SystemExit(2)
+    finally:
+        journal.close()
+
+
+def cmd_flatten(args, cfg):
+    from okx_quant.application.approval import (
+        ResumeApprovalVerifier,
+        production_config_hash,
+    )
+    from okx_quant.cli.operations import enqueue_and_wait, render_json
+
+    settings, journal = _open_production_journal(cfg)
+    if settings.environment == "production" and not settings.account_id:
+        journal.close()
+        raise SystemExit(
+            "生产 flatten 必须加载包含 OKX_ACCOUNT_ID 的受控环境文件；"
+            "请使用 --env-file /etc/okx-quant/production.env"
+        )
+    approval_path = Path(args.approval)
+    if (
+        not approval_path.is_file()
+        or approval_path.is_symlink()
+        or approval_path.stat().st_size <= 0
+    ):
+        journal.close()
+        raise SystemExit("flatten 批准必须是既有非空普通文件且不能是符号链接")
+    try:
+        artifact = json.loads(approval_path.read_text(encoding="utf-8"))
+        command_id = artifact["payload"]["command_id"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        journal.close()
+        raise SystemExit("flatten 批准文件不是合法 artifact") from exc
+    expected = f"FLATTEN {settings.account_id or settings.environment}"
+    provided = args.confirm
+    if not provided and sys.stdin.isatty():
+        print("此操作会取消挂单并市价卖出真实/模拟账户仓位。")
+        provided = input(f"输入 '{expected}' 二次确认: ").strip()
+    if provided != expected:
+        journal.close()
+        raise SystemExit(f"确认文本不匹配；必须是: {expected}")
+    if not settings.resume_approval_public_key:
+        journal.close()
+        raise SystemExit("未配置独立风险审批公钥，禁止 flatten")
+    verifier = ResumeApprovalVerifier(settings.resume_approval_public_key)
+    try:
+        verifier.verify(
+            artifact,
+            command_id=command_id,
+            expected_account_id=settings.account_id or settings.environment,
+            expected_config_hash=production_config_hash(settings, cfg),
+            expected_action="flatten-and-cancel",
+            expected_instruments=args.inst or [],
+        )
+    except ValueError as exc:
+        journal.close()
+        raise SystemExit(str(exc)) from exc
+    try:
+        result = enqueue_and_wait(
+            journal,
+            "flatten-and-cancel",
+            {"instruments": args.inst or [], "approval": artifact},
+            timeout_s=args.wait,
+            command_id=command_id,
+        )
+        print(render_json(result))
+        if result["status"] != "completed":
+            raise SystemExit(2)
+    finally:
+        journal.close()
+
+
+def cmd_reconcile_now(args, cfg):
+    from okx_quant.cli.operations import enqueue_and_wait, render_json
+
+    _, journal = _open_production_journal(cfg)
+    try:
+        result = enqueue_and_wait(
+            journal, "reconcile-now", {}, timeout_s=args.wait
+        )
+        print(render_json(result))
+        if result["status"] != "completed":
+            raise SystemExit(2)
+    finally:
+        journal.close()
+
+
+def cmd_backup_now(args, cfg):
+    from okx_quant.cli.operations import backup_now
+
+    settings, journal = _open_production_journal(cfg)
+    try:
+        destination = backup_now(journal, args.destination or settings.backup_dir)
+        print(destination)
+    finally:
+        journal.close()
 
 
 # -------------------------------------------------------------------------
@@ -521,7 +1194,7 @@ def _confirm_llm_backtest(strategy, num_bars: int):
     is_multi_agent = isinstance(strategy, MultiAgentStrategy)
 
     print(f"\n{'='*50}")
-    print(f"  LLM 回测费用预估")
+    print("  LLM 回测费用预估")
     print(f"  模型: {model}")
 
     if is_multi_agent:
@@ -557,7 +1230,7 @@ def _confirm_llm_backtest(strategy, num_bars: int):
         print(f"  预估费用上限: ~${est_cost:.4f} USD")
 
     if is_ensemble:
-        print(f"  注: 集成策略仅在传统策略达成共识时调用 LLM，实际费用通常远低于预估")
+        print("  注: 集成策略仅在传统策略达成共识时调用 LLM，实际费用通常远低于预估")
     print(f"{'='*50}")
 
     confirm = input("\n  确认运行 LLM 回测? (y/N): ").strip().lower()
@@ -574,7 +1247,7 @@ def _print_llm_usage(strategy):
     model = strategy.llm_model
 
     print(f"\n{'='*50}")
-    print(f"  LLM 用量统计")
+    print("  LLM 用量统计")
     print(f"  模型: {model}")
     print(f"  总调用次数: {usage['total_calls']}")
     print(f"  总 Token: {usage['total_tokens']:,} ({usage['total_input_tokens']:,} in + {usage['total_output_tokens']:,} out)")
@@ -622,7 +1295,16 @@ def main():
         description="OKX 数字货币量化交易系统",
     )
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
-    parser.add_argument("--log-level", default="INFO", help="日志级别")
+    parser.add_argument(
+        "--env-file",
+        default="",
+        help="安全加载 systemd KEY=VALUE 环境文件（不执行 shell）",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="",
+        help="日志级别（默认读取 logging.level）",
+    )
     subparsers = parser.add_subparsers(dest="command")
 
     strategy_choices = list(STRATEGY_REGISTRY.keys())
@@ -649,6 +1331,11 @@ def main():
     p_live.add_argument("--screen", type=int, default=0, help="自动选币数量，如 --screen 5")
     p_live.add_argument("--max-price", type=float, default=0, help="选币最大单价过滤 (USDT，0=不过滤)")
     p_live.add_argument("-y", "--yes", action="store_true", help="跳过交易对确认 prompt（自动化必用）")
+    p_live.add_argument(
+        "--safety-only",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
 
     # screen
     p_screen = subparsers.add_parser("screen", help="因子选币器")
@@ -663,6 +1350,64 @@ def main():
     # list-strategies
     subparsers.add_parser("list-strategies", help="查看可用策略")
 
+    subparsers.add_parser("production-status", help="查看生产内核安全状态")
+
+    p_init = subparsers.add_parser(
+        "init-journal", help="一次性初始化全新交易日志并锁存 HALTED"
+    )
+    p_init.add_argument("--confirm", default="")
+    p_init.add_argument("--actor", default=os.environ.get("USER", "unknown"))
+    p_init.add_argument("--owner-user", default="okxquant-trader")
+    p_init.add_argument("--owner-group", default="okxquant-data")
+
+    p_audit = subparsers.add_parser("audit-order", help="查询 clOrdId 完整审计链")
+    p_audit.add_argument("cl_ord_id")
+
+    p_halt = subparsers.add_parser("halt-entries", help="停止所有新 BUY")
+    p_halt.add_argument("--actor", default=os.environ.get("USER", "unknown"))
+    p_halt.add_argument("--wait", type=float, default=30)
+
+    p_resume_request = subparsers.add_parser(
+        "resume-request", help="生成待独立风险审批人签名的短效恢复请求"
+    )
+    p_resume_request.add_argument(
+        "--actor", default=os.environ.get("USER", "unknown")
+    )
+    p_resume_request.add_argument("--expires-in", type=int, default=300)
+    p_resume_request.add_argument("--output", required=True)
+
+    p_resume = subparsers.add_parser(
+        "resume-entries",
+        help="提交独立签名批准并通过完整安全检查后恢复 BUY",
+    )
+    p_resume.add_argument("--confirm", default="")
+    p_resume.add_argument("--approval", required=True)
+    p_resume.add_argument("--wait", type=float, default=60)
+
+    p_flatten_request = subparsers.add_parser(
+        "flatten-request", help="生成待独立风险审批人签名的短效 flatten 请求"
+    )
+    p_flatten_request.add_argument("--inst", action="append", default=[])
+    p_flatten_request.add_argument(
+        "--actor", default=os.environ.get("USER", "unknown")
+    )
+    p_flatten_request.add_argument("--expires-in", type=int, default=300)
+    p_flatten_request.add_argument("--output", required=True)
+
+    p_flatten = subparsers.add_parser(
+        "flatten-and-cancel", help="取消挂单并退出仓位（需要二次确认）"
+    )
+    p_flatten.add_argument("--inst", action="append", default=[])
+    p_flatten.add_argument("--confirm", default="")
+    p_flatten.add_argument("--approval", required=True)
+    p_flatten.add_argument("--wait", type=float, default=60)
+
+    p_reconcile = subparsers.add_parser("reconcile-now", help="请求立即对账")
+    p_reconcile.add_argument("--wait", type=float, default=60)
+
+    p_backup = subparsers.add_parser("backup-now", help="创建并校验 SQLite 在线备份")
+    p_backup.add_argument("--destination", default="")
+
     args = parser.parse_args()
 
     # 无子命令时进入交互向导
@@ -673,9 +1418,29 @@ def main():
         for k, v in params.items():
             setattr(args, k, v)
 
+    load_env_file(args.env_file)
     cfg = load_config(args.config)
     log_cfg = cfg.get("logging", {})
-    setup_logging(args.log_level, log_cfg.get("file", ""))
+    production_logging = bool(cfg.get("production", {}).get("enabled", False))
+    effective_log_level = args.log_level or log_cfg.get("level", "INFO")
+    if (
+        cfg.get("production", {}).get("environment") == "production"
+        and str(effective_log_level).upper() == "DEBUG"
+    ):
+        parser.error("生产环境禁止 DEBUG 日志")
+    okx_secrets = cfg.get("okx", {})
+    setup_logging(
+        effective_log_level,
+        log_cfg.get("file", ""),
+        structured=production_logging,
+        secrets=[
+            okx_secrets.get("api_key", ""),
+            okx_secrets.get("secret_key", ""),
+            okx_secrets.get("passphrase", ""),
+            cfg.get("llm", {}).get("api_key", ""),
+            cfg.get("llm_deep", {}).get("api_key", ""),
+        ],
+    )
 
     if args.command == "ticker":
         cmd_ticker(args, cfg)
@@ -694,6 +1459,26 @@ def main():
         cmd_list_pairs(args, cfg)
     elif args.command == "list-strategies":
         cmd_list_strategies(args, cfg)
+    elif args.command == "production-status":
+        cmd_production_status(args, cfg)
+    elif args.command == "init-journal":
+        cmd_init_journal(args, cfg)
+    elif args.command == "audit-order":
+        cmd_audit_order(args, cfg)
+    elif args.command == "halt-entries":
+        cmd_halt_entries(args, cfg)
+    elif args.command == "resume-request":
+        cmd_resume_request(args, cfg)
+    elif args.command == "resume-entries":
+        cmd_resume_entries(args, cfg)
+    elif args.command == "flatten-request":
+        cmd_flatten_request(args, cfg)
+    elif args.command == "flatten-and-cancel":
+        cmd_flatten(args, cfg)
+    elif args.command == "reconcile-now":
+        cmd_reconcile_now(args, cfg)
+    elif args.command == "backup-now":
+        cmd_backup_now(args, cfg)
 
 
 if __name__ == "__main__":

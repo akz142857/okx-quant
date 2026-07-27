@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import pandas as pd
 
@@ -29,8 +29,8 @@ class PositionMonitor:
         *,
         trailing_atr_mult: float = 2.0,
         initial_highest: float = 0.0,
-        on_state_change: Optional[Callable[[], None]] = None,
-        sell_cooldown_getter: Optional[Callable[[], float]] = None,
+        on_state_change: Callable[[], None] | None = None,
+        sell_cooldown_getter: Callable[[], float] | None = None,
     ):
         self.inst_id = inst_id
         self.risk = risk
@@ -54,7 +54,7 @@ class PositionMonitor:
         self._highest = 0.0
         self._mark_dirty()
 
-    def check(self, current_price: float, df: Optional[pd.DataFrame] = None) -> bool:
+    def check(self, current_price: float, df: pd.DataFrame | None = None) -> bool:
         """返回 True 表示已触发并平仓"""
         pos = self.risk.get_position(self.inst_id)
         if not pos:

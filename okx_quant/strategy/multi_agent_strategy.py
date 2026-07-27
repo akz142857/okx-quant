@@ -10,7 +10,6 @@
 """
 
 import logging
-from typing import Optional
 
 import pandas as pd
 
@@ -43,9 +42,9 @@ class MultiAgentStrategy(BaseStrategy):
         merged = {**defaults, **(params or {})}
 
         # 这些字段必须在 super().__init__ 调用 _apply_context 之前初始化
-        self._llm_client: Optional[LLMClient] = None
-        self._deep_llm_client: Optional[LLMClient] = None
-        self._news_fetcher: Optional[CryptoNewsFetcher] = None
+        self._llm_client: LLMClient | None = None
+        self._deep_llm_client: LLMClient | None = None
+        self._news_fetcher: CryptoNewsFetcher | None = None
         self._pipeline = None
         self._budget_exceeded_logged: bool = False
 

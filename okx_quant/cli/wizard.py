@@ -62,7 +62,7 @@ def prompt_strategy() -> str:
                 return keys[idx]
         if value in keys:
             return value
-        print(yellow(f"    无效选择"))
+        print(yellow("    无效选择"))
 
 
 def _wizard_ticker() -> tuple[str, dict]:
@@ -147,7 +147,7 @@ def run_wizard() -> tuple[str, dict]:
     print("  [4] 因子选币")
     print("  [5] 查看可用交易对")
     print("  [6] 查看可用策略")
-    print(f"  [q] 退出\n")
+    print("  [q] 退出\n")
 
     choice = input("  请选择 [1-6/q]: ").strip().lower()
 

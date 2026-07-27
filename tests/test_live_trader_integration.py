@@ -108,6 +108,31 @@ def test_tick_buy_signal_opens_position(tmp_path):
 
 
 @pytest.mark.unit
+def test_strategy_version_changes_when_signal_code_changes(
+    tmp_path,
+    monkeypatch,
+):
+    original, _, _ = _build_trader(tmp_path / "original", [])
+
+    def changed_signal(self, df, inst_id):
+        return Signal(
+            SignalType.BUY,
+            inst_id,
+            price=float(df["close"].iloc[-1]),
+        )
+
+    monkeypatch.setattr(
+        ScriptedStrategy,
+        "generate_signal",
+        changed_signal,
+    )
+    changed, _, _ = _build_trader(tmp_path / "changed", [])
+
+    assert changed._strategy_version != original._strategy_version
+    assert changed._strategy_instance_id != original._strategy_instance_id
+
+
+@pytest.mark.unit
 def test_tick_sell_signal_closes_position(tmp_path):
     trader, ex, risk = _build_trader(tmp_path, [SignalType.BUY, SignalType.SELL])
     # run() 负责递增 _tick_count；直接调 _tick 需手动递增
@@ -145,6 +170,29 @@ def test_tick_sl_triggers_sell_without_strategy_signal(tmp_path):
     # 策略队列为空 → 后续 HOLD；SL 应在 PositionMonitor 触发
     trader._tick("1H", lookback=50)
 
+    assert not risk.has_position("BTC-USDT")
+    assert ex.orders[-1].side == "sell"
+
+
+@pytest.mark.unit
+def test_drawdown_halt_does_not_block_existing_position_stop_loss(tmp_path):
+    trader, ex, risk = _build_trader(tmp_path, [SignalType.BUY])
+    trader._tick("1H", lookback=50)
+    assert risk.has_position("BTC-USDT")
+    ex.set_holding("BTC", balance=0.01, available=0.01)
+
+    # 同一 tick 中账户回撤触发停盘，同时价格跌破止损。
+    ex.set_balance(total=8_000, quote_avail=8_000)
+    ex.set_holding("BTC", balance=0.01, available=0.01)
+    ex.set_candles(
+        "BTC-USDT",
+        "1H",
+        _build_candles([50000.0] * 49 + [46000.0]),
+    )
+    trader._account.invalidate()
+    trader._tick("1H", lookback=50)
+
+    assert risk.is_halted
     assert not risk.has_position("BTC-USDT")
     assert ex.orders[-1].side == "sell"
 

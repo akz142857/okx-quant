@@ -3,10 +3,9 @@
 import logging
 import threading
 import time
-from datetime import datetime
-from typing import Callable
-
+from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
 
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.exchange import Exchange, OKXExchange
@@ -53,6 +52,8 @@ class Supervisor:
         state_store: "StateStore | None" = None,
         *,
         exchange: "Exchange | None" = None,
+        production_runtime=None,
+        strategy_revision: str = "",
     ):
         if exchange is None and client is None:
             raise ValueError("Supervisor 需要 exchange 或 client 至少一个")
@@ -72,6 +73,8 @@ class Supervisor:
         self._start_time = datetime.now()
         self._signal_timeout_s = signal_timeout_s
         self._state_store = state_store if state_store is not None else StateStore()
+        self._production = production_runtime
+        self._strategy_revision = strategy_revision
 
         # 共享风控（副本，不修改调用方）
         # max_open_positions 自动设为币种数
@@ -98,6 +101,8 @@ class Supervisor:
                 signal_timeout_s=self._signal_timeout_s,
                 state_store=self._state_store,
                 account=self._account,
+                production_runtime=self._production,
+                strategy_revision=self._strategy_revision,
             )
             self._workers.append(trader)
 
@@ -113,7 +118,13 @@ class Supervisor:
     def _restore_positions(self):
         """检测账户已有持仓，恢复到风控管理器中"""
         quote = getattr(self.exchange, "quote_ccy", "USDT")
-        restore_to_risk(self.exchange, self.risk, self.instruments, quote_ccy=quote)
+        restore_to_risk(
+            self.exchange,
+            self.risk,
+            self.instruments,
+            quote_ccy=quote,
+            strict=True,
+        )
 
     def collect_states(self) -> list[dict]:
         """收集所有 worker 的状态快照"""

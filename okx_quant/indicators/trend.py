@@ -1,7 +1,7 @@
 """趋势类技术指标：MA、EMA、MACD、布林带、ATR"""
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 
 def sma(series: pd.Series, period: int) -> pd.Series:

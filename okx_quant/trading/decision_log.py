@@ -14,7 +14,7 @@ import os
 import re
 from collections import OrderedDict
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 from okx_quant.strategy.base import Signal
 
@@ -35,9 +35,9 @@ class DecisionLogger:
     def __init__(self, inst_id: str, log_dir: str = "logs"):
         self._inst_id = inst_id
         self._log_dir = log_dir
-        self._seen: "OrderedDict[tuple, None]" = OrderedDict()
+        self._seen: OrderedDict[tuple, None] = OrderedDict()
         self._file = None
-        self._writer: Optional[Any] = None
+        self._writer: Any | None = None
         self._current_columns: list[str] = []
 
     def _ensure_file(self, extra_keys: list[str]) -> None:
@@ -59,7 +59,10 @@ class DecisionLogger:
             raise ValueError(f"非法的决策日志路径: inst_id={self._inst_id!r}")
 
         file_exists = os.path.isfile(path) and os.path.getsize(path) > 0
-        self._file = open(path, "a", newline="", encoding="utf-8")
+        # 生命周期由 DecisionLogger.close/context manager 统一管理。
+        self._file = open(  # noqa: SIM115
+            path, "a", newline="", encoding="utf-8"
+        )
         self._writer = csv.writer(self._file)
         self._current_columns = columns
 
@@ -108,7 +111,7 @@ class DecisionLogger:
                 self._file = None
                 self._writer = None
 
-    def __enter__(self) -> "DecisionLogger":
+    def __enter__(self) -> DecisionLogger:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
