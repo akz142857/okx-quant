@@ -1940,7 +1940,11 @@ def test_deployed_hash_binds_exact_python_interpreter_bytes(tmp_path, monkeypatc
     interpreter.parent.mkdir(parents=True)
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
     interpreter.chmod(0o755)
-    monkeypatch.setattr(gate_module.sys, "executable", str(interpreter))
+    monkeypatch.setattr(
+        gate_module,
+        "_runtime_python_executable",
+        lambda: (interpreter, interpreter, b"<regular-file>"),
+    )
     first = gate_module._deployed_source_hash()
     interpreter.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
     second = gate_module._deployed_source_hash()
@@ -1954,8 +1958,24 @@ def test_deployed_hash_rejects_group_writable_python(tmp_path, monkeypatch):
     interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
     interpreter.chmod(0o775)
     monkeypatch.setattr(gate_module.sys, "executable", str(interpreter))
-    with pytest.raises(ValueError, match="Python executable"):
+    with pytest.raises(ValueError, match="executable/target"):
         gate_module._deployed_source_hash()
+
+
+@pytest.mark.unit
+def test_runtime_python_rejects_world_writable_directory_chain(
+    tmp_path, monkeypatch
+):
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir()
+    unsafe.chmod(0o777)
+    interpreter = unsafe / "venv" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(gate_module.sys, "executable", str(interpreter))
+    with pytest.raises(ValueError, match="目录链不安全"):
+        gate_module._runtime_python_executable()
 
 
 @pytest.mark.unit

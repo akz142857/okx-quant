@@ -1,6 +1,6 @@
 # 生产方案实施与证据矩阵
 
-更新时间：2026-07-27
+更新时间：2026-07-28
 
 代码实施与生产准入是两件事。下表描述当前仓库能力；需要时间、凭据或真实基础设施的
 证据保持开放，详见 `RELEASE_CHECKLIST.md`。
@@ -18,13 +18,14 @@
 
 当前本地自动门禁基线：
 
-- 449 项测试通过；另有 1 个 TCP-bind healthz 用例因当前桌面沙箱权限未执行，Linux
-  CI 必须执行；
+- 455 项测试全部通过；
 - 核心订单状态机分支覆盖率 96.30%；
 - 全仓 Ruff 规则通过；
 - Bandit 高严重度/高置信度结果为零；
-- 故障注入集合 184 项通过；覆盖事务中 SIGKILL、kernel socket 黑洞、SQLite
+- 故障注入集合 191 项通过；覆盖事务中 SIGKILL、kernel socket 黑洞、SQLite
   read-only 与真实 SQLITE_FULL；
+- 一键非实盘验证把全部测试文件分成六个 suite，生成绑定 commit/tree/source
+  manifest 的 write-once evidence，并永久声明 `production_admissible=false`；
 - wheel 与 sdist 构建成功。
 
 三组独立审查进一步覆盖了交易/保护竞态、运维与密钥边界、研究准入与偏差。P0/P1

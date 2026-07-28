@@ -20,6 +20,7 @@ evidence/
 .coverage
 htmlcov/
 fault-injection.json
+non-live-validation.json
 demo-contract-evidence.json
 restore-drill.json
 

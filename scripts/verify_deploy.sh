@@ -118,16 +118,16 @@ check_root_directory_chain /etc/okx-quant/admission
 check_shared_journal
 
 if [[ "${MODE}" == "preflight" ]]; then
-echo "[1/7] compile"
+echo "[1/8] compile"
 "${PYTHON_BIN}" -m compileall -q \
   "${PROJECT_DIR}/main.py" "${PROJECT_DIR}/okx_quant" "${PROJECT_DIR}/scripts"
 
-echo "[2/7] static correctness and high-severity security scan"
+echo "[2/8] static correctness and high-severity security scan"
 cd "${PROJECT_DIR}"
 "${PYTHON_BIN}" -m ruff check main.py okx_quant scripts tests
 "${PYTHON_BIN}" -m bandit -q -r okx_quant scripts -lll -iii
 
-echo "[3/7] tests and state-machine branch coverage"
+echo "[3/8] tests and state-machine branch coverage"
 "${PYTHON_BIN}" -m pytest -q \
   --cov=okx_quant \
   --cov-config=.coveragerc-core \
@@ -135,22 +135,27 @@ echo "[3/7] tests and state-machine branch coverage"
   --cov-report=term-missing \
   --cov-fail-under=95
 
-echo "[4/7] fault injection"
+echo "[4/8] committed non-live validation evidence"
+"${PYTHON_BIN}" scripts/non_live_validation.py \
+  --verify-evidence "${PROJECT_DIR}/non-live-validation.json" \
+  --revision-file "${PROJECT_DIR}/REVISION"
+
+echo "[5/8] fault injection"
 "${PYTHON_BIN}" scripts/fault_injection.py \
   --verify-evidence "${PROJECT_DIR}/fault-injection.json" \
   --revision-file "${PROJECT_DIR}/REVISION"
 
-echo "[5/7] strong config validation"
+echo "[6/8] strong config validation"
 "${PYTHON_BIN}" -c \
   'import sys; from main import load_env_file; from okx_quant.config import load_yaml, ProductionSettings; load_env_file(sys.argv[1]); ProductionSettings.from_config(load_yaml(sys.argv[2]))' \
   "${ENV_FILE}" "${CONFIG_FILE}"
 
-echo "[6/7] OKX connectivity and authentication (read-only)"
+echo "[7/8] OKX connectivity and authentication (read-only)"
 "${PYTHON_BIN}" scripts/test_api.py \
   --env-file "${ENV_FILE}" \
   --config "${CONFIG_FILE}"
 
-echo "[7/7] isolated service identities and admission precheck"
+echo "[8/8] isolated service identities and admission precheck"
 if command -v systemctl >/dev/null 2>&1; then
   systemctl cat "${SERVICE_NAME}" >/dev/null
   test "$(systemctl show -p User --value okx-quant.service)" = "okxquant-trader"

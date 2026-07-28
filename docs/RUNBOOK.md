@@ -110,10 +110,13 @@ OKX_QUANT_SERVICE=okx-quant \
 ```
 
 `preflight` 不启动服务，验证的是磁盘上即将部署的版本。第 10 节的时间证据和双人签名
-准入完成后，先启用隔离服务，再运行 post-start：
-CI 生成的 `fault-injection.json` 与 `REVISION` 会一同封入发布压缩包；preflight
-复核其 commit/tree、全源码/脚本/测试 manifest 和 OS 故障结果，不依赖部署目录存在
-`.git`。缺少该 CI artifact、源码 manifest 不一致或 evidence 非零退出都会拒绝发布。
+准入完成后，先启用隔离服务，再运行 post-start。
+
+CI 生成的 `non-live-validation.json`、`fault-injection.json` 与 `REVISION` 会一同
+封入发布压缩包。前者证明完整测试清单在干净目标提交上通过，并永久标记
+`production_admissible=false`；后者证明 OS/语义故障集合。preflight 会复核二者的
+commit/tree、全源码/脚本/测试 manifest 和输出完整性，不依赖部署目录存在 `.git`。
+缺少任一 CI artifact、源码 manifest 不一致或 evidence 非零退出都会拒绝发布。
 
 ```bash
 systemctl enable --now okx-quant-watchdog.service okx-quant-daily-backup.timer
@@ -397,6 +400,10 @@ schema 迁移 forward-only，启动前自动备份。代码回滚只允许回到
 版本；禁止把旧交易库覆盖到新成交之上。若版本不兼容，保持 HALTED 并前滚修复。
 
 ## 10. Demo、shadow 与 canary
+
+不使用真实资金的完整分层验证步骤见
+[非实盘验证指南](NON_LIVE_VALIDATION.md)。先运行一键离线验收，再进入 OKX Demo；
+不得把 FakeExchange 或离线报告登记成真实 Demo 日证据。
 
 OKX demo 契约需人工显式执行。脚本会先验证生产采用的“成交后独立 OCO”，再探测
 quote 金额 attached TP/SL，并在最后撤销保护和清仓：

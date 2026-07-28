@@ -1,6 +1,6 @@
 # 生产方案逐条完成审计
 
-审计日期：2026-07-27
+审计日期：2026-07-28
 
 审计对象：`PRODUCTION_PLAN.md` 1–19 节
 
@@ -34,11 +34,11 @@
 | 10 分层风控与 kill switch | VERIFIED | READY 双重门禁、K 线内部连续性/结构/波动率、精度/现金/风险预留、日损/回撤 hard halt、Ed25519 双人 resume/flatten、epoch CAS、一次性消费 | 真实双人演练与签字为 APPROVAL OPEN |
 | 11 日志、指标与告警 | VERIFIED | 全上下文字段 JSON 脱敏日志、指标/histogram、transactional outbox、UNKNOWN/风控/对账/WS/滑点/策略超时 Warning/Page、同步 Page challenge、独立 heartbeat watchdog | 实际告警到维护者的端到端证据为 EXTERNAL OPEN |
 | 12 API/主机/配置/备份安全 | VERIFIED | root-owned 公钥/目录；trader/watchdog/backup 秘密隔离；数据库卷字节/inode watchdog；加密后回读；签名 ready manifest 绑定快照时点、账户/schema、key ID；S3 version round-trip 工具、分层 prune、独立盘/空间门禁；cold restore 同文件系统单次原子切换并强制 `okxquant-trader:okxquant-data 0640`，供隔离只读身份监控/归档 | key 权限/IP 白名单、SSH/防火墙/NTP、真实 S3 与空主机恢复为 EXTERNAL OPEN |
-| 13 测试层次和故障清单 | PARTIAL | 单元/随机状态机/repository/WS replay/fault/shadow tests；当前本机 449 项通过（1 个 TCP-bind 测试因沙箱权限未执行）、故障集合 184 项通过；另含事务中 SIGKILL、OS socket 黑洞、只读 URI、真实 SQLITE_FULL；artifact 绑定 commit/tree/source hash 且脏树拒绝有效证据 | 目标提交 Linux CI、OKX demo E2E 与真实主机/代理/磁盘故障演练未执行，故整体测试验收仍为 EXTERNAL OPEN |
+| 13 测试层次和故障清单 | PARTIAL | 单元/随机状态机/repository/WS replay/fault/shadow tests；当前工作树 455 项全部通过、故障集合 191 项通过；一键非实盘报告覆盖全部测试文件并强制标记不能生产准入；另含事务中 SIGKILL、OS socket 黑洞、只读 URI、真实 SQLITE_FULL；artifact 绑定 commit/tree/source hash 且脏树拒绝成为发布证据 | 修复后的目标提交 Linux CI、OKX demo E2E 与真实主机/代理/磁盘故障演练尚需执行，故整体测试验收仍为 EXTERNAL OPEN |
 | 14 发布、迁移与回滚 | VERIFIED | v1→v9 顺序、逐版本事务化、失败可重入的 forward-only migration；release 自带 REVISION；实际源码/解释器/依赖字节+全配置+唯一有序 launch manifest 组合身份；root durable receipt；受控 Python 直启 main 且 main 内部防直调；材料损坏降级为不可 resume/READY、强制保留保护/退出能力的 hard-safe safety-only | 真实 Linux systemd verify/部署/回滚、receipt 与 safety-only 演练为 EXTERNAL OPEN |
 | 15 Phase 0–6 仓库任务 | VERIFIED | `IMPLEMENTATION_STATUS.md` 与全量自动门禁 | 各 Phase 的真实环境验收仍见对应 OPEN 项 |
 | 15 Phase 7 研究与灰度工具 | PARTIAL | 组合共享现金、连续 OOS、动态成本、可复现压力 producer、参数面；准入门从 365+ 日 benchmark 重算覆盖率/7 日最大缺口/真实日历 90 日牛熊区间，并从预注册完整 grid 重算连通平台；v2 source artifact 可重放，独立 research policy 绑定 exact S3 version/grid/scenario，独立 runner attestation 绑定完整 stress evidence | 具体策略原始制品、两份真实独立签名、30 日真实 demo 和 canary 尚未发生，不能标 VERIFIED；TIME/EXTERNAL/APPROVAL OPEN |
-| 16 工程准入 | PARTIAL | 本地测试/覆盖率/Ruff/Bandit/build/fault 通过 | 目标提交 CI 链接、真实迁移恢复、demo contract 尚未签署 |
+| 16 工程准入 | PARTIAL | 本地测试/覆盖率/Ruff/Bandit/build/fault 和非实盘 evidence 通过 | 修复后的目标提交 CI 链接、真实迁移恢复、demo contract 尚未签署 |
 | 16 交易安全准入 | PARTIAL | 响应丢失、部分成交、WS 恢复和 kill switch 自动证据通过 | 30 日无差异、保护 p99、key 权限/IP 白名单和演练签字尚缺 |
 | 16 量化准入 | OPEN | gate 会 fail closed，示例 evidence 当前正确输出 NOT ADMITTED | 尚无获批策略的正 OOS、完整周期、平台区、滑点和压力损失证据 |
 | 16 运维准入 | PARTIAL | runbook 与 audit-order 实现存在 | 外部 Page、空主机 RTO、人工演练签字尚缺 |
@@ -49,10 +49,11 @@
 
 截至本次审计：
 
-- `pytest -q -k 'not healthz_reports_liveness_while_readyz_reports_readiness'`：
-  449 passed、1 deselected；被跳过用例需要本机沙箱禁止的 TCP bind，保留给 Linux CI；
+- CI 等价的完整 pytest/coverage 命令：455 passed；
 - 核心订单状态机 branch coverage：96.30%，门槛 95%；
-- 故障注入集合：184 passed、1 个相同 TCP-bind 用例在本机沙箱 deselected；
+- 故障注入语义集合：191 passed；
+- `scripts/non_live_validation.py` 六个 suite 全部通过，并正确输出
+  `production_admissible=false`；当前开发报告因工作树有本轮改动而不会成为发布证据；
 - Ruff、Bandit high/high、compileall、ShellCheck、`git diff --check`：通过；
 - wheel/sdist：可以构建；
 - `scripts/production_gate.py` 强制逐日独立监控签名、S3 SHA/version、durable SLO

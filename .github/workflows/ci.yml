@@ -106,6 +106,11 @@ jobs:
           --cov-report=term-missing
           --cov-fail-under=95
 
+      - name: Generate non-live validation evidence
+        run: >-
+          uv run python scripts/non_live_validation.py
+          --output non-live-validation.json
+
       - name: Fault-injection evidence
         run: uv run python scripts/fault_injection.py --output fault-injection.json
 
@@ -122,11 +127,14 @@ jobs:
           --prefix="okx-quant-${GITHUB_SHA}/"
           --add-file=REVISION
           --add-file=fault-injection.json
+          --add-file=non-live-validation.json
           --output="dist/okx-quant-${GITHUB_SHA}.tar.gz"
           "${GITHUB_SHA}"
 
-      - name: Publish standalone revision label
-        run: cp REVISION dist/REVISION
+      - name: Publish standalone evidence and revision
+        run: |
+          cp REVISION dist/REVISION
+          cp non-live-validation.json dist/non-live-validation.json
 
       - name: Generate release checksums
         run: >-
@@ -148,3 +156,8 @@ jobs:
         with:
           name: fault-injection-evidence
           path: fault-injection.json
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: non-live-validation-evidence
+          path: non-live-validation.json

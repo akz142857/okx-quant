@@ -253,9 +253,22 @@ SAHARA-USDT     27.1    1.97   1.09    2.37       64    0.665    ✓
 `local fake → CI → OKX demo → shadow → canary → limited production`，并满足连续
 30 日 demo 与人工安全证据。
 
+不使用真实资金时，可以先生成绑定当前源码和全部测试清单的离线证据：
+
+```bash
+uv run python scripts/non_live_validation.py \
+  --allow-dirty \
+  --output non-live-validation.json
+```
+
+该报告明确标记 `production_admissible=false`，不会冒充真实 Demo 或生产准入。完整的
+离线、历史回放、OKX Demo、Shadow 和预生产验证路径见
+[非实盘验证指南](docs/NON_LIVE_VALIDATION.md)。
+
 关键资料：
 
 - [实施与证据矩阵](docs/IMPLEMENTATION_STATUS.md)
+- [非实盘验证指南](docs/NON_LIVE_VALIDATION.md)
 - [生产运行手册](docs/RUNBOOK.md)
 - [生产准入清单](docs/RELEASE_CHECKLIST.md)
 - [安全模型](docs/SECURITY.md)

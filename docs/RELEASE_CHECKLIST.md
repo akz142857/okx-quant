@@ -5,15 +5,17 @@
 ## 工程
 
 - [ ] CI 对目标提交全绿；提交 SHA 与报告链接：
-- [ ] 核心状态机分支覆盖率 ≥95%；当前本地基线 96.30%（449 项通过、1 项 TCP-bind
-  仅待 Linux CI），CI 证据：
+- [ ] 核心状态机分支覆盖率 ≥95%；当前工作树基线 96.30%（455 项全部通过），
+  CI 证据：
 - [ ] 高危静态扫描为零；报告：
 - [ ] schema migration 演练通过；证据：
 - [ ] 最近一次异地备份恢复演练通过且 RTO <30 分钟；证据：
 - [ ] S3 versioned 归档下载、signed manifest、实际解密恢复 round-trip 通过；证据：
 - [ ] 备份签名/加密 key ID、历史 keyring 与轮换重叠恢复演练通过；证据：
-- [ ] `scripts/fault_injection.py` 在干净目标提交全绿；当前本地故障集合 184 项通过
-  （1 项 TCP-bind 仅待 Linux CI），CI artifact 已封入无 `.git` 发布包并绑定
+- [ ] `scripts/non_live_validation.py` 在干净目标提交全绿；报告必须绑定完整测试清单
+  且保持 `production_admissible=false`，CI artifact/preflight 证据：
+- [ ] `scripts/fault_injection.py` 在干净目标提交全绿；当前本地故障集合 191 项通过，
+  CI artifact 已封入无 `.git` 发布包并绑定
   commit/tree/全源码与测试 manifest SHA，preflight 验证记录：
 - [ ] OKX demo contract 通过（独立 OCO ACTIVE、attached 探测结论明确、清理成交）；
   `demo-contract-evidence.json` 与脱敏 `okx-demo-contract-fixture.v1.json`：
