@@ -17,6 +17,8 @@ import os
 import sys
 import time
 
+import requests
+
 # 项目根目录加入 sys.path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -112,13 +114,24 @@ def test_auth(client: OKXRestClient) -> tuple[bool, float]:
     """测试 2: API 鉴权（私有接口）"""
     _header("测试 2: API 鉴权（私有接口）")
 
-    if not client.api_key:
-        _warn("未配置 API Key，跳过鉴权测试")
-        _info("请在 config.yaml 中填写 okx.api_key / secret_key / passphrase")
+    missing = [
+        name
+        for name, value in (
+            ("OKX_API_KEY", client.api_key),
+            ("OKX_SECRET_KEY", client.secret_key),
+            ("OKX_PASSPHRASE", client.passphrase),
+        )
+        if not value
+    ]
+    if missing:
+        _warn("鉴权变量未完整加载，跳过私有接口")
+        _info("缺失: " + ", ".join(missing))
+        _info("请在同一终端导出 Demo Key/Secret/Passphrase 后重试")
         return False, 0.0
 
     mode = "模拟盘" if client.simulated else "实盘"
     _info(f"当前模式: {mode}")
+    _info(f"API 域名: {client.base_url}")
 
     # 2a. 查询账户余额
     try:
@@ -133,6 +146,15 @@ def test_auth(client: OKXRestClient) -> tuple[bool, float]:
         _ok(f"账户余额查询成功  权益={equity:.2f} USDT  可用={available:.2f} USDT")
     except ValueError as e:
         _fail(f"鉴权配置错误: {e}")
+        return False, 0.0
+    except requests.HTTPError as e:
+        _fail(f"API 鉴权 HTTP 失败: {e}")
+        if e.response is not None and e.response.status_code == 401:
+            _info("请依次检查：")
+            _info("1. Key 是否在 OKX Demo Trading 页面单独创建")
+            _info("2. Secret 与 Passphrase 是否属于同一把 Demo Key")
+            _info("3. 账户注册区域是否要求 us.okx.com/eea.okx.com")
+            _info("4. Key 的 IP 白名单是否包含当前出口 IP")
         return False, 0.0
     except RuntimeError as e:
         _fail(f"API 鉴权失败: {e}")

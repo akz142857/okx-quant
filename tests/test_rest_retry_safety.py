@@ -119,6 +119,25 @@ def test_rate_limited_get_remains_retryable(monkeypatch):
 
 
 @pytest.mark.unit
+def test_http_auth_failure_reports_only_sanitized_okx_code(monkeypatch):
+    client = OKXRestClient(
+        api_key="must-not-appear",
+        secret_key="must-not-appear",
+        passphrase="must-not-appear",
+        max_retries=1,
+    )
+    session = _ResponseSession([_Response("50119", status_code=401)])
+    monkeypatch.setattr(client, "_make_session", lambda: session)
+    with pytest.raises(
+        requests.HTTPError,
+        match=r"OKX code=50119, msg=fixture",
+    ) as captured:
+        client.get("/api/v5/account/balance", auth=True)
+    assert "must-not-appear" not in str(captured.value)
+    assert captured.value.response.status_code == 401
+
+
+@pytest.mark.unit
 def test_rate_limit_backoff_is_shared_across_client_instances(monkeypatch):
     sleeps = []
     clock = iter([100.0, 100.0])

@@ -110,11 +110,22 @@ production:
   heartbeat_path: state/demo/heartbeat
 ```
 
+仓库中的 `config.yaml.example` 已经是 Demo 安全默认值，并通过环境变量读取密钥，
+因此只读诊断可以直接使用它，不需要先创建包含密钥的新文件。如果确实需要独立副本，
+可以执行：
+
+```bash
+cp config.yaml.example config.demo.yaml
+```
+
+`config.demo.yaml` 已被 `.gitignore` 排除。建议继续保留 `${OKX_API_KEY}` 等占位符，
+不要把真实密钥写入 YAML。
+
 先只读验证网络、时钟、行情和鉴权，不提交订单：
 
 ```bash
 uv run python scripts/test_api.py \
-  --config config.demo.yaml \
+  --config config.yaml.example \
   --inst BTC-USDT
 ```
 
@@ -122,11 +133,18 @@ uv run python scripts/test_api.py \
 
 ```bash
 uv run python scripts/demo_contract.py \
-  --config config.demo.yaml \
+  --config config.yaml.example \
   --confirm I_UNDERSTAND_DEMO_TRADES \
   --output evidence/demo-contract.json \
   --fixture-output evidence/okx-demo-contract-fixture.v1.json
 ```
+
+脚本不会仅使用 `minSz` 作为市价单数量：OKX 产品元数据没有单独返回最低名义金额，
+因此脚本默认确保约 5 个报价币单位的名义金额，再按 `lotSz` 向上量化，避免最小数量
+在币价变化后仍触发 `51020`。输出目录会在任何交易写操作前创建；交易所明确拒单时
+不会继续按 `clOrdId` 轮询不存在的订单。清理校验会从每笔实际成交和基础币手续费
+精确推导不可卖出的子 `lotSz` 尘埃；只接受该可证明的正向尾差，任何负向持仓侵蚀或
+超出上限的正向残留仍会使契约失败。
 
 只有真实 Demo 运行成功，才能确认当前 OKX 版本下的：
 

@@ -14,12 +14,14 @@ from pathlib import Path
 import requests
 
 from main import make_client
+from okx_quant.client.rest import OKXAPIError
 from okx_quant.config import load_yaml
 from okx_quant.infrastructure.okx.contract_fixture import (
     build_redacted_contract_fixture,
 )
 
 CONFIRMATION = "I_UNDERSTAND_DEMO_TRADES"
+DEFAULT_MIN_QUOTE_NOTIONAL = Decimal("5")
 # OKX 51000 是通用参数错误，不能证明 attached 能力不受支持。
 # 只有未来经官方契约确认的专用能力码才可加入此集合。
 ATTACHED_CONTRACT_REJECTION_CODES: frozenset[str] = frozenset()
@@ -56,14 +58,17 @@ def _poll_order(
     return order
 
 
-def _net_base_qty(order: dict, base_ccy: str, lot: Decimal) -> Decimal:
+def _exact_net_base_qty(order: dict, base_ccy: str) -> Decimal:
     filled = Decimal(str(order.get("accFillSz") or "0"))
     fee = Decimal(str(order.get("fee") or "0"))
     if str(order.get("feeCcy", "")).upper() == base_ccy.upper():
         filled += fee
-    if filled <= 0:
-        return Decimal("0")
-    return (filled / lot).to_integral_value(rounding=ROUND_DOWN) * lot
+    return max(filled, Decimal("0"))
+
+
+def _net_base_qty(order: dict, base_ccy: str, lot: Decimal) -> Decimal:
+    exact = _exact_net_base_qty(order, base_ccy)
+    return (exact / lot).to_integral_value(rounding=ROUND_DOWN) * lot
 
 
 def _find_algo(client, inst_id: str, algo_cl_ord_id: str) -> dict:
@@ -167,9 +172,32 @@ def _base_balance(client, base_ccy: str) -> Decimal:
     return Decimal("0")
 
 
-def _attached_rejection_code(error: str) -> str:
-    matched = re.search(r"OKX API Error \[(\d+)\]", error)
-    return matched.group(1) if matched else ""
+def _okx_rejection_code(error: BaseException | str) -> str:
+    if isinstance(error, OKXAPIError):
+        return error.code
+    message = str(error)
+    for pattern in (
+        r"OKX API Error \[(\d+)\]",
+        r"OKX [^\[\n]+ rejected \[(\d+)\]",
+    ):
+        matched = re.search(pattern, message)
+        if matched:
+            return matched.group(1)
+    return ""
+
+
+def _quantity_for_quote_notional(
+    *,
+    minimum: Decimal,
+    lot: Decimal,
+    price: Decimal,
+    minimum_quote_notional: Decimal,
+) -> Decimal:
+    required = max(minimum, minimum_quote_notional / price)
+    return (
+        (required / lot).to_integral_value(rounding=ROUND_UP)
+        * lot
+    )
 
 
 def _place_or_resolve_order(
@@ -203,7 +231,8 @@ def _place_or_resolve_order(
         ):
             # 传输错误不能证明请求未到达，必须仍按 clOrdId 查询。
             pass
-        elif "OKX API Error" in str(exc):
+        elif _okx_rejection_code(exc):
+            # 交易所已明确拒绝；订单从未创建，不应制造一串 51603 查单噪声。
             return {}, error
     order = _poll_order(
         client,
@@ -221,6 +250,7 @@ def run_contract(
     *,
     poll_timeout_s: float = 15,
     poll_interval_s: float = 0.5,
+    minimum_quote_notional: Decimal = DEFAULT_MIN_QUOTE_NOTIONAL,
 ) -> tuple[dict, bool]:
     instrument = client.get_instrument(inst_id)
     ticker = client.get_ticker(inst_id)
@@ -228,12 +258,23 @@ def run_contract(
     lot = Decimal(str(instrument["lotSz"]))
     minimum = Decimal(str(instrument["minSz"]))
     tick = Decimal(str(instrument["tickSz"]))
-    if price <= 0 or lot <= 0 or minimum <= 0 or tick <= 0:
+    if (
+        price <= 0
+        or lot <= 0
+        or minimum <= 0
+        or tick <= 0
+        or minimum_quote_notional <= 0
+    ):
         raise RuntimeError("产品精度或行情无效，拒绝执行 demo contract")
     base_ccy = str(instrument.get("baseCcy") or inst_id.split("-")[0])
+    quote_ccy = str(instrument.get("quoteCcy") or inst_id.split("-")[-1])
     baseline_base_balance = _base_balance(client, base_ccy)
-    quantity = max(minimum, lot)
-    quantity = (quantity / lot).to_integral_value(rounding=ROUND_UP) * lot
+    quantity = _quantity_for_quote_notional(
+        minimum=minimum,
+        lot=lot,
+        price=price,
+        minimum_quote_notional=minimum_quote_notional,
+    )
     nonce = uuid.uuid4().hex[:12]
     independent_order_id = f"ib{nonce}"
     independent_algo_id = f"ia{nonce}"
@@ -244,11 +285,15 @@ def run_contract(
     cleanup_algo_cl_ids: dict[str, str] = {}
     cleanup: list[dict] = []
     cleanup_errors: list[str] = []
+    expected_base_dust = Decimal("0")
     evidence: dict = {
         "started_at": time.time(),
         "environment": "OKX demo",
         "inst_id": inst_id,
         "requested_base_qty": text(quantity),
+        "quote_ccy": quote_ccy,
+        "minimum_quote_notional": text(minimum_quote_notional),
+        "estimated_quote_notional": text(quantity * price),
         "selected_route": "independent_oco_after_fill",
         "cleanup": cleanup,
     }
@@ -265,7 +310,9 @@ def run_contract(
             timeout_s=poll_timeout_s,
             interval_s=poll_interval_s,
         )
+        exact_net_qty = _exact_net_base_qty(order, base_ccy)
         net_qty = _net_base_qty(order, base_ccy, lot)
+        expected_base_dust += exact_net_qty - net_qty
         if net_qty > 0:
             cleanup_qty += net_qty
         evidence["independent_parent"] = {
@@ -279,7 +326,10 @@ def run_contract(
             "transport_error": error,
         }
         if order.get("state") != "filled" or net_qty <= 0:
-            raise RuntimeError("独立 OCO 路线的父订单未确认完整成交")
+            detail = f": {error}" if error else ""
+            raise RuntimeError(
+                f"独立 OCO 路线的父订单未确认完整成交{detail}"
+            )
         fill_price = Decimal(str(order.get("avgPx") or price))
         stop = _price_on_tick(
             fill_price * Decimal("0.98"),
@@ -373,7 +423,9 @@ def run_contract(
                 "slOrdPx": "-1",
             }],
         )
+        attached_exact_net = _exact_net_base_qty(attached, base_ccy)
         attached_net = _net_base_qty(attached, base_ccy, lot)
+        expected_base_dust += attached_exact_net - attached_net
         if attached_net > 0:
             cleanup_qty += attached_net
         attached_algo = _find_algo(client, inst_id, attached_algo_id)
@@ -381,7 +433,7 @@ def run_contract(
             attached_id = str(attached_algo["algoId"])
             cleanup_algos.add(attached_id)
             cleanup_algo_cl_ids[attached_id] = attached_algo_id
-        rejection_code = _attached_rejection_code(attach_error)
+        rejection_code = _okx_rejection_code(attach_error)
         explicitly_rejected = bool(
             rejection_code in ATTACHED_CONTRACT_REJECTION_CODES
             and not attached
@@ -522,9 +574,17 @@ def run_contract(
             balance_delta = final_base_balance - baseline_base_balance
             evidence["final_base_balance_delta"] = text(balance_delta)
             balance_tolerance = lot / Decimal("1000")
-            if abs(balance_delta) > balance_tolerance:
+            evidence["expected_base_dust"] = text(expected_base_dust)
+            evidence["balance_measurement_tolerance"] = text(
+                balance_tolerance
+            )
+            if balance_delta < -balance_tolerance:
                 cleanup_errors.append(
-                    "清理后基础币余额未回到基线，可能残留或侵蚀原有持仓"
+                    "清理后基础币余额低于基线，已侵蚀原有持仓"
+                )
+            elif balance_delta > expected_base_dust + balance_tolerance:
+                cleanup_errors.append(
+                    "清理后基础币余额高于可证明的子 lot 尘埃，存在残留持仓"
                 )
         except Exception as exc:
             cleanup_errors.append(
@@ -566,6 +626,9 @@ def main() -> int:
         raise SystemExit(
             f"拒绝覆盖既有 contract fixture: {args.fixture_output}"
         )
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.fixture_output is not None:
+        args.fixture_output.parent.mkdir(parents=True, exist_ok=True)
     config = load_yaml(args.config)
     if config.get("okx", {}).get("simulated") is not True:
         raise SystemExit("拒绝执行：该脚本只允许 okx.simulated=true")

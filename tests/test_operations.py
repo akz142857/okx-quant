@@ -557,6 +557,22 @@ def test_api_diagnostic_refuses_all_live_trade_writes():
 
 
 @pytest.mark.unit
+def test_api_diagnostic_rejects_incomplete_demo_credentials(capsys):
+    client = SimpleNamespace(
+        api_key="demo-key",
+        secret_key="",
+        passphrase="",
+        simulated=True,
+        base_url="https://openapi.okx.com",
+    )
+    assert api_diagnostic.test_auth(client) == (False, 0.0)
+    output = capsys.readouterr().out
+    assert "OKX_SECRET_KEY" in output
+    assert "OKX_PASSPHRASE" in output
+    assert "demo-key" not in output
+
+
+@pytest.mark.unit
 def test_external_watchdog_pages_on_stale_heartbeat_with_position(tmp_path):
     journal = SQLiteJournal(tmp_path / "trading.db")
     journal.reconcile_position(

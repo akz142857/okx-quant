@@ -21,6 +21,31 @@ OKXData = list | dict | None
 logger = logging.getLogger(__name__)
 
 
+class OKXAPIError(RuntimeError):
+    """A definitive OKX business rejection with a machine-readable code."""
+
+    def __init__(self, code: str, message: str):
+        self.code = str(code)
+        super().__init__(message)
+
+
+def _safe_okx_http_error_detail(response: requests.Response | None) -> str:
+    """Extract only the public OKX code/message from an HTTP error body."""
+    if response is None:
+        return ""
+    try:
+        payload = response.json()
+    except (requests.JSONDecodeError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    code = str(payload.get("code", "")).strip()[:32]
+    message = " ".join(str(payload.get("msg", "")).split())[:240]
+    if not code and not message:
+        return ""
+    return f" [OKX code={code or 'unknown'}, msg={message or 'unknown'}]"
+
+
 class OKXRestClient:
     """OKX V5 REST API 客户端
 
@@ -209,7 +234,17 @@ class OKXRestClient:
                             resp.headers.get("Retry-After"),
                         )
                     )
-                resp.raise_for_status()
+                try:
+                    resp.raise_for_status()
+                except requests.HTTPError as exc:
+                    detail = _safe_okx_http_error_detail(resp)
+                    if not detail:
+                        raise
+                    raise requests.HTTPError(
+                        f"{exc}{detail}",
+                        request=exc.request,
+                        response=resp,
+                    ) from exc
                 data = resp.json()
                 if not isinstance(data, dict):
                     self._observe_request(
@@ -310,7 +345,10 @@ class OKXRestClient:
                 if parts:
                     details = " | 详情: " + "; ".join(parts)
             logger.error("OKX API 错误 [%s]: %s%s", code, msg, details)
-            raise RuntimeError(f"OKX API Error [{code}]: {msg}{details}")
+            raise OKXAPIError(
+                str(code),
+                f"OKX API Error [{code}]: {msg}{details}",
+            )
 
         # 重试耗尽仍未成功
         if last_exc is not None:
@@ -749,9 +787,10 @@ class OKXRestClient:
             raise RuntimeError(f"OKX {operation} 响应为空")
         code = str(item.get("sCode", "0"))
         if code not in {"", "0"}:
-            raise RuntimeError(
+            raise OKXAPIError(
+                code,
                 f"OKX {operation} rejected [{code}]: "
-                f"{item.get('sMsg', 'unknown error')}"
+                f"{item.get('sMsg', 'unknown error')}",
             )
         return item
 

@@ -26,6 +26,7 @@ restore-drill.json
 
 # Config (含 API Key 等敏感信息)
 config.yaml
+config.*.yaml
 .env
 .env.*
 *.pem

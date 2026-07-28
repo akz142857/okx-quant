@@ -1,12 +1,15 @@
 """OKX demo contract 编排测试（不访问网络）。"""
 
 import json
+import sys
 from decimal import Decimal
 
+from okx_quant.client.rest import OKXAPIError
 from okx_quant.infrastructure.okx.contract_fixture import (
     build_redacted_contract_fixture,
     validate_contract_fixture,
 )
+from scripts import demo_contract
 from scripts.demo_contract import run_contract
 
 
@@ -15,6 +18,7 @@ class DemoClient:
         self.orders = {}
         self.algos = {}
         self.next_order = 0
+        self.placed_orders = []
         self.base_balance = Decimal("0")
         self.attached_error_code = ""
         self.reject_off_tick_prices = False
@@ -38,6 +42,11 @@ class DemoClient:
         sz,
         **kwargs,
     ):
+        self.placed_orders.append({
+            "side": side,
+            "sz": sz,
+            "tgt_ccy": kwargs.get("tgt_ccy"),
+        })
         cl_ord_id = kwargs["cl_ord_id"]
         attached = kwargs.get("attach_algo_orders")
         if side == "buy" and attached and self.attached_error_code:
@@ -149,6 +158,108 @@ def test_demo_contract_gates_on_independent_oco_and_conclusive_probe():
     assert "<ORDER_ID_" in json.dumps(fixture)
 
 
+class TinyInstrumentClient(DemoClient):
+    def get_instrument(self, _inst_id):
+        return {
+            "baseCcy": "BTC",
+            "quoteCcy": "USDT",
+            "lotSz": "0.00000001",
+            "minSz": "0.00001",
+            "tickSz": "0.1",
+        }
+
+
+def test_demo_contract_sizes_above_quote_notional_floor():
+    client = TinyInstrumentClient()
+    evidence, ok = run_contract(
+        client,
+        "BTC-USDT",
+        poll_timeout_s=0.01,
+        poll_interval_s=0,
+    )
+
+    assert ok, evidence
+    assert Decimal(evidence["estimated_quote_notional"]) >= Decimal("5")
+    first_buy = client.placed_orders[0]
+    assert first_buy["tgt_ccy"] == "base_ccy"
+    assert Decimal(first_buy["sz"]) == Decimal("0.0001")
+
+
+class DefinitiveRejectionClient(DemoClient):
+    def __init__(self):
+        super().__init__()
+        self.get_order_calls = 0
+
+    def place_order(self, *_args, **_kwargs):
+        raise OKXAPIError(
+            "51020",
+            "OKX place order rejected [51020]: minimum amount",
+        )
+
+    def get_order(self, _inst_id, *, cl_ord_id):
+        del cl_ord_id
+        self.get_order_calls += 1
+        return {}
+
+
+def test_demo_contract_does_not_poll_definitively_rejected_order():
+    client = DefinitiveRejectionClient()
+    evidence, ok = run_contract(
+        client,
+        "BTC-USDT",
+        poll_timeout_s=0.01,
+        poll_interval_s=0,
+    )
+
+    assert not ok
+    assert client.get_order_calls == 0
+    assert "51020" in evidence["error"]
+
+
+def test_demo_contract_main_creates_output_directories(
+    monkeypatch,
+    tmp_path,
+):
+    output = tmp_path / "nested" / "demo-contract.json"
+    fixture = tmp_path / "fixtures" / "demo-contract.v1.json"
+    evidence = {"ok": True}
+    monkeypatch.setattr(
+        demo_contract,
+        "load_yaml",
+        lambda _path: {"okx": {"simulated": True}},
+    )
+    monkeypatch.setattr(demo_contract, "make_client", lambda _config: object())
+    monkeypatch.setattr(
+        demo_contract,
+        "run_contract",
+        lambda _client, _inst: (evidence, True),
+    )
+    monkeypatch.setattr(
+        demo_contract,
+        "build_redacted_contract_fixture",
+        lambda _evidence: {"fixture": True},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "demo_contract.py",
+            "--confirm",
+            demo_contract.CONFIRMATION,
+            "--output",
+            str(output),
+            "--fixture-output",
+            str(fixture),
+        ],
+    )
+
+    assert demo_contract.main() == 0
+    assert json.loads(output.read_text(encoding="utf-8")) == evidence
+    assert json.loads(fixture.read_text(encoding="utf-8")) == {
+        "fixture": True,
+    }
+
+
 class AckOnlyAlgoClient(DemoClient):
     def place_algo_order(self, **_kwargs):
         return {"algoId": "ack-only"}
@@ -257,4 +368,68 @@ def test_demo_contract_rejects_cleanup_that_erodes_baseline_holding():
     )
     assert any(
         "侵蚀" in error for error in evidence["cleanup_errors"]
+    )
+
+
+class BaseFeeDustClient(TinyInstrumentClient):
+    def get_ticker(self, _inst_id):
+        return {"last": "63438"}
+
+    def place_order(self, inst_id, side, ord_type, sz, **kwargs):
+        result = super().place_order(
+            inst_id,
+            side,
+            ord_type,
+            sz,
+            **kwargs,
+        )
+        if side == "buy" and not kwargs.get("attach_algo_orders"):
+            fee = -Decimal(result["accFillSz"]) * Decimal("0.001")
+            result["fee"] = str(fee)
+            result["feeCcy"] = "BTC"
+            self.base_balance += fee
+        return result
+
+
+def test_demo_contract_accepts_only_proven_sub_lot_fee_dust():
+    evidence, ok = run_contract(
+        BaseFeeDustClient(),
+        "BTC-USDT",
+        poll_timeout_s=0.01,
+        poll_interval_s=0,
+    )
+
+    assert ok, evidence
+    delta = Decimal(evidence["final_base_balance_delta"])
+    expected_dust = Decimal(evidence["expected_base_dust"])
+    tolerance = Decimal(evidence["balance_measurement_tolerance"])
+    assert Decimal("0") < delta <= expected_dust + tolerance
+    assert expected_dust < Decimal("0.00000001")
+
+
+class UndersellCleanupClient(DemoClient):
+    def place_order(self, inst_id, side, ord_type, sz, **kwargs):
+        result = super().place_order(
+            inst_id,
+            side,
+            ord_type,
+            sz,
+            **kwargs,
+        )
+        if side == "sell":
+            self.base_balance += Decimal("0.001")
+        return result
+
+
+def test_demo_contract_rejects_unexplained_positive_residual():
+    evidence, ok = run_contract(
+        UndersellCleanupClient(),
+        "BTC-USDT",
+        poll_timeout_s=0.01,
+        poll_interval_s=0,
+    )
+
+    assert not ok
+    assert any(
+        "残留持仓" in error for error in evidence["cleanup_errors"]
     )
