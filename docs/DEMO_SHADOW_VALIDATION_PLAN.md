@@ -43,7 +43,7 @@ OKX Demo、真实公网和生产同构主机上持续成立”：
 
 ### 2.1 已有能力
 
-- 当前冻结候选提交：`fbc16a0`；工作树已 clean，新增能力归属于该提交；
+- 当前冻结候选提交：`0695ab9`；工作树已 clean，新增能力归属于该提交；
 - 2026-07-29 macOS 全量回归为 `794 passed, 3 skipped`，新增部署/协议定向测试
   `128 passed`，`ruff check .`、`compileall` 和 `git diff --check` 通过；目标 Linux CI 仍必须在冻结提交上
   独立全量通过，不能把本地回归替代发布 CI；
