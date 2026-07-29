@@ -13,7 +13,7 @@ from collections.abc import Callable
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from okx_quant.domain.orders import OrderState
+from okx_quant.domain.orders import OrderState, generate_client_order_id, to_decimal
 from okx_quant.exchange import Exchange
 from okx_quant.risk.manager import PositionInfo, RiskManager
 
@@ -109,6 +109,37 @@ class OrderExecutor:
         if self._on_state_change is not None:
             self._on_state_change()
 
+    def _assert_legacy_write_is_test_only(self) -> None:
+        """无 durable coordinator 时只允许同步成交的内存测试交易所。
+
+        真实 OKX 的 POST 返回仅是 ACK。兼容路径既没有持久化 intent，也没有
+        UNKNOWN resolver，无法在响应丢失后安全判断是否应重发，因此必须在
+        socket write 前 fail closed。FakeExchange 仅用于本地单元测试，并且
+        下方仍会严格验证其返回的累计成交事实。
+        """
+        from okx_quant.exchange.fake import FakeExchange
+
+        if not isinstance(self.exchange, FakeExchange):
+            raise RuntimeError(
+                "无 production coordinator 禁止交易写；"
+                "该路径缺少 durable clOrdId/UNKNOWN resolver"
+            )
+
+    @staticmethod
+    def _confirmed_full_fill(result, requested_size: Decimal) -> tuple[Decimal, Decimal]:
+        state = str(getattr(result, "state", "") or "").lower()
+        filled = to_decimal(getattr(result, "acc_fill_size", 0))
+        fill_price = to_decimal(getattr(result, "fill_price", 0))
+        if (
+            state != OrderState.FILLED.value
+            or filled < requested_size
+        ):
+            raise RuntimeError(
+                "兼容测试交易所未返回可验证的完整 FILLED 事实；"
+                f"state={state or 'ack'} filled={filled}"
+            )
+        return filled, fill_price
+
     # ------------------ 买 ------------------
 
     def buy(
@@ -184,14 +215,21 @@ class OrderExecutor:
                     return False
                 ord_id = intent.exchange_ord_id
             else:
+                self._assert_legacy_write_is_test_only()
+                requested_size = Decimal(str(size_coin))
                 result = self.exchange.place_market_order(
                     inst_id=self.inst_id,
                     side="buy",
-                    size=Decimal(str(size_coin)),
+                    size=requested_size,
                     tgt_ccy="base_ccy",
+                    cl_ord_id=generate_client_order_id("buy"),
                 )
-                fill_price = float(result.fill_price)
-                fill_size = size_coin
+                confirmed_size, confirmed_price = self._confirmed_full_fill(
+                    result,
+                    requested_size,
+                )
+                fill_price = float(confirmed_price)
+                fill_size = float(confirmed_size)
                 ord_id = result.ord_id
             logger.info("[下单] 买入成功 ordId=%s", ord_id)
 
@@ -312,11 +350,15 @@ class OrderExecutor:
             self.inst_id, sell_size, pos.size, exchange_available, reason,
         )
         try:
+            self._assert_legacy_write_is_test_only()
+            requested_size = Decimal(str(sell_size))
             result = self.exchange.place_market_order(
                 inst_id=self.inst_id,
                 side="sell",
-                size=Decimal(str(sell_size)),
+                size=requested_size,
+                cl_ord_id=generate_client_order_id("sell"),
             )
+            self._confirmed_full_fill(result, requested_size)
             ord_id = result.ord_id
             logger.info("[下单] 卖出成功 ordId=%s", ord_id)
             self.risk.remove_position(self.inst_id)

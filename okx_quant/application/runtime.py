@@ -386,6 +386,8 @@ class ProductionRuntime:
         ):
             raise ValueError("max_consecutive_infrastructure_errors 必须在 1..5")
         self._consecutive_api_errors = 0
+        self._consecutive_api_errors_by_endpoint: dict[str, int] = {}
+        self._api_error_lock = threading.Lock()
         self._consecutive_ws_errors = 0
         self._consecutive_database_errors = 0
         self._consecutive_database_write_errors = 0
@@ -613,34 +615,64 @@ class ProductionRuntime:
         self.metrics.inc("okx_api_requests_total", endpoint=endpoint, code=code)
         self.metrics.set("okx_api_latency_seconds", latency_s, endpoint=endpoint)
         successful = code == "OKX:0" or (code.isdigit() and 200 <= int(code) < 400)
+        category = self._api_endpoint_category(endpoint)
+        with self._api_error_lock:
+            if successful:
+                self._consecutive_api_errors_by_endpoint[endpoint] = 0
+            else:
+                self._consecutive_api_errors_by_endpoint[endpoint] = (
+                    self._consecutive_api_errors_by_endpoint.get(endpoint, 0) + 1
+                )
+            endpoint_errors = self._consecutive_api_errors_by_endpoint[endpoint]
+            # 保留原聚合字段/指标语义，但成功只能清除自己的 endpoint 故障桶。
+            # 仅按 public/private 大类计数仍会让同类健康端点掩盖关键端点故障。
+            self._consecutive_api_errors = max(
+                self._consecutive_api_errors_by_endpoint.values(),
+                default=0,
+            )
         if successful:
-            self._consecutive_api_errors = 0
             return
-        self._consecutive_api_errors += 1
         self.journal.enqueue_outbox_once(
-            (f"warning:api:{endpoint}:{code}:{int(time.time() // 300)}"),
+            (
+                f"warning:api:{category}:{endpoint}:{code}:"
+                f"{int(time.time() // 300)}"
+            ),
             "warning.api_error_rate_elevated",
             {
                 "endpoint": endpoint,
+                "category": category,
                 "code": code,
-                "consecutive_errors": self._consecutive_api_errors,
+                "consecutive_errors": endpoint_errors,
             },
         )
         self.metrics.set(
             "consecutive_infrastructure_errors",
-            self._consecutive_api_errors,
+            endpoint_errors,
             source="api",
+            category=category,
+            endpoint=endpoint,
         )
-        if self._consecutive_api_errors == self.max_consecutive_infrastructure_errors:
+        if endpoint_errors == self.max_consecutive_infrastructure_errors:
             self._latch_halted()
             self.journal.enqueue_outbox(
                 "page.api_error_budget_exhausted",
                 {
                     "endpoint": endpoint,
+                    "category": category,
                     "code": code,
-                    "consecutive_errors": self._consecutive_api_errors,
+                    "consecutive_errors": endpoint_errors,
                 },
             )
+
+    @staticmethod
+    def _api_endpoint_category(endpoint: str) -> str:
+        if endpoint.startswith("/api/v5/account/"):
+            return "private_account"
+        if endpoint.startswith("/api/v5/trade/"):
+            return "private_trade"
+        if endpoint.startswith(("/api/v5/market/", "/api/v5/public/")):
+            return "public_market"
+        return "other"
 
     def _record_fill_metrics(self, intent: OrderIntent, delta: Decimal) -> None:
         self.metrics.set(

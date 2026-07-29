@@ -28,6 +28,7 @@ def _build_order_executor(*, min_sz: float = 0.0, lot_sz: float = 0.0) -> tuple[
 @pytest.mark.unit
 def test_buy_registers_position_and_returns_true():
     oe, ex, risk = _build_order_executor(min_sz=0.0001)
+    ex.set_fill_price(50000)
     ok = oe.buy(price=50000, size_coin=0.01, sl=49000, tp=52000, reason="test")
     assert ok is True
     assert risk.has_position("BTC-USDT")
@@ -35,6 +36,7 @@ def test_buy_registers_position_and_returns_true():
     assert pos.size == pytest.approx(0.01)
     assert len(ex.orders) == 1
     assert ex.orders[0].side == "buy"
+    assert ex.orders[0].cl_ord_id
 
 
 @pytest.mark.unit
@@ -66,6 +68,7 @@ def test_buy_failure_triggers_cooldown():
 @pytest.mark.unit
 def test_sell_removes_position_and_orders():
     oe, ex, risk = _build_order_executor(min_sz=0.0001)
+    ex.set_fill_price(50000)
     # 先买入
     oe.buy(price=50000, size_coin=0.01, sl=0, tp=0, reason="entry")
     assert risk.has_position("BTC-USDT")
@@ -88,6 +91,7 @@ def test_sell_uses_exchange_available_not_pos_size():
     from okx_quant.risk.manager import PositionInfo
     risk.add_position(PositionInfo("BTC-USDT", size=0.01, entry_price=50000))
     ex.set_holding("BTC", balance=0.00999, available=0.00999)
+    ex.set_fill_price(50100)
 
     ok = oe.sell(last_price=50100, reason="死叉")
     assert ok is True
@@ -95,6 +99,53 @@ def test_sell_uses_exchange_available_not_pos_size():
     # 关键断言：下单量 ≤ 交易所实际可用
     assert placed.size <= 0.00999 + 1e-9
     assert placed.size < 0.01
+    assert placed.cl_ord_id
+
+
+@pytest.mark.unit
+def test_legacy_non_fake_exchange_fails_closed_before_write():
+    class AckOnlyExchange:
+        writes = 0
+
+        def get_instrument(self, inst_id):
+            return InstrumentInfo(inst_id, "BTC", "USDT", Decimal("0.001"), Decimal("0.001"))
+
+        def place_market_order(self, **kwargs):
+            self.writes += 1
+            raise AssertionError("must fail before transport write")
+
+    ex = AckOnlyExchange()
+    risk = RiskManager(RiskConfig(max_position_pct=1.0))
+    risk.initialize(10000)
+    oe = OrderExecutor(exchange=ex, inst_id="BTC-USDT", risk=risk)
+
+    assert oe.buy(50000, 0.01, 49000, 52000, "test") is False
+    assert ex.writes == 0
+    assert not risk.has_position("BTC-USDT")
+
+
+@pytest.mark.unit
+def test_legacy_fake_ack_is_not_treated_as_fill():
+    oe, ex, risk = _build_order_executor(min_sz=0.0001)
+    ex.queue_order_outcome(state="live")
+
+    assert oe.buy(50000, 0.01, 49000, 52000, "test") is False
+    assert not risk.has_position("BTC-USDT")
+    assert ex.orders[0].cl_ord_id
+
+
+@pytest.mark.unit
+def test_legacy_fake_sell_ack_preserves_position():
+    from okx_quant.risk.manager import PositionInfo
+
+    oe, ex, risk = _build_order_executor(min_sz=0.0001)
+    risk.add_position(PositionInfo("BTC-USDT", size=0.01, entry_price=50000))
+    ex.set_holding("BTC", balance=0.01, available=0.01)
+    ex.queue_order_outcome(state="live")
+
+    assert oe.sell(50000, "test") is False
+    assert risk.has_position("BTC-USDT")
+    assert ex.orders[0].cl_ord_id
 
 
 @pytest.mark.unit

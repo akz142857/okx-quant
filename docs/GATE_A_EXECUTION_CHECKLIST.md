@@ -9,8 +9,8 @@ Canary，不能宣称生产准入。
 | 项目 | 状态 | 证据/下一步 |
 |---|---|---|
 | 冻结候选与工作树 clean | `RECHECK REQUIRED` | 提交候选后运行 `git rev-parse HEAD`、`git status --short`；必须为空 |
-| 本地全量测试 | `RECHECK REQUIRED` | 在上述候选提交运行 `uv run pytest -q`，保存完整输出（历史基线为 794 passed, 3 skipped） |
-| 单机 systemd 静态安全 | `RECHECK REQUIRED` | 在上述候选提交运行 `scripts/linux_deployment_preflight.py --mode static` |
+| 本地全量测试 | `RECHECK REQUIRED` | 在上述候选提交运行 `uv run pytest -q`，保存完整输出（本轮修复后本机为 806 passed, 3 platform-skipped；Linux CI 禁止这些关键测试跳过） |
+| 单机 systemd 静态安全 | `RECHECK REQUIRED` | 在上述候选提交运行 `.venv/bin/python scripts/linux_deployment_preflight.py --mode static` |
 | Linux 实机 preflight | `PENDING` | 在目标 Linux 执行 `--mode live` |
 | Shadow/Active 账户与 key | `PENDING` | 两个 Demo 子账户、Withdraw 关闭、IP 白名单 |
 | Demo contract v2 | `RE-RUN REQUIRED` | 使用当前冻结候选重新执行并 exact-version 保存 |
@@ -42,10 +42,14 @@ sudo env PYTHONPATH="$RELEASE_ROOT" \
   "$RELEASE_ROOT/.venv/bin/python" \
   "$RELEASE_ROOT/scripts/linux_deployment_preflight.py" \
   --mode live --root "$RELEASE_ROOT" \
+  --role shadow --role active \
   --output /secure-transfer/gate-a-linux-preflight.json
 ```
 
 必须证明 systemd unit、UID、cgroup、namespace、路径权限和候选 identity 一致。
+`shadow + active` 是 Gate A 默认且不可省略的角色集合；若部署独立 Chaos profile，
+追加 `--role chaos`，预检会同时要求对应 unit 和 network namespace。角色缺失、重复，
+或 `--installed-unit` 与角色集合不一致都会 fail closed。
 `preflight_only=true` 只是部署前置证据，不会自动放行交易。
 
 ### A3. Demo contract

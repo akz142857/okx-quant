@@ -195,6 +195,7 @@ def test_resource_sampler_persists_identity_limits_and_breaches(
 
 
 @pytest.mark.unit
+@pytest.mark.linux_ci_required
 def test_healthz_reports_liveness_while_readyz_reports_readiness():
     server = MetricsServer(
         MetricRegistry(),

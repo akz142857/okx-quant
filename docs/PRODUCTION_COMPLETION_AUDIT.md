@@ -53,8 +53,10 @@
 截至本次审计：
 
 - 完整、不可漏项 pytest inventory 已纳入本地门禁；目标提交仍须由 Linux CI 出具报告；
-- 当前 macOS 全量回归为 754 passed、3 skipped，Ruff 全绿；
-- 核心订单状态机 branch coverage：96.30%，门槛 95%；
+- 本轮修复后的本机全量回归为 806 passed、3 项平台差异跳过；Linux CI 已禁止这些
+  关键测试跳过，Ruff 全绿；
+- 核心订单状态机 branch coverage：95.58%，门槛 95%；全项目 branch coverage：
+  68%，CI 防回退门槛 65%；
 - 故障注入语义集合：191 passed；
 - `scripts/non_live_validation.py` 七个 suite 全部通过，并正确输出
   `production_admissible=false`；当前开发报告因工作树有本轮改动而不会成为发布证据；

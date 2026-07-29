@@ -61,7 +61,7 @@ Production deployment (systemd on a DigitalOcean droplet, `verify_deploy.sh` / `
 
 `okx_quant/` package layers, roughly bottom-up:
 
-**`client/`** — Raw OKX V5 REST client (`rest.py`, HMAC-SHA256 auth; `simulated=True` sends `x-simulated-trading: 1`). WebSocket stub in `websocket.py`. Low-level; most trading code goes through the `exchange/` layer instead.
+**`client/`** — Raw OKX V5 REST client (`rest.py`, HMAC-SHA256 auth; `simulated=True` sends `x-simulated-trading: 1`) and the production-wired public/private/business WebSocket client (`websocket.py`, authentication, subscription acknowledgement, reconnect/state tracking). Low-level; most trading code goes through the `exchange/` and application runtime layers instead.
 
 **`exchange/`** — Exchange-neutral abstraction (`base.py` `Exchange` Protocol + dataclasses `BalanceSnapshot`, `Holding`, `Ticker`, `Candle`, `OrderResult`). `okx.py` `OKXExchange` adapts `OKXRestClient` + `MarketDataFetcher`; `fake.py` `FakeExchange` is the in-memory test double. **Trading code depends on `Exchange`, not `client/rest.py` directly** (`LiveTrader` wraps a bare client in `OKXExchange` for back-compat).
 

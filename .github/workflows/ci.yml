@@ -32,7 +32,9 @@ jobs:
             prometheus-alertmanager
 
       - name: Compile sources
-        run: uv run python -m compileall -q main.py okx_quant scripts tests
+        run: >-
+          uv run python -m compileall -q
+          main.py okx_quant scripts stage_c_test_harness tests
 
       - name: Recompute Stage-C freeze identities
         run: >-
@@ -40,7 +42,9 @@ jobs:
           --output stage-c-freeze-report.json
 
       - name: Static lint
-        run: uv run ruff check main.py okx_quant scripts tests
+        run: >-
+          uv run ruff check
+          main.py okx_quant scripts stage_c_test_harness tests
 
       - name: Validate shell entrypoints
         run: |
@@ -61,6 +65,7 @@ jobs:
           sudo useradd --system --user-group --no-create-home okxquant-trader
           sudo useradd --system --user-group --no-create-home okxquant-watchdog
           sudo useradd --system --user-group --no-create-home okxquant-backup
+          sudo useradd --system --user-group --no-create-home okxquant-external-monitor
           sudo usermod -a -G okxquant-data okxquant-trader
           sudo usermod -a -G okxquant-data okxquant-watchdog
           sudo usermod -a -G okxquant-data okxquant-backup
@@ -74,9 +79,12 @@ jobs:
             /opt/okx-quant/venv/bin \
             /opt/okx-quant/current/scripts \
             /opt/okx-quant-stage-c-test-only/venv/bin \
+            /opt/okx-quant-monitor/current/.venv/bin \
+            /opt/okx-quant-monitor/current/scripts \
             /etc/okx-quant \
             /etc/okx-quant/admission \
             /etc/okx-quant/keys \
+            /etc/okx-quant-external-monitor \
             /var/lib/okx-quant/production \
             /var/lib/okx-quant/admission \
             /var/lib/okx-quant-backup/daily \
@@ -99,6 +107,8 @@ jobs:
             /opt/okx-quant/venv/bin/okx-quant-watchdog \
             /opt/okx-quant-stage-c-test-only/instrumented.pyz \
             /opt/okx-quant-stage-c-test-only/venv/bin/python \
+            /opt/okx-quant-monitor/current/.venv/bin/python \
+            /opt/okx-quant-monitor/current/scripts/external_demo_monitor.py \
             /opt/okx-quant/current/scripts/activate_release.py \
             /opt/okx-quant/current/scripts/production_launch.py \
             /opt/okx-quant/current/scripts/daily_archive.py \
@@ -125,6 +135,9 @@ jobs:
             /opt/okx-quant/venv/bin/okx-quant-watchdog \
             /opt/okx-quant-stage-c-test-only/instrumented.pyz \
             /opt/okx-quant-stage-c-test-only/venv/bin/python
+          sudo chmod +x \
+            /opt/okx-quant-monitor/current/.venv/bin/python \
+            /opt/okx-quant-monitor/current/scripts/external_demo_monitor.py
           # systemd-analyze instantiates @.service templates as @i.service.
           # Supply the corresponding synthetic parent only in the CI verifier
           # load path; real deployments use active/shadow/chaos instances.
@@ -134,6 +147,8 @@ jobs:
           systemd-analyze verify \
             deploy/systemd/*.service \
             deploy/systemd/*.timer \
+            deploy/external-monitor/*.service \
+            deploy/external-monitor/*.timer \
             deploy/stage-c-barriers/systemd/*.service
           uv run python scripts/verify_systemd_security.py \
             --output /tmp/okx-quant-systemd-security-report.json
@@ -157,16 +172,25 @@ jobs:
             /var/lib/okx-quant/production/permission-probe.db
 
       - name: Security scan
-        run: uv run bandit -q -r okx_quant scripts --severity-level high --confidence-level high
-
-      - name: Run tests and domain state-machine branch coverage gate
         run: >-
-          uv run pytest -q
-          --cov=okx_quant
-          --cov-config=.coveragerc-core
-          --cov-branch
-          --cov-report=term-missing
-          --cov-fail-under=95
+          uv run bandit -q -r
+          okx_quant scripts stage_c_test_harness
+          --severity-level high
+          --confidence-level high
+
+      - name: Run tests and coverage gates
+        env:
+          OKX_QUANT_FORBID_CRITICAL_TEST_SKIPS: "1"
+        run: |
+          uv run pytest -q \
+            --cov=okx_quant \
+            --cov-config=.coveragerc-core \
+            --cov-branch \
+            --cov-report=term-missing \
+            --cov-fail-under=95
+          uv run coverage report \
+            --rcfile=.coveragerc-project \
+            --fail-under=65
 
       - name: Generate non-live validation evidence
         run: >-

@@ -2270,6 +2270,33 @@ def test_consecutive_api_and_ws_errors_latch_halted(tmp_path):
 
 
 @pytest.mark.unit
+def test_api_success_only_clears_its_exact_endpoint(tmp_path):
+    _, journal, runtime = _runtime(tmp_path)
+    journal.set_mode(SystemMode.READY)
+
+    for _ in range(runtime.max_consecutive_infrastructure_errors):
+        runtime._observe_api_request(
+            "/api/v5/account/balance",
+            "OKX:50011",
+            0.1,
+        )
+        runtime._observe_api_request(
+            "/api/v5/account/positions",
+            "OKX:0",
+            0.1,
+        )
+
+    assert journal.get_mode() is SystemMode.HALTED
+    page = next(
+        row
+        for row in journal.get_unpublished_outbox()
+        if row["event_name"] == "page.api_error_budget_exhausted"
+    )
+    assert json.loads(page["payload_json"])["category"] == "private_account"
+    journal.close()
+
+
+@pytest.mark.unit
 def test_fill_slippage_is_durable_metric_and_warning(tmp_path):
     exchange, journal, runtime = _runtime(tmp_path)
     exchange.queue_order_outcome(

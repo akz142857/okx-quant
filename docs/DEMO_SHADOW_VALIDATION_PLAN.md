@@ -54,11 +54,12 @@ OKX Demo、真实公网和生产同构主机上持续成立”：
 
 ### 2.1 已有能力
 
-- 当前冻结候选提交以 `git rev-parse HEAD` 为准；工作树已 clean，新增能力归属于
-  当前 HEAD；
-- 2026-07-29 macOS 全量回归为 `794 passed, 3 skipped`，新增部署/协议定向测试
-  `128 passed`，`ruff check .`、`compileall` 和 `git diff --check` 通过；目标 Linux CI 仍必须在冻结提交上
-  独立全量通过，不能把本地回归替代发布 CI；
+- 上一冻结候选提交以 `git rev-parse HEAD` 为准；本轮审查修复仍需提交后重新确认
+  工作树 clean，并在新 HEAD 上重算发布身份；
+- 2026-07-29 本轮修复后的本机全量回归为 `806 passed, 3 skipped`；3 项属于
+  loopback socket 与 macOS setgid 平台差异，Linux CI 已配置为禁止这些关键测试
+  跳过。`ruff check .`、`compileall` 和 `git diff --check` 通过；目标 Linux CI
+  仍必须在冻结提交上独立全量通过，不能把本地回归替代发布 CI；
 - OKX Demo 网络和私有 API 鉴权通过；
 - BTC-USDT Demo 契约已真实验证：
   - 市价买入/卖出；
@@ -217,33 +218,23 @@ contract 或明确的“已有仓位保护/恢复”演练，且必须签名固�
 - 真实 Object Lock COMPLIANCE、跨账号 exact-version GET、KMS/IAM deny-delete；
 - Shadow 72 小时、Active burn-in 7 日、最终候选 chaos matrix 和 30 个完整 UTC clean
   day；
-- WP4/WP5 当前有 5 个旧 repository automated producer，但它们尚未统一进入新的
-  challenge/workload/native semantic inventory，不能称为生产证据；其余 13 个场景都有
-  固定 parser contract，但生产级 executor 仍为 `EXTERNAL OPEN`，Stage-C loader
-  会在读取任何 receipt 前拒绝。仓内进一步提供了 4 个外部状态场景的 Demo actor/
-  unsigned raw collector，但 mutating CLI/systemd unit 在 durable pre-intent
-  checkpoint 和全局 challenge consumption 闭合前只执行 `EXTERNAL OPEN`
-  self-check（退出码 2），不会访问 OKX；另有 3 个真实业务边界的隔离
-  test-executor。它们用于继续开发和故障测试，不是 `EXECUTOR_SHIPPED`。其余 6 个
-  黑盒场景仍只有 parser 与通用
-  collector 积木。allowlist systemd/procfs/SQLite/HTTPS/proxy collector、受控故障
-  原语、DynamoDB 条件消费 challenge 与签名 consumption receipt 也都不能单独证明
-  13 个生产场景执行器已经实现；
+- WP4/WP5 的 18 个场景已统一进入 challenge/workload/native semantic inventory，
+  但生产级 executor 仍全部为 `EXTERNAL OPEN`，Stage-C loader 会在读取任何 receipt
+  前拒绝。仓内的 5 个 legacy repository producer、4 个外部状态 Demo actor/raw
+  collector、3 个隔离 barrier test-executor，以及其余 parser/collector 积木都只用于
+  开发和故障测试，不是 `EXECUTOR_SHIPPED`。allowlist
+  systemd/procfs/SQLite/HTTPS/proxy collector、受控故障原语、DynamoDB 条件消费
+  challenge 与签名 consumption receipt 也不能单独证明生产场景执行器已经部署；
   能力清单显式区分 `PARSER_READY`、`EXECUTOR_SHIPPED` 和每次证据运行中派生的
   `DEPLOYMENT_ATTESTED`。root-owned trust manifest 只能冻结 raw hash/bytes 与
   registrar/capability/source 公钥（`TRUST_CONFIGURED`），不能自报或提升部署状态；
-- implementation inventory 目前会拒绝 record/artifact inventory 漂移、重复
-  artifact bytes、缺失 WORM 职责和运行时 verifier registry 重绑定，但还未
-  将语义 verifier 自身的 source/artifact digest、严格 result schema 及完整依赖闭包、
-  security-test 原始结果 bytes、build provenance、registrar/capability trust root
-  全部纳入同一不可变身份。三类 native recovery source 也尚未有从真实部署
-  artifact 到最终 raw JSONL parser 的 live bridge。当前 OKX source 已签名绑定
-  journal-readiness artifact hash、强制 `journal ready <= OKX start` 并使同次采集
-  的全部 frame 使用同一 observer key fingerprint，但完整 recovery evidence hold
-  （同 PID/InvocationID/reconciliation generation、OKX stable double-read、final
-  journal/systemd cut 与区间无 mutation）仍未实现；observer key fingerprint 与本地
-  TLS 证书也未预注册进 challenge。这些均是发布前阻断项，不得由
-  结构正确的本地 JSON 或测试 fixture 替代；
+- implementation inventory v2 已将 verifier source/artifact digest、严格 result
+  schema、依赖闭包、security-test 原始结果、build provenance 与各 trust root 纳入
+  不可变身份；native recovery bridge、同一次 evidence cut、稳定双读和
+  PID/InvocationID/reconciliation generation/observer/TLS binding 也已编码并有
+  fail-closed 回归。它们仍只是仓内协议与部署资产：18 个场景在取得逐场景真实
+  executor、独立 systemd/IAM、deployment attestation 和 WORM exact-version 回读前
+  均保持 `EXTERNAL OPEN`，不得由结构正确的本地 JSON 或测试 fixture 替代；
 - Canary 的 12 路 collector/signer 与 systemd/cgroup 部署协议已实现，但尚未在
   真实隔离主机运行并取得 IAM/STS、Object Lock、deployment attestation；
   production Gate 的 readiness 因缺外部事实而固定拒绝；
@@ -747,10 +738,10 @@ chaos matrix → 30d soak → WP8`。
 | 工作包 | 仓库能力 | 尚需真实取得 |
 |---|---|---|
 | WP0 | v2 release/config/account identity、detached 双对象 manifest、exact-version verifier | 正式候选重新 capture、WORM 上传与独立签署 |
-| WP1 | Shadow/Active/Chaos 配置、systemd、netns、preflight、三类 Unix 身份/目录 | 三个独立 Demo 子账户/key 和 Linux 主机部署 |
+| WP1 | Shadow/Active/Chaos 配置、systemd、netns、preflight、分角色 Unix 身份/目录；Gate A preflight 默认严格校验 Shadow+Active，Chaos 可显式加入 | Gate A 的两个独立 Demo 子账户/key 和 Linux 主机部署；Gate B 再要求 Chaos 与第二故障域 |
 | WP2 | durable WS/consumer/recovery/readiness/heartbeat/clock/resource facts；严格 generation、subscription/recovery 关联；完整 checkpoint/backlog 事实；SLO report v2 | 真实 72h/7d/30d 时间序列 |
 | WP3 | durable `probe_runs` saga、稳定 ID、saga fenced lease/capability、启动/周期 reclaimer、UNKNOWN 恢复、正式 30 日每日精确一单及联合分层 schedule | Active Demo 每日实际 probe；按 epoch 前预注册 UTC×spread×volatility strata 执行并形成覆盖证据 |
-| WP4/WP5 | 18 项稳定目录与 fail-closed Gate；外层 5 项只有 repository automated producer，尚未统一进入 challenge/workload/native semantic inventory；新增 implementation inventory 的 13 项全部为 `PARSER_READY / EXTERNAL OPEN`。3 个 barrier test-only harness 已补账户/进程 preflight、run-id 隔离、reached→kill→三独立 source→deterministic recovery 链；4 个外部 actor 已补 challenge-stable clOrdId、exact ordId/fill 与 algoClOrdId 归属，但都不是 production producer | 将全部 18 项统一纳入不可变 inventory、逐场景语义 verifier和 live native bridge；绑定 registrar/capability/source、独立 systemd/IAM、fleet/deployment attestation 与 WORM exact-version readback；在最终 freeze 候选和隔离 Chaos 环境实跑完整矩阵 |
+| WP4/WP5 | 18 项已统一进入不可变 inventory、challenge/workload、逐场景 semantic verifier 与 build provenance 模型；5 个 legacy repository producer、3 个 barrier test-only harness 和 4 个 Demo actor 都不会被提升为 production producer，18 项生产状态均为 `EXTERNAL OPEN` | 逐场景交付并部署 production executor/live bridge；绑定 registrar/capability/source、独立 systemd/IAM、fleet/deployment attestation 与 WORM exact-version readback；在最终 freeze 候选和隔离 Chaos 环境实跑完整矩阵 |
 | WP6 | Prometheus/Grafana、durable alert lifecycle、file-drop 单写者导入、五路 dead-man、周期 exact component restore、独立月度 empty-host RTO Gate | 第二故障域、真实 ACK/RPO 与月度空机 RTO |
 | WP7 | 双签 epoch、四类来源公钥预注册、原始 SQLite 重建、完整 UTC 日结、Object Lock exact-version 独立重算、append-only v2 ledger/gate | 真实第二故障域/IAM/WORM 与连续 30 个 clean day |
 | WP8 | `production+canary` 唯一语义、双签 transition、≤6h policy、七项 pre-start/五项 post-start 严格 schema、12 路 collector/signer/systemd、冻结 executable/request/WORM locator、独立 IAM/WORM/deployment 四权、不可绕过的 external-readiness Gate、reserve→approve→consume、运行时 backup RPO 与 hard-epoch 防旧令牌释放 | 在真实隔离主机配置并运行 12 路实例，取得 IAM/STS、Object Lock exact-version 与 deployment attestation；完成 30 日后再由独立人员/机器来源签发并执行 Canary |

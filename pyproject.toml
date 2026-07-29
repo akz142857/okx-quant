@@ -60,4 +60,5 @@ addopts = ["--strict-markers"]
 markers = [
     "unit: unit test (fast, no external IO)",
     "integration: integration test (may hit network)",
+    "linux_ci_required: platform behavior that must execute without skipping in Linux CI",
 ]

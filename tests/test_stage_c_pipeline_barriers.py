@@ -595,6 +595,7 @@ def _tls_client(connection, certificate: str) -> None:
     and not Path("/opt/homebrew/bin/openssl").exists(),
     reason="openssl required for local TLS certificate",
 )
+@pytest.mark.linux_ci_required
 def test_isolated_tls_proxy_receives_full_post_and_withholds_ack(tmp_path):
     openssl = (
         Path("/usr/bin/openssl")

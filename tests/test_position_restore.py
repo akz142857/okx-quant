@@ -40,8 +40,8 @@ def test_restore_to_risk_scopes_to_given_inst_ids():
     pos = risk.get_position("BTC-USDT")
     assert pos.size == pytest.approx(0.1)
     assert pos.entry_price == pytest.approx(50000.0)
-    assert pos.stop_loss == pytest.approx(50000.0 * 0.98, rel=1e-6)
-    assert pos.take_profit == pytest.approx(50000.0 * 1.04, rel=1e-6)
+    assert pos.stop_loss == pytest.approx(50000.0)
+    assert pos.take_profit == 0
 
 
 @pytest.mark.unit
@@ -110,6 +110,28 @@ def test_restore_to_risk_strict_rejects_unpriced_existing_position():
 
     with pytest.raises(RuntimeError, match="价格无效"):
         restore_to_risk(ex, risk, ["BTC-USDT"], strict=True)
+
+
+@pytest.mark.unit
+def test_restore_to_risk_strict_rejects_missing_durable_protection():
+    ex = _build_fake()
+    ex.set_holding("BTC", balance=0.1, available=0.1)
+    ex.set_ticker("BTC-USDT", last=50000.0)
+    risk = RiskManager(RiskConfig())
+
+    with pytest.raises(RuntimeError, match="durable 入场/保护事实"):
+        restore_to_risk(ex, risk, ["BTC-USDT"], strict=True)
+
+
+@pytest.mark.unit
+def test_restore_uses_total_balance_when_partially_locked():
+    ex = _build_fake()
+    ex.set_holding("BTC", balance=0.1, available=0.04)
+    ex.set_ticker("BTC-USDT", last=50000.0)
+    risk = RiskManager(RiskConfig())
+
+    assert restore_to_risk(ex, risk, ["BTC-USDT"]) == 1
+    assert risk.get_position("BTC-USDT").size == pytest.approx(0.1)
 
 
 @pytest.mark.unit

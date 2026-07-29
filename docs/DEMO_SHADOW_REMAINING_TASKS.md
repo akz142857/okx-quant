@@ -66,10 +66,10 @@ Gate A 的最小 Chaos 集合为 6 项：SIGTERM、SIGKILL、WS down/reconnect�
 
 ## 1. 当前权威状态（2026-07-29 最新复核）
 
-- 当前冻结候选提交以 `git rev-parse HEAD` 为准，工作树已 clean；新增能力均归属于
-  当前 HEAD。
-- 当前冻结候选全量验证：`794 passed, 3 skipped`；新增部署/协议定向测试另有
-  `128 passed`。
+- 上一冻结候选提交以 `git rev-parse HEAD` 为准；本轮审查修复仍需提交后重新确认
+  工作树 clean，并在新 HEAD 上重算全部发布身份。
+- 本轮修复后的本机全量验证：`806 passed, 3 skipped`；3 项属于 loopback socket
+  与 macOS setgid 平台差异，Linux CI 已配置为禁止这些关键测试跳过。
 - `ruff check .`、`compileall` 和 `git diff --check` 均通过。
 - 18 个 Stage-C 场景当前在生产视角全部是 `EXTERNAL OPEN`；
   `implemented_stage_c_scenarios()` 和

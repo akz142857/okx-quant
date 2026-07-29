@@ -38,6 +38,8 @@ from scripts.verify_systemd_security import check_units
 
 SCHEMA = "okx-quant.linux-deployment-preflight/v1"
 ROLES = ("shadow", "active", "chaos")
+REQUIRED_GATE_A_ROLES = frozenset({"shadow", "active"})
+DEFAULT_GATE_A_ROLES = ("shadow", "active")
 
 
 class PreflightError(RuntimeError):
@@ -93,7 +95,26 @@ def _netns_inode(namespace: str) -> str:
     return inode
 
 
-def _check_live_host(installed_units: list[str]) -> dict:
+def _validated_roles(values: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    roles = tuple(values or DEFAULT_GATE_A_ROLES)
+    if len(set(roles)) != len(roles):
+        raise PreflightError("Demo role 不得重复")
+    unknown = set(roles) - set(ROLES)
+    if unknown:
+        raise PreflightError(f"未知 Demo role: {', '.join(sorted(unknown))}")
+    missing = REQUIRED_GATE_A_ROLES - set(roles)
+    if missing:
+        raise PreflightError(
+            f"Gate A 必须包含 shadow 和 active；缺少: {', '.join(sorted(missing))}"
+        )
+    return tuple(role for role in ROLES if role in roles)
+
+
+def _expected_demo_units(roles: tuple[str, ...]) -> list[str]:
+    return [f"okx-quant-demo-{role}.service" for role in roles]
+
+
+def _check_live_host(installed_units: list[str], roles: tuple[str, ...]) -> dict:
     if platform.system() != "Linux":
         raise PreflightError("--live 只能在 Linux 主机执行")
     if os.geteuid() != 0:
@@ -105,13 +126,13 @@ def _check_live_host(installed_units: list[str]) -> dict:
     netns = {}
     names = _run(["ip", "netns", "list"]).stdout.splitlines()
     available = {line.split()[0] for line in names if line.split()}
-    for role in ROLES:
+    for role in roles:
         name = f"okx-quant-demo-{role}"
         if name not in available:
             raise PreflightError(f"缺少隔离 network namespace: {name}")
         netns[name] = _netns_inode(name)
     if len(set(netns.values())) != len(netns):
-        raise PreflightError("三套 Demo network namespace inode 被复用")
+        raise PreflightError("启用的 Demo network namespace inode 被复用")
 
     units = []
     for unit in installed_units:
@@ -159,15 +180,24 @@ def _verify_attestation(args: argparse.Namespace) -> dict:
 
 def build_report(args: argparse.Namespace) -> dict:
     live = args.mode == "live"
+    roles = _validated_roles(getattr(args, "role", None))
+    installed_units = list(args.installed_unit)
+    expected_units = _expected_demo_units(roles)
+    if live:
+        if not installed_units:
+            installed_units = expected_units
+        if set(installed_units) != set(expected_units) or len(installed_units) != len(expected_units):
+            raise PreflightError("installed-unit 必须与启用的 Demo role 精确一致")
     report = {
         "schema": SCHEMA,
         "preflight_only": True,
         "mode": args.mode,
+        "roles": list(roles),
         "started_at": datetime.now(UTC).isoformat(),
         "checks": {},
     }
     if live:
-        report["checks"]["host"] = _check_live_host(args.installed_unit)
+        report["checks"]["host"] = _check_live_host(installed_units, roles)
     report["checks"]["units"] = _check_systemd_units(args.root.resolve(), live=live)
     report["checks"]["external_deployment_attestation"] = _verify_attestation(args)
     report["passed"] = True
@@ -179,6 +209,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
     parser.add_argument("--mode", choices=("static", "live"), default="static")
+    parser.add_argument(
+        "--role",
+        action="append",
+        choices=ROLES,
+        help="启用的 Demo role；默认 shadow+active，可重复指定并可选加入 chaos",
+    )
     parser.add_argument("--installed-unit", action="append", default=[])
     parser.add_argument("--attestation", type=Path)
     parser.add_argument("--public-key", type=Path)
@@ -186,12 +222,6 @@ def main() -> int:
     parser.add_argument("--require-attestation", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.mode == "live" and not args.installed_unit:
-        args.installed_unit = [
-            "okx-quant-demo-shadow.service",
-            "okx-quant-demo-active.service",
-            "okx-quant-demo-chaos.service",
-        ]
     try:
         report = build_report(args)
     except (PreflightError, RuntimeError) as exc:

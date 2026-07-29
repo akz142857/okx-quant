@@ -2,9 +2,41 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
+
+_CRITICAL_SKIPS: set[str] = set()
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Record required platform tests skipped by the CI environment."""
+    if (
+        os.environ.get("OKX_QUANT_FORBID_CRITICAL_TEST_SKIPS") == "1"
+        and report.skipped
+        and "linux_ci_required" in report.keywords
+    ):
+        _CRITICAL_SKIPS.add(report.nodeid)
+
+
+def pytest_sessionfinish(
+    session: pytest.Session,
+    exitstatus: int,
+) -> None:
+    """Fail CI when a required Linux platform test did not execute."""
+    if _CRITICAL_SKIPS:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_sep(
+                "=",
+                "critical Linux CI tests were skipped",
+                red=True,
+            )
+            for nodeid in sorted(_CRITICAL_SKIPS):
+                reporter.write_line(nodeid, red=True)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 @pytest.fixture

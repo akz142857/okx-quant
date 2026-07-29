@@ -424,6 +424,7 @@ def test_explicit_journal_initializer_installs_halted_identity_atomically(
 
 
 @pytest.mark.unit
+@pytest.mark.linux_ci_required
 def test_production_journal_initializer_sets_shared_group_permissions(
     tmp_path,
     monkeypatch,

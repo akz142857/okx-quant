@@ -35,8 +35,8 @@ manifest 计算并随 external attestation 绑定）。不得自行对 freeze JS
 | P0-03 | 干净 Linux CI 日志、systemd-analyze 输出、freeze report | `scripts/verify_systemd_security.py`、`scripts/recompute_stage_c_evidence.py` | Linux 全量 CI 通过，revision/tree/config 一致 |
 | P1-01 | 18 个独立 executor artifact、driver/build/IAM/unit 清单 | Stage-C inventory/verifier | 每项独立 `PARSER_READY -> EXECUTOR_SHIPPED`，不得批量升级 |
 | P1-02 | 18 项 native raw JSONL、source signer、final loader 回执 | `stage_c_external_bridge`、Stage-C parser | raw bytes 可重算，challenge/consumption/WORM/signatures 全匹配 |
-| P1-03 | 4 actor 的 Linux PID/cgroup、collector/signer、cleanup 回执 | `scripts/linux_deployment_preflight.py --mode live` | 真实 unit/netns/UID、超时和 cleanup 通过 |
-| P1-04 | Gate A：Shadow + Active 两账户的单机 UID/unit/netns/cgroup 回执；Gate B：Chaos/第二故障域 | `scripts/linux_deployment_preflight.py --mode live`；Gate B 再用 attestation verifier | Gate A 身份不串线；Gate B 才要求三角色/第二故障域 |
+| P1-03 | 4 actor 的 Linux PID/cgroup、collector/signer、cleanup 回执 | `.venv/bin/python scripts/linux_deployment_preflight.py --mode live` | 真实 unit/netns/UID、超时和 cleanup 通过 |
+| P1-04 | Gate A：Shadow + Active 两账户的单机 UID/unit/netns/cgroup 回执；Gate B：Chaos/第二故障域 | `.venv/bin/python scripts/linux_deployment_preflight.py --mode live`；Gate B 再用 attestation verifier | Gate A 身份不串线；Gate B 才要求三角色/第二故障域 |
 | P1-05 | Gate A：最小 IAM/STS、单机不可变 exact-version；Gate B：COMPLIANCE/跨账号/五职责 | Gate A 用部署/回读 receipts；Gate B 用 `scripts/verify_external_deployment_attestation.py` | 按 Gate 检查对应角色、retention/KMS/readback |
 | P1-06 | WP0 v2 contract manifest、OKX contract、单机 evidence version、独立回读签名 | `scripts/verify_demo_contract.py` 及 manifest verifier | candidate/config/account/key/version 全绑定 |
 | P2-01 | Shadow 72h ledger、WS/SLO/reconciliation、零写证明 | `scripts/demo_soak_status.py`（逐日/逐 ledger）+ final Gate | 由 epoch/ledger 聚合验证 72h 连续、0 write、0 unexplained mismatch；单次 status 输出不足以证明时长 |

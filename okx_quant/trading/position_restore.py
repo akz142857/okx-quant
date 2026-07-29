@@ -110,11 +110,10 @@ def restore_to_risk(
             logger.debug("恢复持仓跳过 %s：ticker 取不到价格", inst_id)
             continue
 
-        # 使用 available（非锁定余额）作为可卖数量；cashBal 包含冻结部分，
-        # 作为仓位登记会高估可平数量
-        size = float(
-            holding.available if holding.available > 0 else holding.balance
-        )
+        # 风险敞口必须使用包含冻结部分的总余额。available 只应由卖出路径在
+        # 提交前限制可卖数量；用 available 登记仓位会让挂单冻结的真实资产
+        # 从止损监控和敞口统计中消失。
+        size = float(holding.balance)
 
         # 粉尘过滤：总价值 < min_usdt_value 的忽略（OKX 账户残留）
         if min_usdt_value > 0 and size * price < min_usdt_value:
@@ -124,8 +123,15 @@ def restore_to_risk(
             )
             continue
 
-        sl = round(price * (1 - risk.config.stop_loss_pct), 8)
-        tp = round(price * (1 + risk.config.take_profit_pct), 8)
+        # 旧兼容状态没有 durable 入场价/保护事实。用重启现价重新计算止损会
+        # 在亏损后悄然下移风险边界。严格启动必须拒绝；非严格恢复仅用于
+        # 测试/人工观察，并把止损钉在当前价以促使下一轮保守退出。
+        if strict:
+            raise RuntimeError(
+                f"已有持仓 {inst_id} 缺少 durable 入场/保护事实，拒绝启动交易"
+            )
+        sl = price
+        tp = 0.0
         risk.add_position(PositionInfo(
             inst_id=inst_id,
             size=size,
@@ -134,8 +140,9 @@ def restore_to_risk(
             take_profit=tp,
         ))
         logger.info(
-            "恢复已有持仓: %s  数量=%.6f  参考价=%.4f（估算）",
-            inst_id, size, price,
+            "保守恢复已有持仓: %s 总数量=%.6f 可用=%.6f  参考价=%.4f；"
+            "缺少 durable 保护事实，止损钉在当前价",
+            inst_id, size, float(holding.available), price,
         )
         restored += 1
     elapsed = time.perf_counter() - t0
