@@ -1,0 +1,41 @@
+[Unit]
+Description=Independent OKX Quant Demo watchdog (%i)
+After=network-online.target
+OnFailure=okx-quant-demo-monitor-failure@%i.service
+
+[Service]
+Type=simple
+User=okxquant-monitor-%i
+Group=okxquant-data-%i
+EnvironmentFile=/etc/okx-quant/demo-%i-watchdog.env
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=okx-quant-demo-watchdog-%i
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=10000
+NetworkNamespacePath=/run/netns/okx-quant-demo-%i
+ExecStart=/opt/okx-quant/demo-%i/current/.venv/bin/okx-quant-watchdog --heartbeat ${OKX_QUANT_HEARTBEAT_PATH} --database ${OKX_QUANT_DATABASE_PATH} --webhook-env OKX_QUANT_ALERT_WEBHOOK --incident-state /var/lib/okx-quant-watchdog/demo-%i/incidents.json
+Restart=always
+RestartSec=5
+StateDirectory=okx-quant-watchdog/demo-%i
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=true
+MemoryDenyWriteExecute=true
+AmbientCapabilities=
+ReadOnlyPaths=/var/lib/okx-quant/demo-%i
+ReadWritePaths=/var/lib/okx-quant-watchdog/demo-%i
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

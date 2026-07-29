@@ -107,6 +107,50 @@ def test_lost_algo_response_resolves_by_client_id_without_emergency(tmp_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exchange_state", "expected_state"),
+    [
+        ("canceled", ProtectionState.CANCELED),
+        ("failed", ProtectionState.FAILED),
+        ("unexpected_state", ProtectionState.UNKNOWN),
+    ],
+)
+def test_active_algo_loss_returns_identifiable_transition(
+    tmp_path,
+    exchange_state,
+    expected_state,
+):
+    _, journal, execution, manager = _stack(tmp_path)
+    execution.submit(ExecutionRequest(
+        inst_id="BTC-USDT",
+        side="buy",
+        base_qty=Decimal("0.1"),
+    ))
+    active = journal.list_protections(
+        "BTC-USDT",
+        active_only=True,
+    )[0]
+
+    losses = manager.process_algo_events([{
+        "algoId": active.exchange_algo_id,
+        "algoClOrdId": active.algo_cl_ord_id,
+        "state": exchange_state,
+        "sz": str(active.protected_qty),
+        "slTriggerPx": str(active.trigger_px),
+        "tpTriggerPx": str(active.take_profit_px),
+    }])
+
+    assert len(losses) == 1
+    assert losses[0].protection.protection_id == active.protection_id
+    assert losses[0].previous_state is ProtectionState.ACTIVE
+    assert losses[0].current_state is expected_state
+    assert (
+        journal.list_protections("BTC-USDT")[0].state
+        is expected_state
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("status_code", [408, 502])
 def test_algo_http_5xx_after_acceptance_resolves_without_duplicate_sell(
     tmp_path,

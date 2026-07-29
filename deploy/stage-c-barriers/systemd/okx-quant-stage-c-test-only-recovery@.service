@@ -1,0 +1,71 @@
+[Unit]
+Description=OKX Quant Stage-C TEST-ONLY PARSER_READY native recovery collector %i
+After=okx-quant-stage-c-test-only-journal-source@%i.service okx-quant-stage-c-test-only-okx-source@%i.service okx-quant-stage-c-test-only-systemd-source@%i.service
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/kill/%i/kill-attestation.json
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/hook/%i/reached.json
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/hook/%i/boundary-proof.json
+ConditionPathExists=/opt/okx-quant-stage-c-test-only/instrumented.pyz
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/source-journal/%i/artifact.json
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/source-journal/%i/readiness.json
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/source-okx/%i/artifact.json
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/source-systemd/%i/artifact.json
+ConditionFileIsExecutable=/opt/okx-quant-stage-c-test-only/venv/bin/python
+
+[Service]
+Type=oneshot
+User=okxq-stagec-recovery
+Group=okxq-stagec-evidence
+UMask=0027
+StateDirectory=okx-quant-stage-c-test-only/recovery/%i
+StateDirectoryMode=0750
+LoadCredential=scenario:/etc/okx-quant-stage-c-test-only/%i/scenario
+LoadCredential=challenge:/etc/okx-quant-stage-c-test-only/%i/challenge.json
+LoadCredential=registrar-public-key:/etc/okx-quant-stage-c-test-only/%i/registrar-public.pem
+LoadCredential=reached-public-key:/etc/okx-quant-stage-c-test-only/%i/attestor-public.pem
+LoadCredential=kill-public-key:/etc/okx-quant-stage-c-test-only/%i/kill-public.pem
+LoadCredential=journal-public-key:/etc/okx-quant-stage-c-test-only/%i/journal-source-public.pem
+LoadCredential=okx-public-key:/etc/okx-quant-stage-c-test-only/%i/okx-source-public.pem
+LoadCredential=systemd-public-key:/etc/okx-quant-stage-c-test-only/%i/systemd-source-public.pem
+ExecStart=/opt/okx-quant-stage-c-test-only/venv/bin/python /opt/okx-quant-stage-c-test-only/instrumented.pyz collect-recovery \
+  --scenario-file %d/scenario \
+  --challenge %d/challenge \
+  --registrar-public-key %d/registrar-public-key \
+  --marker /var/lib/okx-quant-stage-c-test-only/hook/%i/reached.json \
+  --proof /var/lib/okx-quant-stage-c-test-only/hook/%i/boundary-proof.json \
+  --reached-artifact /var/lib/okx-quant-stage-c-test-only/attestor/%i/reached-attestation.json \
+  --reached-public-key %d/reached-public-key \
+  --kill-artifact /var/lib/okx-quant-stage-c-test-only/kill/%i/kill-attestation.json \
+  --kill-public-key %d/kill-public-key \
+  --journal-artifact /var/lib/okx-quant-stage-c-test-only/source-journal/%i/artifact.json \
+  --journal-readiness-artifact /var/lib/okx-quant-stage-c-test-only/source-journal/%i/readiness.json \
+  --journal-public-key %d/journal-public-key \
+  --okx-artifact /var/lib/okx-quant-stage-c-test-only/source-okx/%i/artifact.json \
+  --okx-public-key %d/okx-public-key \
+  --systemd-artifact /var/lib/okx-quant-stage-c-test-only/source-systemd/%i/artifact.json \
+  --systemd-public-key %d/systemd-public-key \
+  --native-output /var/lib/okx-quant-stage-c-test-only/recovery/%i/native-recovery.json \
+  --core-output /var/lib/okx-quant-stage-c-test-only/recovery/%i/core-recovery.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=180
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/opt/okx-quant-stage-c-test-only /var/lib/okx-quant-stage-c-test-only/hook/%i /var/lib/okx-quant-stage-c-test-only/attestor/%i /var/lib/okx-quant-stage-c-test-only/kill/%i /var/lib/okx-quant-stage-c-test-only/source-journal/%i /var/lib/okx-quant-stage-c-test-only/source-okx/%i /var/lib/okx-quant-stage-c-test-only/source-systemd/%i
+ReadWritePaths=/var/lib/okx-quant-stage-c-test-only/recovery/%i

@@ -1,0 +1,11 @@
+[Unit]
+Description=OKX Quant Stage-C bounded cleanup deadline %i
+
+[Timer]
+OnActiveSec=120
+AccuracySec=1
+Unit=okx-quant-stage-c-external-cleanup@%i.service
+Persistent=no
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "capture_origin": "okx_demo_live",
+  "captured_at": 1785219240.411297,
+  "inst_id": "BTC-USDT",
+  "source_evidence_sha256": "229ea0b4fcba86a352edff271144443bb4b428f432610dd331a560d0c0adecbc",
+  "redaction": {
+    "version": 1,
+    "stable_relationship_tokens": true,
+    "redacted_identifier_count": 7
+  },
+  "evidence": {
+    "attached_probe": {
+      "algo_id": "<ALGO_ID_1>",
+      "algo_state": "live",
+      "conclusive": true,
+      "error": "",
+      "explicitly_rejected": false,
+      "parent_ord_id": "<ORDER_ID_2>",
+      "parent_state": "filled",
+      "rejection_code": "",
+      "request_tgt_ccy": "quote_ccy",
+      "supported": true
+    },
+    "attached_probe_conclusive": true,
+    "balance_measurement_tolerance": "0.00000000001",
+    "baseline_base_balance": "1.00004995237",
+    "cleanup": [
+      {
+        "cancel_algo_id": "<ALGO_ID_3>",
+        "final_state": "canceled"
+      },
+      {
+        "cancel_algo_id": "<ALGO_ID_1>",
+        "final_state": "canceled"
+      },
+      {
+        "exit_ord_id": "<ORDER_ID_4>",
+        "qty": "0.00015749",
+        "state": "filled"
+      }
+    ],
+    "cleanup_errors": [],
+    "completed_at": 1785219240.411297,
+    "environment": "OKX demo",
+    "estimated_quote_notional": "5.000336677",
+    "expected_base_dust": "0.00000000235",
+    "final_base_balance": "1.00004995472",
+    "final_base_balance_delta": "0.00000000235",
+    "independent_oco": {
+      "algoClOrdId": "<ALGO_CLIENT_ID_5>",
+      "algoId": "<ALGO_ID_3>",
+      "ok": true,
+      "slTriggerPx": "62163.8",
+      "state": "live",
+      "sz": "0.00007875",
+      "tpTriggerPx": "64701.2",
+      "transport_error": ""
+    },
+    "independent_parent": {
+      "accFillSz": "0.00007883",
+      "avgPx": "63432.519434225548649",
+      "clOrdId": "<CLIENT_ORDER_ID_6>",
+      "fee": "-0.00000007883",
+      "feeCcy": "BTC",
+      "ordId": "<ORDER_ID_7>",
+      "state": "filled",
+      "transport_error": ""
+    },
+    "inst_id": "BTC-USDT",
+    "minimum_quote_notional": "5",
+    "ok": true,
+    "quote_ccy": "USDT",
+    "requested_base_qty": "0.00007883",
+    "route_b_ok": true,
+    "selected_route": "independent_oco_after_fill",
+    "started_at": 1785219235.098228
+  }
+}

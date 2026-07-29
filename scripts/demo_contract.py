@@ -8,6 +8,7 @@ import json
 import re
 import time
 import uuid
+from datetime import UTC, datetime
 from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from pathlib import Path
 
@@ -16,6 +17,13 @@ import requests
 from main import make_client
 from okx_quant.client.rest import OKXAPIError
 from okx_quant.config import load_yaml
+from okx_quant.infrastructure.evidence import (
+    build_demo_contract_manifest_request,
+    build_deployment_identity,
+    build_release_identity,
+    sha256_bytes,
+    utc_iso,
+)
 from okx_quant.infrastructure.okx.contract_fixture import (
     build_redacted_contract_fixture,
 )
@@ -615,36 +623,101 @@ def main() -> int:
     parser.add_argument(
         "--fixture-output",
         type=Path,
-        help="可选：输出版本化、稳定 ID 脱敏后的 OKX demo golden fixture",
+        required=True,
+        help="输出版本化、稳定 ID 脱敏后的 OKX demo golden fixture",
+    )
+    parser.add_argument(
+        "--manifest-output",
+        type=Path,
+        help="输出待独立上传、补齐 Object Lock identity 并签名的 manifest request",
+    )
+    parser.add_argument(
+        "--release-root",
+        type=Path,
+        default=Path(__file__).resolve().parents[1],
     )
     args = parser.parse_args()
     if args.confirm != CONFIRMATION:
         raise SystemExit(f"--confirm 必须精确等于 {CONFIRMATION}")
     if args.output.exists():
         raise SystemExit(f"拒绝覆盖既有 contract evidence: {args.output}")
-    if args.fixture_output is not None and args.fixture_output.exists():
+    if args.fixture_output.exists():
         raise SystemExit(
             f"拒绝覆盖既有 contract fixture: {args.fixture_output}"
         )
+    manifest_output = args.manifest_output or args.output.with_suffix(
+        args.output.suffix + ".manifest-request.json"
+    )
+    if manifest_output.exists():
+        raise SystemExit(
+            f"拒绝覆盖既有 manifest request: {manifest_output}"
+        )
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    if args.fixture_output is not None:
-        args.fixture_output.parent.mkdir(parents=True, exist_ok=True)
+    args.fixture_output.parent.mkdir(parents=True, exist_ok=True)
+    manifest_output.parent.mkdir(parents=True, exist_ok=True)
     config = load_yaml(args.config)
     if config.get("okx", {}).get("simulated") is not True:
         raise SystemExit("拒绝执行：该脚本只允许 okx.simulated=true")
-    evidence, ok = run_contract(make_client(config), args.inst)
-    args.output.write_text(
-        json.dumps(evidence, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    client = make_client(config)
+    release_identity = build_release_identity(args.release_root)
+    deployment_identity = build_deployment_identity(
+        config=config,
+        account_config=client.get_account_config(),
     )
-    if ok and args.fixture_output is not None:
-        fixture = build_redacted_contract_fixture(evidence)
-        args.fixture_output.write_text(
-            json.dumps(fixture, ensure_ascii=False, indent=2) + "\n",
+    contract, ok = run_contract(client, args.inst)
+    if not ok:
+        args.output.write_text(
+            json.dumps(contract, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+        print(json.dumps(contract, ensure_ascii=False))
+        return 2
+    fixture = build_redacted_contract_fixture(contract)
+    fixture_bytes = (
+        json.dumps(fixture, ensure_ascii=False, indent=2) + "\n"
+    ).encode()
+    contract_run_id = uuid.uuid4().hex
+    evidence = {
+        "version": 2,
+        "artifact_type": "okx-demo-contract",
+        "contract_run_id": contract_run_id,
+        "script_version": 2,
+        "started_at": utc_iso(float(contract["started_at"])),
+        "completed_at": utc_iso(float(contract["completed_at"])),
+        "release_identity": release_identity,
+        "deployment_identity": deployment_identity,
+        "fixture_sha256": sha256_bytes(fixture_bytes),
+        "contract": contract,
+    }
+    evidence_bytes = (
+        json.dumps(evidence, ensure_ascii=False, indent=2) + "\n"
+    ).encode()
+    args.output.write_text(
+        evidence_bytes.decode(),
+        encoding="utf-8",
+    )
+    args.fixture_output.write_bytes(fixture_bytes)
+    manifest_request = build_demo_contract_manifest_request(
+        contract_run_id=contract_run_id,
+        release_identity=release_identity,
+        deployment_identity=deployment_identity,
+        evidence_name=args.output.name,
+        evidence_bytes=evidence_bytes,
+        fixture_name=args.fixture_output.name,
+        fixture_bytes=fixture_bytes,
+        created_at=datetime.now(UTC).isoformat(),
+    )
+    manifest_output.write_text(
+        json.dumps(manifest_request, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(json.dumps(evidence, ensure_ascii=False))
-    return 0 if ok else 2
+    if not release_identity["workspace_clean"]:
+        print(
+            "警告：workspace 不干净；contract 交易契约通过，"
+            "但独立 verifier 将拒绝其作为发布级证据。"
+        )
+    return 0
 
 
 if __name__ == "__main__":

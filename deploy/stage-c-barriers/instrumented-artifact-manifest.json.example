@@ -1,0 +1,43 @@
+{
+  "schema": "okx-quant.stage-c-instrumented-deployment/v1",
+  "artifact_class": "instrumented_test_only",
+  "artifact_build_id": "test-only:stage-c-barriers-v1",
+  "production_eligible": false,
+  "production_env_enableable": false,
+  "artifact_path": "/opt/okx-quant-stage-c-test-only/instrumented.pyz",
+  "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "shared_production_source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "instrumented_delta_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "exact_release_artifact_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "allowed_units": [
+    "okx-quant-stage-c-test-only-harness@.service",
+    "okx-quant-stage-c-test-only-driver@.service",
+    "okx-quant-stage-c-test-only-attestor@.service",
+    "okx-quant-stage-c-test-only-kill@.service",
+    "okx-quant-stage-c-test-only-journal-source@.service",
+    "okx-quant-stage-c-test-only-okx-source@.service",
+    "okx-quant-stage-c-test-only-systemd-source@.service",
+    "okx-quant-stage-c-test-only-recovery@.service"
+  ],
+  "forbidden_units": [
+    "okx-quant.service",
+    "okx-quant-demo-active.service",
+    "okx-quant-demo-shadow.service",
+    "okx-quant-demo-chaos.service"
+  ],
+  "capability_status": "PARSER_READY / EXTERNAL OPEN",
+  "standalone_boundary_executor": true,
+  "production_receipt_admissible": false,
+  "missing_external_requirements": [
+    "final_epoch_exact_release_digest_binding",
+    "independent_build_signer_attestation",
+    "independent_worm_exact_version_readback",
+    "production_unit_hook_absence_and_sandbox_attestation",
+    "production_black_box_barrier_activation_rejection",
+    "role_local_uid_unit_sts_key_attestations",
+    "independent_pre_kill_source_role_collectors_and_signers",
+    "scenario_specific_live_raw_event_envelopes",
+    "role_local_systemd_and_iam_artifact_bindings",
+    "semantic_inventory_verifier_and_attack_regressions"
+  ]
+}

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run off-host OKX Quant Demo synthetic monitor (%i)
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=30s
+AccuracySec=2s
+Persistent=true
+Unit=okx-quant-demo-external-monitor@%i.service
+
+[Install]
+WantedBy=timers.target

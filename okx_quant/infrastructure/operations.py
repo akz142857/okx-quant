@@ -110,7 +110,9 @@ class AlertDispatcher:
         while not self._stop.wait(self.interval_s):
             if not self.webhook_url:
                 continue
-            for event in self.journal.get_unpublished_outbox():
+            for event in self.journal.get_due_alerts():
+                started_at = time.time()
+                http_status = None
                 try:
                     payload = json.loads(event["payload_json"])
                     response = requests.post(
@@ -122,15 +124,30 @@ class AlertDispatcher:
                         },
                         timeout=5,
                     )
+                    http_status = response.status_code
                     response.raise_for_status()
-                    self.journal.mark_outbox_published(event["event_id"])
+                    self.journal.record_alert_attempt(
+                        event["event_id"],
+                        started_at=started_at,
+                        completed_at=time.time(),
+                        http_status=http_status,
+                        ingestion_accepted=True,
+                    )
                     self.last_success_at = time.time()
                     self.consecutive_failures = 0
                     self.last_error = ""
                 except Exception as exc:
+                    self.journal.record_alert_attempt(
+                        event["event_id"],
+                        started_at=started_at,
+                        completed_at=time.time(),
+                        http_status=http_status,
+                        ingestion_accepted=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
                     self.consecutive_failures += 1
                     self.last_error = str(exc)
-                    break
+                    continue
 
     def verify_delivery(self, payload: dict) -> None:
         """恢复交易前同步发送 challenge；没有 HTTP 成功 ACK 就 fail closed。"""
@@ -161,6 +178,283 @@ class AlertDispatcher:
             correlation_id=event_id,
             payload=payload,
         )
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+
+
+class ResourceSampler:
+    """Persist Linux process/cgroup/resource facts with explicit thresholds."""
+
+    def __init__(
+        self,
+        journal: JournalRepository,
+        *,
+        database_path: str | Path,
+        interval_s: float,
+        memory_high_bytes: int,
+        memory_max_bytes: int,
+        limit_nofile: int,
+        tasks_max: int,
+        max_database_bytes: int,
+        max_wal_bytes: int,
+        max_wal_checkpoint_age_s: int,
+        max_database_growth_bytes_per_day: int,
+        min_free_bytes: int,
+        min_free_inodes: int,
+        release_identity: str,
+        config_identity: str,
+        proc_root: str | Path = "/proc",
+        cgroup_root: str | Path = "/sys/fs/cgroup",
+        metric_sink: Callable[[str, float], None] | None = None,
+    ):
+        self.journal = journal
+        self.database_path = Path(database_path)
+        self.interval_s = interval_s
+        self.memory_high_bytes = memory_high_bytes
+        self.memory_max_bytes = memory_max_bytes
+        self.limit_nofile = limit_nofile
+        self.tasks_max = tasks_max
+        self.max_database_bytes = max_database_bytes
+        self.max_wal_bytes = max_wal_bytes
+        self.max_wal_checkpoint_age_s = max_wal_checkpoint_age_s
+        self.max_database_growth_bytes_per_day = (
+            max_database_growth_bytes_per_day
+        )
+        self.min_free_bytes = min_free_bytes
+        self.min_free_inodes = min_free_inodes
+        self.release_identity = release_identity
+        self.config_identity = config_identity
+        self.proc_root = Path(proc_root)
+        self.cgroup_root = Path(cgroup_root)
+        self.metric_sink = metric_sink
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._active_breaches: set[str] = set()
+        self._last_oom_kill_count: int | None = None
+        self._last_wal_checkpoint_at = 0.0
+
+    @staticmethod
+    def _key_values(path: Path) -> dict[str, int]:
+        if not path.is_file():
+            return {}
+        result = {}
+        for line in path.read_text(encoding="ascii").splitlines():
+            key, separator, value = line.partition(" ")
+            if separator and value.isdigit():
+                result[key] = int(value)
+        return result
+
+    def _cgroup_path(self) -> Path | None:
+        path = self.proc_root / "self/cgroup"
+        if not path.is_file():
+            return None
+        for line in path.read_text(encoding="ascii").splitlines():
+            hierarchy, controllers, relative = line.split(":", 2)
+            if hierarchy == "0" and not controllers:
+                candidate = (
+                    self.cgroup_root / relative.lstrip("/")
+                ).resolve()
+                root = self.cgroup_root.resolve()
+                if candidate == root or root in candidate.parents:
+                    return candidate
+        return None
+
+    def sample_once(self) -> dict:
+        status = {}
+        for line in (self.proc_root / "self/status").read_text(
+            encoding="ascii"
+        ).splitlines():
+            key, separator, value = line.partition(":")
+            if separator:
+                status[key] = value.strip()
+        rss_kib = int(status.get("VmRSS", "0 kB").split()[0])
+        threads = int(status.get("Threads", "0"))
+        fd_count = len(list((self.proc_root / "self/fd").iterdir()))
+        boot_id = (
+            self.proc_root / "sys/kernel/random/boot_id"
+        ).read_text(encoding="ascii").strip()
+        cgroup = self._cgroup_path()
+        memory_events = (
+            self._key_values(cgroup / "memory.events") if cgroup else {}
+        )
+        cpu = self._key_values(cgroup / "cpu.stat") if cgroup else {}
+        pids_current = (
+            int((cgroup / "pids.current").read_text().strip())
+            if cgroup and (cgroup / "pids.current").is_file()
+            else threads
+        )
+        checkpoint = self.journal.passive_wal_checkpoint()
+        checkpoint_completed_at = float(checkpoint["completed_at"])
+        if checkpoint["busy"] == 0 and checkpoint["backlog_frames"] == 0:
+            self._last_wal_checkpoint_at = checkpoint_completed_at
+        checkpoint_age = (
+            max(time.time() - self._last_wal_checkpoint_at, 0)
+            if self._last_wal_checkpoint_at
+            else float(self.max_wal_checkpoint_age_s + self.interval_s)
+        )
+        db_bytes = self.database_path.stat().st_size
+        wal = self.database_path.with_name(self.database_path.name + "-wal")
+        wal_bytes = wal.stat().st_size if wal.is_file() else 0
+        usage = shutil.disk_usage(self.database_path.parent)
+        filesystem = os.statvfs(self.database_path.parent)
+        payload = {
+            "boot_id": boot_id,
+            "pid": os.getpid(),
+            "release_identity": self.release_identity,
+            "config_identity": self.config_identity,
+            "rss_bytes": rss_kib * 1024,
+            "fd_count": fd_count,
+            "threads": threads,
+            "pids_current": pids_current,
+            "db_bytes": db_bytes,
+            "wal_bytes": wal_bytes,
+            "disk_free_bytes": usage.free,
+            "disk_free_inodes": filesystem.f_favail,
+            "memory_high_bytes": self.memory_high_bytes,
+            "memory_max_bytes": self.memory_max_bytes,
+            "limit_nofile": self.limit_nofile,
+            "tasks_max": self.tasks_max,
+            "max_database_bytes": self.max_database_bytes,
+            "max_wal_bytes": self.max_wal_bytes,
+            "wal_checkpoint_age_seconds": checkpoint_age,
+            "max_wal_checkpoint_age_seconds": (
+                self.max_wal_checkpoint_age_s
+            ),
+            "wal_checkpoint_busy": int(checkpoint["busy"] != 0),
+            "wal_checkpoint_log_frames": checkpoint["log_frames"],
+            "wal_checkpointed_frames": checkpoint["checkpointed_frames"],
+            "wal_checkpoint_backlog_frames": checkpoint["backlog_frames"],
+            "wal_checkpoint_page_size_bytes": checkpoint["page_size_bytes"],
+            "wal_checkpoint_backlog_bytes": checkpoint["backlog_bytes"],
+            "max_database_growth_bytes_per_day": (
+                self.max_database_growth_bytes_per_day
+            ),
+            "min_free_bytes": self.min_free_bytes,
+            "min_free_inodes": self.min_free_inodes,
+            "oom_count": memory_events.get("oom", 0),
+            "oom_kill_count": memory_events.get("oom_kill", 0),
+            "cpu_nr_throttled": cpu.get("nr_throttled", 0),
+            "cpu_throttled_usec": cpu.get("throttled_usec", 0),
+        }
+        breaches: set[str] = set()
+        warnings: set[str] = set()
+        if payload["rss_bytes"] >= self.memory_high_bytes * 0.85:
+            breaches.add("RSS_85_PERCENT_MEMORY_HIGH")
+        elif payload["rss_bytes"] >= self.memory_high_bytes * 0.70:
+            warnings.add("RSS_70_PERCENT_MEMORY_HIGH")
+        if fd_count >= self.limit_nofile * 0.80:
+            breaches.add("FD_80_PERCENT_LIMIT")
+        elif fd_count >= self.limit_nofile * 0.60:
+            warnings.add("FD_60_PERCENT_LIMIT")
+        if pids_current >= self.tasks_max:
+            breaches.add("TASKS_MAX")
+        if db_bytes >= self.max_database_bytes:
+            breaches.add("DATABASE_ABSOLUTE_LIMIT")
+        if wal_bytes >= self.max_wal_bytes:
+            breaches.add("WAL_ABSOLUTE_LIMIT")
+        if checkpoint_age >= self.max_wal_checkpoint_age_s:
+            breaches.add("WAL_CHECKPOINT_AGE")
+        elif checkpoint_age >= self.max_wal_checkpoint_age_s * 0.80:
+            warnings.add("WAL_CHECKPOINT_AGE_80_PERCENT")
+        if (
+            self._last_oom_kill_count is not None
+            and payload["oom_kill_count"] > self._last_oom_kill_count
+        ):
+            breaches.add("CGROUP_OOM_KILL")
+        self._last_oom_kill_count = payload["oom_kill_count"]
+        if usage.free < self.min_free_bytes:
+            breaches.add("DISK_FREE_BYTES")
+        if filesystem.f_favail < self.min_free_inodes:
+            breaches.add("DISK_FREE_INODES")
+        payload["warning_codes"] = sorted(warnings)
+        payload["breach_codes"] = sorted(breaches)
+        if self.metric_sink is not None:
+            for metric_name, field in {
+                "process_resident_memory_bytes": "rss_bytes",
+                "process_open_fds": "fd_count",
+                "process_threads": "threads",
+                "cgroup_pids_current": "pids_current",
+                "database_bytes": "db_bytes",
+                "database_wal_bytes": "wal_bytes",
+                "database_volume_free_bytes": "disk_free_bytes",
+                "database_volume_free_inodes": "disk_free_inodes",
+                "cgroup_oom_kill_count": "oom_kill_count",
+                "cgroup_cpu_nr_throttled": "cpu_nr_throttled",
+                "cgroup_cpu_throttled_seconds": "cpu_throttled_usec",
+                "resource_memory_high_bytes": "memory_high_bytes",
+                "resource_memory_max_bytes": "memory_max_bytes",
+                "resource_limit_nofile": "limit_nofile",
+                "resource_tasks_max": "tasks_max",
+                "resource_database_max_bytes": "max_database_bytes",
+                "resource_wal_max_bytes": "max_wal_bytes",
+                "wal_checkpoint_age_seconds": (
+                    "wal_checkpoint_age_seconds"
+                ),
+                "resource_wal_checkpoint_max_age_seconds": (
+                    "max_wal_checkpoint_age_seconds"
+                ),
+                "wal_checkpoint_busy": "wal_checkpoint_busy",
+                "wal_checkpoint_log_frames": (
+                    "wal_checkpoint_log_frames"
+                ),
+                "wal_checkpointed_frames": "wal_checkpointed_frames",
+                "wal_checkpoint_backlog_frames": (
+                    "wal_checkpoint_backlog_frames"
+                ),
+                "wal_checkpoint_backlog_bytes": (
+                    "wal_checkpoint_backlog_bytes"
+                ),
+            }.items():
+                value = float(payload[field])
+                if field == "cpu_throttled_usec":
+                    value /= 1_000_000
+                self.metric_sink(metric_name, value)
+            self.metric_sink("resource_warning", float(bool(warnings)))
+            self.metric_sink("resource_hard_breach", float(bool(breaches)))
+        self.journal.record_event(
+            "process_resource_sample",
+            severity="critical" if breaches else "warning" if warnings else "info",
+            payload=payload,
+        )
+        newly_active = (breaches | warnings) - self._active_breaches
+        for code in sorted(newly_active):
+            self.journal.enqueue_outbox(
+                "page.resource_threshold"
+                if code in breaches
+                else "warning.resource_threshold",
+                {
+                    "code": code,
+                    "boot_id": boot_id,
+                    "pid": os.getpid(),
+                    "release_identity": self.release_identity,
+                    "config_identity": self.config_identity,
+                },
+            )
+        self._active_breaches = breaches | warnings
+        return payload
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self.sample_once()
+            except Exception as exc:  # noqa: BLE001
+                self.journal.enqueue_outbox(
+                    "page.resource_sampler_failed",
+                    {"error": f"{type(exc).__name__}: {exc}"},
+                )
+            self._stop.wait(self.interval_s)
+
+    def start(self) -> None:
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="resource-sampler",
+            daemon=False,
+        )
+        self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()

@@ -1,0 +1,39 @@
+[Unit]
+Description=OKX Quant Stage-C challenge-bound external Demo actor %i
+After=time-sync.target network-online.target okx-quant-demo-chaos.service
+Wants=time-sync.target network-online.target
+
+[Service]
+Type=oneshot
+User=okxquant-stagec-actor
+Group=okxquant-stagec-raw-readers
+SupplementaryGroups=okxquant-data-chaos
+UMask=0027
+StateDirectory=okx-quant-stage-c/external/actor/%i
+StateDirectoryMode=0750
+WorkingDirectory=/opt/okx-quant/demo-chaos/current
+ExecStart=/opt/okx-quant/demo-chaos/current/.venv/bin/python /opt/okx-quant/demo-chaos/current/scripts/stage_c_external_scenario.py prepare --challenge /var/lib/okx-quant-stage-c/challenges/%i.json --registrar-public-key /etc/okx-quant/stage-c/keys/registrar-public.pem --consumption-receipt /var/lib/okx-quant-stage-c/consumption/%i.json --consumer-public-key /etc/okx-quant/stage-c/keys/challenge-consumer-public.pem --start-after-driver-ready /var/lib/okx-quant-stage-c/external/raw-systemd/%i/driver-ready.json --hold-until /var/lib/okx-quant-stage-c/external/raw-systemd/%i/systemd-source-raw.json --hold-timeout-seconds 360 --inst BTC-USDT --config /etc/okx-quant/stage-c/external-actor.yaml --journal /var/lib/okx-quant/demo-chaos/trading.db --confirm I_UNDERSTAND_STAGE_C_DEMO_TRADES --authorization-wait-seconds 300 --output /var/lib/okx-quant-stage-c/external/actor/%i/actor-report.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/opt/okx-quant/demo-chaos/current
+ReadOnlyPaths=/etc/okx-quant /var/lib/okx-quant-stage-c/challenges /var/lib/okx-quant-stage-c/consumption
+ReadWritePaths=/var/lib/okx-quant-stage-c/external/actor/%i /var/lib/okx-quant/demo-chaos
+CapabilityBoundingSet=
+AmbientCapabilities=
+TimeoutStartSec=420
+
+[Install]
+WantedBy=multi-user.target

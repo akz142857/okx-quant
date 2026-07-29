@@ -1,0 +1,44 @@
+[Unit]
+Description=OKX Quant Canary source signer %i (raw source is read-only)
+Requires=okx-quant-canary-source-collector@%i.service
+After=okx-quant-canary-source-collector@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=oqc-s%i
+Group=oqc-capability-readers
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadOnlyPaths=/var/lib/okx-quant-canary-sources/raw/%i
+ReadWritePaths=/var/lib/okx-quant-canary-sources/signed/%i
+ReadOnlyPaths=/etc/okx-quant
+ReadOnlyPaths=/opt/okx-quant/current
+LoadCredential=source-private-key:/etc/okx-quant/keys/canary-source-%i-private.pem
+LoadCredential=iam-sts-receipt:/run/okx-quant-canary-iam/%i.json
+ExecStart=/usr/local/libexec/okx-quant-canary-source-signer \
+  --inventory /etc/okx-quant/canary-producers/inventory.json \
+  --context /etc/okx-quant/canary-producers/%i-context.json \
+  --collection-receipt /var/lib/okx-quant-canary-sources/raw/%i/evidence.raw.collection.json \
+  --iam-sts-receipt %d/iam-sts-receipt \
+  --iam-output /var/lib/okx-quant-canary-sources/signed/%i/iam-sts-receipt.json \
+  --private-key %d/source-private-key \
+  --collector-executable /usr/local/libexec/okx-quant-canary-source-collector \
+  --signer-executable /usr/local/libexec/okx-quant-canary-source-signer \
+  --parser /opt/okx-quant/current/okx_quant/research/canary.py \
+  --host-image-sha256 /etc/okx-quant/host-image.sha256 \
+  --output /var/lib/okx-quant-canary-sources/signed/%i/source.json

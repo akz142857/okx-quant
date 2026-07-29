@@ -1,0 +1,45 @@
+[Unit]
+Description=OKX Quant independent Canary capability authority %i
+Requires=okx-quant-canary-deployment-verifier.service
+Requires=okx-quant-canary-worm-readback@00.service okx-quant-canary-worm-readback@01.service okx-quant-canary-worm-readback@02.service okx-quant-canary-worm-readback@03.service okx-quant-canary-worm-readback@04.service okx-quant-canary-worm-readback@05.service okx-quant-canary-worm-readback@06.service okx-quant-canary-worm-readback@07.service okx-quant-canary-worm-readback@08.service okx-quant-canary-worm-readback@09.service okx-quant-canary-worm-readback@10.service okx-quant-canary-worm-readback@11.service
+After=okx-quant-canary-deployment-verifier.service
+After=okx-quant-canary-worm-readback@00.service okx-quant-canary-worm-readback@01.service okx-quant-canary-worm-readback@02.service okx-quant-canary-worm-readback@03.service okx-quant-canary-worm-readback@04.service okx-quant-canary-worm-readback@05.service okx-quant-canary-worm-readback@06.service okx-quant-canary-worm-readback@07.service okx-quant-canary-worm-readback@08.service okx-quant-canary-worm-readback@09.service okx-quant-canary-worm-readback@10.service okx-quant-canary-worm-readback@11.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=oqc-capability
+Group=oqc-capability
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/okx-quant
+ReadOnlyPaths=/var/lib/okx-quant-canary-sources/raw
+ReadOnlyPaths=/var/lib/okx-quant-canary-sources/signed
+ReadOnlyPaths=/var/lib/okx-quant-canary-sources/worm-readback
+ReadOnlyPaths=/var/lib/okx-quant-canary-sources/deployment-verifier
+ReadWritePaths=/var/lib/okx-quant-canary-sources/capability
+LoadCredential=capability-private-key:/etc/okx-quant/keys/canary-capability-private.pem
+ExecStartPre=/usr/local/libexec/okx-quant-build-canary-capability \
+  --manifest /etc/okx-quant/canary-producers/capability-manifest.json \
+  --check-inputs-only
+ExecStart=/usr/local/libexec/okx-quant-build-canary-capability \
+  --manifest /etc/okx-quant/canary-producers/capability-manifest.json \
+  --private-key %d/capability-private-key \
+  --output /var/lib/okx-quant-canary-sources/capability/%i.json

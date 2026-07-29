@@ -1,6 +1,7 @@
 """生产配置 fail-closed 校验。"""
 
 import os
+import sys
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -44,6 +45,14 @@ def test_production_config_rejects_unknown_field():
     cfg = _config()
     cfg["production"]["surprise"] = True
     with pytest.raises(ValueError, match="未知字段"):
+        ProductionSettings.from_config(cfg)
+
+
+@pytest.mark.unit
+def test_backup_cadence_cannot_be_relaxed_past_one_minute():
+    cfg = _config()
+    cfg["production"]["backup_interval_s"] = 61
+    with pytest.raises(ValueError, match=r"\(0, 60\]"):
         ProductionSettings.from_config(cfg)
 
 
@@ -453,4 +462,9 @@ def test_production_journal_initializer_sets_shared_group_permissions(
     assert path.stat().st_mode & 0o777 == 0o640
     assert path.stat().st_uid == os.getuid()
     assert path.stat().st_gid == os.getgid()
+    if (
+        sys.platform == "darwin"
+        and path.parent.stat().st_mode & 0o2000 == 0
+    ):
+        pytest.skip("macOS 临时文件系统不保留 Linux setgid 目录位")
     assert path.parent.stat().st_mode & 0o7777 == 0o2750

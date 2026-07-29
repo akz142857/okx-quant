@@ -1,0 +1,40 @@
+[Unit]
+Description=OKX Quant Stage-C independent clock event signer %i
+
+[Service]
+Type=oneshot
+User=okxquant-stagec-clock-signer
+Group=okxquant-stagec-raw-readers
+UMask=0027
+StateDirectory=okx-quant-stage-c/external/signed-clock/%i
+StateDirectoryMode=0750
+PrivateNetwork=yes
+IPAddressDeny=any
+WorkingDirectory=/opt/okx-quant/demo-chaos/current
+LoadCredential=source-private-key.pem:/etc/okx-quant/stage-c/keys/clock-signer-private.pem
+ExecStart=/opt/okx-quant/demo-chaos/current/.venv/bin/python /opt/okx-quant/demo-chaos/current/scripts/stage_c_external_signer.py sign-fragment --source-role clock_collector --challenge /var/lib/okx-quant-stage-c/challenges/%i.json --registrar-public-key /etc/okx-quant/stage-c/keys/registrar-public.pem --collection systemd_collector=/var/lib/okx-quant-stage-c/external/raw-systemd/%i/systemd-source-raw.json --collection clock_collector=/var/lib/okx-quant-stage-c/external/raw-clock/%i/clock-source-raw.json --collection provider=/var/lib/okx-quant-stage-c/external/raw-provider/%i/provider-source-raw.json --collection okx_collector=/var/lib/okx-quant-stage-c/external/raw-okx/%i/okx-source-raw.json --collection journal_collector=/var/lib/okx-quant-stage-c/external/raw-journal/%i/journal-source-raw.json --acquirer-public-key systemd_collector_acquirer=/etc/okx-quant/stage-c/keys/systemd-acquirer-public.pem --acquirer-public-key clock_collector_acquirer=/etc/okx-quant/stage-c/keys/clock-acquirer-public.pem --acquirer-public-key provider_acquirer=/etc/okx-quant/stage-c/keys/provider-acquirer-public.pem --acquirer-public-key okx_collector_acquirer=/etc/okx-quant/stage-c/keys/okx-acquirer-public.pem --acquirer-public-key journal_collector_acquirer=/etc/okx-quant/stage-c/keys/journal-acquirer-public.pem --source-private-key %d/source-private-key.pem --input-wait-seconds 420 --output /var/lib/okx-quant-stage-c/external/signed-clock/%i/fragment.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/etc/okx-quant /opt/okx-quant/demo-chaos/current /var/lib/okx-quant-stage-c/challenges /var/lib/okx-quant-stage-c/external
+ReadWritePaths=/var/lib/okx-quant-stage-c/external/signed-clock/%i
+CapabilityBoundingSet=
+AmbientCapabilities=
+TimeoutStartSec=480
+
+[Install]
+WantedBy=multi-user.target

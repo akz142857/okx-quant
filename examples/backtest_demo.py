@@ -1,13 +1,14 @@
 """回测示例：对比三个策略在 BTC-USDT 4H 上的表现"""
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from okx_quant.backtest import BacktestEngine, BacktestReport
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.data.market import MarketDataFetcher
-from okx_quant.backtest import BacktestEngine, BacktestReport
-from okx_quant.strategy import MACrossStrategy, RSIMeanReversionStrategy, BollingerBandStrategy
+from okx_quant.strategy import BollingerBandStrategy, MACrossStrategy, RSIMeanReversionStrategy
 
 
 def run_backtest(df, strategy, inst_id, initial_capital=10000):

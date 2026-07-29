@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "action": "configure-stage-c-production-trust-v1",
+  "parser_manifest_sha256": "REPLACE_WITH_PARSER_MANIFEST_SHA256",
+  "raw_events_dir": "/etc/okx-quant/admission/stage-c/raw-events",
+  "scenarios": {
+    "REPLACE_WITH_EACH_OF_THE_13_RAW_SCENARIOS": {
+      "trust_state": "TRUST_CONFIGURED",
+      "driver_contract_sha256": "REPLACE_WITH_DRIVER_CONTRACT_SHA256",
+      "raw_events_file": "REPLACE_WITH_SCENARIO.jsonl",
+      "raw_events_sha256": "REPLACE_WITH_FROZEN_RAW_SHA256",
+      "raw_events_bytes": 1,
+      "registrar_public_key": {
+        "path": "/etc/okx-quant/keys/stage-c/REPLACE/registrar-public.pem",
+        "fingerprint_sha256": "REPLACE_WITH_KEY_FINGERPRINT"
+      },
+      "capability_authority_public_key": {
+        "path": "/etc/okx-quant/keys/stage-c/REPLACE/capability-public.pem",
+        "fingerprint_sha256": "REPLACE_WITH_DIFFERENT_KEY_FINGERPRINT"
+      },
+      "source_public_keys": {
+        "REPLACE_WITH_EVERY_EXACT_REQUIRED_ROLE": {
+          "path": "/etc/okx-quant/keys/stage-c/REPLACE/source-public.pem",
+          "fingerprint_sha256": "REPLACE_WITH_UNIQUE_KEY_FINGERPRINT"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,43 @@
+[Unit]
+Description=OKX Quant Stage-C independent OKX raw source %i
+After=network-online.target
+Before=okx-quant-stage-c-external-cleanup@%i.service
+OnFailure=okx-quant-stage-c-external-cleanup@%i.service
+
+[Service]
+Type=oneshot
+User=okxquant-stagec-okx-source
+Group=okxquant-stagec-raw-readers
+UMask=0027
+StateDirectory=okx-quant-stage-c/external/raw-okx/%i
+StateDirectoryMode=0750
+WorkingDirectory=/opt/okx-quant/demo-chaos/current
+EnvironmentFile=/etc/okx-quant/stage-c/external-okx-source.env
+LoadCredential=acquirer-private-key.pem:/etc/okx-quant/stage-c/keys/okx-acquirer-private.pem
+ExecStart=/opt/okx-quant/demo-chaos/current/.venv/bin/python /opt/okx-quant/demo-chaos/current/scripts/stage_c_external_source.py --role okx_collector --report /var/lib/okx-quant-stage-c/external/actor/%i/actor-report.json --challenge /var/lib/okx-quant-stage-c/challenges/%i.json --registrar-public-key /etc/okx-quant/stage-c/keys/registrar-public.pem --acquirer-private-key %d/acquirer-private-key.pem --start-after /var/lib/okx-quant-stage-c/external/raw-systemd/%i/driver-ready.json --config /etc/okx-quant/stage-c/external-okx-source.yaml --input-wait-seconds 360 --output /var/lib/okx-quant-stage-c/external/raw-okx/%i/okx-source-raw.json
+ExecStartPost=/usr/bin/chmod 0640 /var/lib/okx-quant-stage-c/external/raw-okx/%i/okx-source-raw.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/etc/okx-quant /opt/okx-quant/demo-chaos/current /var/lib/okx-quant-stage-c/challenges /var/lib/okx-quant-stage-c/external/actor/%i/actor-report.json
+ReadWritePaths=/var/lib/okx-quant-stage-c/external/raw-okx/%i
+CapabilityBoundingSet=
+AmbientCapabilities=
+TimeoutStartSec=420
+
+[Install]
+WantedBy=multi-user.target

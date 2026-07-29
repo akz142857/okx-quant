@@ -23,12 +23,25 @@ from okx_quant.domain.orders import OrderIntent, OrderState, SystemMode
 from okx_quant.infrastructure.db import SQLiteJournal
 from okx_quant.infrastructure.logging import JsonFormatter, SecretRedactionFilter
 from okx_quant.infrastructure.metrics import MetricRegistry, MetricsServer
-from okx_quant.infrastructure.operations import BackupService, HeartbeatService
-from okx_quant.ops.watchdog import inspect
+from okx_quant.infrastructure.operations import (
+    BackupService,
+    HeartbeatService,
+    ResourceSampler,
+)
+from okx_quant.ops.backup_receipt import validate_restore_evidence
+from okx_quant.ops.watchdog import (
+    _advance_incident,
+    _load_incident_state,
+    _save_incident_state,
+    inspect,
+)
 from scripts import cold_restore
 from scripts import test_api as api_diagnostic
 from scripts.cold_restore import install_verified_database
-from scripts.offsite_restore_check import _version_id
+from scripts.offsite_restore_check import (
+    _assert_manifest_receipt_binding,
+    _materialize_verified_restore,
+)
 
 
 def _backup_signing_keys(tmp_path: Path) -> tuple[Path, Path]:
@@ -81,6 +94,107 @@ def test_online_backup_can_be_opened_readonly_and_restored(tmp_path):
 
 
 @pytest.mark.unit
+def test_resource_sampler_persists_identity_limits_and_breaches(
+    tmp_path,
+    monkeypatch,
+):
+    journal = SQLiteJournal(tmp_path / "trading.db")
+    proc = tmp_path / "proc"
+    cgroup = tmp_path / "cgroup" / "runtime"
+    (proc / "self/fd").mkdir(parents=True)
+    (proc / "sys/kernel/random").mkdir(parents=True)
+    cgroup.mkdir(parents=True)
+    (proc / "self/status").write_text(
+        "VmRSS:\t90000 kB\nThreads:\t4\n",
+        encoding="ascii",
+    )
+    (proc / "self/cgroup").write_text("0::/runtime\n", encoding="ascii")
+    (proc / "sys/kernel/random/boot_id").write_text(
+        "boot-identity\n",
+        encoding="ascii",
+    )
+    for index in range(4):
+        (proc / "self/fd" / str(index)).touch()
+    (cgroup / "memory.events").write_text(
+        "oom 0\noom_kill 0\n",
+        encoding="ascii",
+    )
+    (cgroup / "cpu.stat").write_text(
+        "nr_throttled 2\nthrottled_usec 300\n",
+        encoding="ascii",
+    )
+    (cgroup / "pids.current").write_text("4\n", encoding="ascii")
+    sampler = ResourceSampler(
+        journal,
+        database_path=journal.path,
+        interval_s=60,
+        memory_high_bytes=100_000_000,
+        memory_max_bytes=120_000_000,
+        limit_nofile=100,
+        tasks_max=32,
+        max_database_bytes=1_000_000_000,
+        max_wal_bytes=100_000_000,
+        max_wal_checkpoint_age_s=300,
+        max_database_growth_bytes_per_day=10_000_000,
+        min_free_bytes=1,
+        min_free_inodes=1,
+        release_identity="a" * 40,
+        config_identity="b" * 64,
+        proc_root=proc,
+        cgroup_root=tmp_path / "cgroup",
+    )
+    payload = sampler.sample_once()
+    assert payload["boot_id"] == "boot-identity"
+    assert payload["release_identity"] == "a" * 40
+    assert payload["rss_bytes"] == 92_160_000
+    assert payload["wal_checkpoint_age_seconds"] < 1
+    assert payload["wal_checkpoint_busy"] == 0
+    assert payload["wal_checkpoint_backlog_frames"] == 0
+    assert payload["wal_checkpoint_backlog_bytes"] == 0
+    assert "RSS_85_PERCENT_MEMORY_HIGH" in payload["breach_codes"]
+    assert any(
+        row["event_name"] == "page.resource_threshold"
+        for row in journal.get_unpublished_outbox()
+    )
+
+    sampler._last_wal_checkpoint_at = time.time() - 200
+    monkeypatch.setattr(
+        journal,
+        "passive_wal_checkpoint",
+        lambda: {
+            "busy": 0,
+            "log_frames": 61,
+            "checkpointed_frames": 2,
+            "backlog_frames": 59,
+            "page_size_bytes": 4096,
+            "backlog_bytes": 59 * (4096 + 24),
+            "completed_at": time.time(),
+        },
+    )
+    partial = sampler.sample_once()
+    assert partial["wal_checkpoint_busy"] == 0
+    assert partial["wal_checkpoint_backlog_frames"] == 59
+    assert partial["wal_checkpoint_age_seconds"] >= 199
+
+    monkeypatch.setattr(
+        journal,
+        "passive_wal_checkpoint",
+        lambda: {
+            "busy": 0,
+            "log_frames": 61,
+            "checkpointed_frames": 61,
+            "backlog_frames": 0,
+            "page_size_bytes": 4096,
+            "backlog_bytes": 0,
+            "completed_at": time.time(),
+        },
+    )
+    completed = sampler.sample_once()
+    assert completed["wal_checkpoint_age_seconds"] < 1
+    journal.close()
+
+
+@pytest.mark.unit
 def test_healthz_reports_liveness_while_readyz_reports_readiness():
     server = MetricsServer(
         MetricRegistry(),
@@ -89,7 +203,10 @@ def test_healthz_reports_liveness_while_readyz_reports_readiness():
         health=lambda: (False, {"ready": False}),
         liveness=lambda: (True, {"live": True}),
     )
-    server.start()
+    try:
+        server.start()
+    except PermissionError:
+        pytest.skip("当前测试沙箱禁止绑定 localhost socket")
     try:
         assert server._server is not None
         port = server._server.server_address[1]
@@ -202,7 +319,7 @@ def test_encrypted_daily_archive_passes_isolated_restore_drill(tmp_path):
     result = json.loads(evidence.read_text())
     assert result["ok"]
     assert result["checksum_verified"]
-    assert result["schema_version"] == 9
+    assert result["schema_version"] == 11
     assert result["account_id"] == "demo-account"
     assert result["elapsed_seconds"] <= result["max_rto_seconds"]
     journal.close()
@@ -315,7 +432,7 @@ def test_cold_restore_atomically_installs_and_latches_maintenance(tmp_path):
         replace_existing=False,
         confirmation="",
         expected_account_id="demo-account",
-        expected_schema_version=9,
+        expected_schema_version=11,
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
     )
@@ -338,7 +455,7 @@ def test_cold_restore_atomically_installs_and_latches_maintenance(tmp_path):
             replace_existing=False,
             confirmation="",
             expected_account_id="demo-account",
-            expected_schema_version=9,
+            expected_schema_version=11,
         )
 
 
@@ -376,7 +493,7 @@ def test_cold_restore_switch_failure_keeps_canonical_target(tmp_path, monkeypatc
                 f"REPLACE {target.absolute()} WITH ACCOUNT demo-account"
             ),
             expected_account_id="demo-account",
-            expected_schema_version=9,
+            expected_schema_version=11,
             owner_uid=os.getuid(),
             owner_gid=os.getgid(),
         )
@@ -441,7 +558,7 @@ def test_cold_restore_checkpoints_old_wal_before_atomic_switch(tmp_path):
             f"REPLACE {target.absolute()} WITH ACCOUNT demo-account"
         ),
         expected_account_id="demo-account",
-        expected_schema_version=9,
+        expected_schema_version=11,
         owner_uid=os.getuid(),
         owner_gid=os.getgid(),
     )
@@ -467,7 +584,12 @@ def test_cold_restore_cli_wires_owner_only_to_install(tmp_path, monkeypatch):
     output = tmp_path / "cold-restore.json"
     target = tmp_path / "production" / "trading.db"
     captured = {}
-    monkeypatch.setattr(cold_restore, "_assert_trader_stopped", lambda: None)
+    checked_units = []
+    monkeypatch.setattr(
+        cold_restore,
+        "_assert_trader_stopped",
+        lambda unit: checked_units.append(unit),
+    )
     monkeypatch.setattr(
         cold_restore.pwd,
         "getpwnam",
@@ -483,7 +605,7 @@ def test_cold_restore_cli_wires_owner_only_to_install(tmp_path, monkeypatch):
         "verify_manifest",
         lambda *_args: {
             "account_id": "demo-account",
-            "schema_version": 9,
+            "schema_version": 11,
             "signing_key_id": "signing-v1",
             "encryption_key_id": "encryption-v1",
             "sha256": "a" * 64,
@@ -500,7 +622,7 @@ def test_cold_restore_cli_wires_owner_only_to_install(tmp_path, monkeypatch):
         expected_schema_version,
     ):
         assert expected_account_id == "demo-account"
-        assert expected_schema_version == 9
+        assert expected_schema_version == 11
         return {"database_ok": True}
 
     def fake_install(candidate, installed_target, **kwargs):
@@ -536,6 +658,7 @@ def test_cold_restore_cli_wires_owner_only_to_install(tmp_path, monkeypatch):
     )
 
     assert cold_restore.main() == 0
+    assert checked_units == ["okx-quant.service"]
     assert captured["owner_uid"] == 1234
     assert captured["owner_gid"] == 2345
     assert json.loads(output.read_text(encoding="utf-8"))["installed"]
@@ -709,19 +832,179 @@ def test_external_watchdog_pages_directly_on_database_volume_exhaustion(
 
 
 @pytest.mark.unit
-def test_offsite_restore_requires_and_uses_an_immutable_s3_version(monkeypatch):
-    observed = {}
-
-    def fake_run(argv, **_kwargs):
-        observed["argv"] = argv
-        return SimpleNamespace(stdout='{"VersionId":"version-123"}')
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    assert _version_id("backup-bucket", "prefix/archive.enc") == "version-123"
-    assert observed["argv"][0:3] == ["aws", "s3api", "head-object"]
-    assert observed["argv"][observed["argv"].index("--bucket") + 1] == (
-        "backup-bucket"
+def test_watchdog_event_id_is_stable_until_recovery_then_rotates(
+    tmp_path,
+):
+    state_path = tmp_path / "watchdog" / "incidents.json"
+    state = _load_incident_state(state_path)
+    unhealthy = {
+        "ok": False,
+        "heartbeat_fresh": False,
+        "unhealthy_heartbeat": False,
+        "mode": "ready",
+        "database_error": "",
+        "disk_unsafe": False,
+        "unsafe_positions": [],
+        "overdue_unknown_buys": [],
+    }
+    state, should_send = _advance_incident(
+        unhealthy,
+        state,
+        identity="demo-active",
     )
+    first_event_id = state["event_id"]
+    assert should_send
+    _save_incident_state(state_path, state)
+    state = _load_incident_state(state_path)
+    state["delivered"] = True
+    state, should_send = _advance_incident(
+        unhealthy,
+        state,
+        identity="demo-active",
+    )
+    assert not should_send
+    assert state["event_id"] == first_event_id
+
+    recovered = {**unhealthy, "ok": True}
+    state, should_send = _advance_incident(
+        recovered,
+        state,
+        identity="demo-active",
+    )
+    assert not should_send
+    assert state["event_id"] == ""
+    state, should_send = _advance_incident(
+        unhealthy,
+        state,
+        identity="demo-active",
+    )
+    assert should_send
+    assert state["event_id"] != first_event_id
+    assert state["generation"] == 2
+
+
+@pytest.mark.unit
+def test_offsite_restore_binds_signed_manifest_to_signed_receipt_exact_version():
+    receipt = {
+        "file": "trading-1.db.enc",
+        "account_id": "demo-account",
+        "schema_version": 11,
+        "snapshot_completed_at": 123,
+        "signing_key_id": "signing-v1",
+        "encryption_key_id": "encryption-v1",
+        "kms_key_id": "kms-v1",
+        "archive": {
+            "object_uri": "s3://backup/trading-1.db.enc",
+            "version_id": "exact-version-123",
+            "sha256": "a" * 64,
+            "bytes": 99,
+        },
+    }
+    manifest = {
+        "version": 2,
+        "file": receipt["file"],
+        "account_id": receipt["account_id"],
+        "schema_version": receipt["schema_version"],
+        "snapshot_completed_at": receipt["snapshot_completed_at"],
+        "signing_key_id": receipt["signing_key_id"],
+        "encryption_key_id": receipt["encryption_key_id"],
+        "sha256": receipt["archive"]["sha256"],
+        "offsite_archive": {
+            "object_uri": receipt["archive"]["object_uri"],
+            "version_id": receipt["archive"]["version_id"],
+            "bytes": receipt["archive"]["bytes"],
+            "kms_key_id": receipt["kms_key_id"],
+        },
+    }
+    _assert_manifest_receipt_binding(manifest, receipt)
+    manifest["offsite_archive"]["version_id"] = "latest-raced-version"
+    with pytest.raises(RuntimeError, match="绑定不一致"):
+        _assert_manifest_receipt_binding(manifest, receipt)
+
+
+@pytest.mark.unit
+def test_offsite_restore_materializes_exact_inputs_without_overwrite(tmp_path):
+    destination = tmp_path / "empty-host-recovery"
+    archive = _materialize_verified_restore(
+        destination=destination,
+        archive_name="trading-20260728T010203Z.db.enc",
+        archive_payload=b"encrypted",
+        manifest_payload=b'{"manifest":true}',
+        receipt_payload=b'{"receipt":true}',
+    )
+
+    assert archive.read_bytes() == b"encrypted"
+    assert archive.stat().st_mode & 0o777 == 0o600
+    assert archive.with_suffix(
+        archive.suffix + ".manifest.json"
+    ).read_bytes() == b'{"manifest":true}'
+    assert archive.with_suffix(
+        archive.suffix + ".offsite-receipt.json"
+    ).read_bytes() == b'{"receipt":true}'
+    with pytest.raises(RuntimeError, match="拒绝覆盖"):
+        _materialize_verified_restore(
+            destination=destination,
+            archive_name=archive.name,
+            archive_payload=b"other",
+            manifest_payload=b"other",
+            receipt_payload=b"other",
+        )
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts/offsite_restore_check.py"
+    ).read_text(encoding="utf-8")
+    assert '"head-object"' not in script
+
+
+@pytest.mark.unit
+def test_signed_restore_evidence_validates_exact_account_and_key(tmp_path):
+    now = time.time()
+    evidence = {
+        "version": 1,
+        "action": "attest-offsite-backup-restore",
+        "evidence_key_id": "backup-signing-v1",
+        "account_id": "demo-account",
+        "schema_version": 11,
+        "receipt_sha256": "a" * 64,
+        "archive_uri": "s3://backup/archive.enc",
+        "archive_version_id": "archive-version-1",
+        "archive_sha256": "b" * 64,
+        "archive_bytes": 123,
+        "manifest_uri": "s3://backup/archive.enc.manifest.json",
+        "manifest_version_id": "manifest-version-1",
+        "manifest_sha256": "c" * 64,
+        "manifest_bytes": 456,
+        "snapshot_completed_at": now - 2,
+        "roundtrip_started_at": now - 1,
+        "roundtrip_completed_at": now,
+        "restore": {
+            "ok": True,
+            "database_ok": True,
+            "checksum_verified": True,
+            "integrity_check": "ok",
+            "account_id": "demo-account",
+            "schema_version": 11,
+        },
+        "backup_slo_sample": {
+            "integrity": "ok",
+            "snapshot_completed_at": now - 2,
+            "offsite_readback_at": now,
+            "version_id": "archive-version-1",
+        },
+    }
+    assert validate_restore_evidence(
+        evidence,
+        expected_account_id="demo-account",
+        expected_key_id="backup-signing-v1",
+        now=now,
+    ) == evidence
+    with pytest.raises(ValueError, match="identity/time/version"):
+        validate_restore_evidence(
+            evidence,
+            expected_account_id="other-account",
+            expected_key_id="backup-signing-v1",
+            now=now,
+        )
 
 
 @pytest.mark.unit
@@ -740,6 +1023,97 @@ def test_post_start_verifier_checks_backup_before_restart_and_has_fail_safe():
     assert script.index(
         "systemctl start okx-quant-daily-backup.service"
     ) < script.index('systemctl restart "${SERVICE_NAME}"')
+    assert 'timeout --signal=TERM 60s systemctl restart "${SERVICE_NAME}"' in script
+    assert 'first_health_at - restart_requested_at))" -le 60' in script
+
+
+@pytest.mark.unit
+def test_demo_restore_service_never_writes_trader_journal():
+    project = Path(__file__).resolve().parents[1]
+    production_unit = (
+        project / "deploy/systemd/okx-quant-offsite-restore.service"
+    ).read_text(encoding="utf-8")
+    unit = (
+        project
+        / "deploy/systemd/okx-quant-demo-offsite-restore@.service"
+    ).read_text(encoding="utf-8")
+    assert "ExecStartPost=" not in unit
+    assert "import_backup_receipt.py" not in unit
+    assert "/var/lib/okx-quant/demo-%i" not in unit
+    assert "ReadOnlyPaths=/etc/okx-quant/keys /var/lib/okx-quant-backup/demo-%i" in unit
+    assert "ReadWritePaths=/var/lib/okx-quant-restore-evidence/demo-%i" in unit
+    assert "StateDirectory=okx-quant-restore-evidence/demo-%i" in unit
+    assert "StateDirectoryMode=0750" in unit
+    assert (
+        "ReadOnlyPaths=/etc/okx-quant/keys "
+        "/var/lib/okx-quant-backup/daily"
+    ) in production_unit
+    assert (
+        "ReadWritePaths=/var/lib/okx-quant-restore-evidence/daily"
+    ) in production_unit
+    assert (
+        "StateDirectory=okx-quant-restore-evidence/daily"
+    ) in production_unit
+    restore_script = (
+        project / "scripts/offsite_restore_check.py"
+    ).read_text(encoding="utf-8")
+    assert "dir=args.local_backup_dir" not in restore_script
+    assert "for temporary in args.local_backup_dir.glob" not in restore_script
+    assert "dir=work_dir" in restore_script
+    for role in ("shadow", "active", "chaos"):
+        trader = (
+            project / f"deploy/systemd/okx-quant-demo-{role}.service"
+        ).read_text(encoding="utf-8")
+        assert (
+            f"/var/lib/okx-quant-restore-evidence/demo-{role}" in trader
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "script",
+    ("offsite_restore_check.py", "create_soak_epoch_request.py"),
+)
+def test_runbook_scripts_resolve_imports_when_executed_by_path(script):
+    project = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, str(project / "scripts" / script), "--help"],
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.unit
+def test_offsite_restore_script_resolves_imports_outside_project(tmp_path):
+    project = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(project / "scripts/offsite_restore_check.py"),
+            "--help",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.unit
+def test_backup_timers_leave_completion_budget_inside_five_minute_rpo():
+    project = Path(__file__).resolve().parents[1]
+    local_timer = (
+        project / "deploy/systemd/okx-quant-daily-backup.timer"
+    ).read_text(encoding="utf-8")
+    offsite_timer = (
+        project / "deploy/systemd/okx-quant-offsite-restore.timer"
+    ).read_text(encoding="utf-8")
+    assert "OnUnitActiveSec=1min" in local_timer
+    assert "OnUnitActiveSec=2min" in offsite_timer
 
 
 @pytest.mark.unit

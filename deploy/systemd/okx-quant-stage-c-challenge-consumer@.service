@@ -1,0 +1,38 @@
+[Unit]
+Description=OKX Quant Stage-C global one-shot challenge consumer %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=okxquant-stagec-consumer
+Group=okxquant-stagec-raw-readers
+UMask=0027
+StateDirectory=okx-quant-stage-c/consumption
+StateDirectoryMode=0750
+WorkingDirectory=/opt/okx-quant/demo-chaos/current
+LoadCredential=consumer-private-key.pem:/etc/okx-quant/stage-c/keys/challenge-consumer-private.pem
+ExecStart=/opt/okx-quant/demo-chaos/current/.venv/bin/python /opt/okx-quant/demo-chaos/current/scripts/stage_c_chaos_producer.py consume-challenge --challenge /var/lib/okx-quant-stage-c/challenges/%i.json --registrar-public-key /etc/okx-quant/stage-c/keys/registrar-public.pem --consumer-private-key %d/consumer-private-key.pem --aws-executable /usr/bin/aws --input-wait-seconds 300 --output /var/lib/okx-quant-stage-c/consumption/%i.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/etc/okx-quant /opt/okx-quant/demo-chaos/current /var/lib/okx-quant-stage-c/challenges
+ReadWritePaths=/var/lib/okx-quant-stage-c/consumption
+CapabilityBoundingSet=
+AmbientCapabilities=
+TimeoutStartSec=360
+
+[Install]
+WantedBy=multi-user.target

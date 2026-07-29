@@ -1,0 +1,39 @@
+[Unit]
+Description=OKX Quant Stage-C independent native JSONL assembler %i
+
+[Service]
+Type=oneshot
+User=okxquant-stagec-parser
+Group=okxquant-stagec-raw-readers
+UMask=0027
+StateDirectory=okx-quant-stage-c/external/assembled/%i
+StateDirectoryMode=0750
+PrivateNetwork=yes
+IPAddressDeny=any
+WorkingDirectory=/opt/okx-quant/demo-chaos/current
+ExecStart=/opt/okx-quant/demo-chaos/current/.venv/bin/python /opt/okx-quant/demo-chaos/current/scripts/stage_c_external_signer.py assemble --challenge /var/lib/okx-quant-stage-c/challenges/%i.json --consumption-receipt /var/lib/okx-quant-stage-c/consumption/%i.json --registrar-public-key /etc/okx-quant/stage-c/keys/registrar-public.pem --consumer-public-key /etc/okx-quant/stage-c/keys/challenge-consumer-public.pem --capability-authority-public-key /etc/okx-quant/stage-c/keys/capability-authority-public.pem --collection systemd_collector=/var/lib/okx-quant-stage-c/external/raw-systemd/%i/systemd-source-raw.json --collection clock_collector=/var/lib/okx-quant-stage-c/external/raw-clock/%i/clock-source-raw.json --collection provider=/var/lib/okx-quant-stage-c/external/raw-provider/%i/provider-source-raw.json --collection okx_collector=/var/lib/okx-quant-stage-c/external/raw-okx/%i/okx-source-raw.json --collection journal_collector=/var/lib/okx-quant-stage-c/external/raw-journal/%i/journal-source-raw.json --fragment systemd_collector=/var/lib/okx-quant-stage-c/external/signed-systemd/%i/fragment.json --fragment clock_collector=/var/lib/okx-quant-stage-c/external/signed-clock/%i/fragment.json --fragment provider=/var/lib/okx-quant-stage-c/external/signed-provider/%i/fragment.json --fragment okx_collector=/var/lib/okx-quant-stage-c/external/signed-okx/%i/fragment.json --fragment journal_collector=/var/lib/okx-quant-stage-c/external/signed-journal/%i/fragment.json --acquirer-public-key systemd_collector_acquirer=/etc/okx-quant/stage-c/keys/systemd-acquirer-public.pem --acquirer-public-key clock_collector_acquirer=/etc/okx-quant/stage-c/keys/clock-acquirer-public.pem --acquirer-public-key provider_acquirer=/etc/okx-quant/stage-c/keys/provider-acquirer-public.pem --acquirer-public-key okx_collector_acquirer=/etc/okx-quant/stage-c/keys/okx-acquirer-public.pem --acquirer-public-key journal_collector_acquirer=/etc/okx-quant/stage-c/keys/journal-acquirer-public.pem --source-public-key challenge_consumer=/etc/okx-quant/stage-c/keys/challenge-consumer-public.pem --source-public-key fault_driver=/etc/okx-quant/stage-c/keys/fault-driver-public.pem --source-public-key parser_signer=/etc/okx-quant/stage-c/keys/parser-signer-public.pem --source-public-key provider_receipt_authority=/etc/okx-quant/stage-c/keys/provider-receipt-authority-public.pem --source-public-key systemd_collector=/etc/okx-quant/stage-c/keys/systemd-signer-public.pem --source-public-key systemd_collector_acquirer=/etc/okx-quant/stage-c/keys/systemd-acquirer-public.pem --source-public-key clock_collector=/etc/okx-quant/stage-c/keys/clock-signer-public.pem --source-public-key clock_collector_acquirer=/etc/okx-quant/stage-c/keys/clock-acquirer-public.pem --source-public-key provider=/etc/okx-quant/stage-c/keys/provider-signer-public.pem --source-public-key provider_acquirer=/etc/okx-quant/stage-c/keys/provider-acquirer-public.pem --source-public-key okx_collector=/etc/okx-quant/stage-c/keys/okx-signer-public.pem --source-public-key okx_collector_acquirer=/etc/okx-quant/stage-c/keys/okx-acquirer-public.pem --source-public-key journal_collector=/etc/okx-quant/stage-c/keys/journal-signer-public.pem --source-public-key journal_collector_acquirer=/etc/okx-quant/stage-c/keys/journal-acquirer-public.pem --input-wait-seconds 480 --output /var/lib/okx-quant-stage-c/external/assembled/%i/native-events.jsonl
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/etc/okx-quant /opt/okx-quant/demo-chaos/current /var/lib/okx-quant-stage-c/challenges /var/lib/okx-quant-stage-c/consumption /var/lib/okx-quant-stage-c/external
+ReadWritePaths=/var/lib/okx-quant-stage-c/external/assembled/%i
+CapabilityBoundingSet=
+AmbientCapabilities=
+TimeoutStartSec=540
+
+[Install]
+WantedBy=multi-user.target

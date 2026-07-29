@@ -8,6 +8,7 @@ import grp
 import json
 import os
 import pwd
+import re
 import shutil
 import sqlite3
 import stat
@@ -23,15 +24,20 @@ else:
     from restore_drill import decrypt, verify, verify_manifest
 
 
-def _assert_trader_stopped() -> None:
+_SYSTEMD_UNIT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}\.service")
+
+
+def _assert_trader_stopped(unit: str) -> None:
+    if not _SYSTEMD_UNIT.fullmatch(unit):
+        raise ValueError("trader systemd unit 名称非法")
     result = subprocess.run(
-        ["systemctl", "is-active", "--quiet", "okx-quant.service"],
+        ["systemctl", "is-active", "--quiet", unit],
         check=False,
         timeout=10,
     )
     if result.returncode == 0:
         raise RuntimeError(
-            "okx-quant.service 仍在运行，拒绝替换交易数据库"
+            f"{unit} 仍在运行，拒绝替换交易数据库"
         )
 
 
@@ -248,7 +254,7 @@ def main() -> int:
     parser.add_argument("backup", type=Path)
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--expected-account-id", required=True)
-    parser.add_argument("--expected-schema-version", type=int, default=9)
+    parser.add_argument("--expected-schema-version", type=int, default=11)
     parser.add_argument("--manifest-public-key", required=True, type=Path)
     parser.add_argument("--expected-signing-key-id", required=True)
     parser.add_argument("--expected-encryption-key-id", required=True)
@@ -257,13 +263,18 @@ def main() -> int:
         default="OKX_QUANT_BACKUP_PASSPHRASE",
     )
     parser.add_argument("--actor", required=True)
+    parser.add_argument(
+        "--service-unit",
+        default="okx-quant.service",
+        help="必须已停止的唯一 trader systemd service",
+    )
     parser.add_argument("--owner-user", default="okxquant-trader")
     parser.add_argument("--owner-group", default="okxquant-data")
     parser.add_argument("--replace-existing", action="store_true")
     parser.add_argument("--confirm", default="")
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
-    _assert_trader_stopped()
+    _assert_trader_stopped(args.service_unit)
     owner_uid = pwd.getpwnam(args.owner_user).pw_uid
     owner_gid = grp.getgrnam(args.owner_group).gr_gid
     manifest = verify_manifest(

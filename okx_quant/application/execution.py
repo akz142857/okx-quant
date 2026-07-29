@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import queue
+import re
 import threading
 import time
 import uuid
@@ -60,6 +63,11 @@ class ExecutionRequest:
     decision_id: str = ""
     stop_loss: Decimal = Decimal("0")
     take_profit: Decimal = Decimal("0")
+    cl_ord_id: str = ""
+    source: str = "strategy"
+    probe_id: str = ""
+    probe_lease_owner: str = ""
+    probe_fencing_token: int = 0
 
 
 class ExecutionCoordinator:
@@ -82,6 +90,7 @@ class ExecutionCoordinator:
         atomic_risk_guard: (
             Callable[[ExecutionRequest], IntentRiskGuard] | None
         ) = None,
+        allowed_buy_sources: frozenset[str] | None = None,
     ):
         self.exchange = exchange
         self.journal = journal
@@ -91,6 +100,7 @@ class ExecutionCoordinator:
         self.operation_lock = operation_lock or threading.RLock()
         self.entry_guard = entry_guard
         self.atomic_risk_guard = atomic_risk_guard
+        self.allowed_buy_sources = allowed_buy_sources
         self._projection_healthy = threading.Event()
         self._projection_healthy.set()
         self._fill_handlers: list[Callable[[OrderIntent, Decimal], None]] = []
@@ -149,6 +159,33 @@ class ExecutionCoordinator:
             raise ValueError(f"无效订单方向: {request.side}")
         if request.base_qty <= 0:
             raise ValueError("下单数量必须大于 0")
+        if request.cl_ord_id and not re.fullmatch(
+            r"[A-Za-z0-9]{1,32}",
+            request.cl_ord_id,
+        ):
+            raise ValueError("cl_ord_id 必须是 1..32 位字母数字")
+        if request.source == "demo_validation_probe" and request.side == "buy" and (
+            not request.probe_id
+            or not request.probe_lease_owner
+            or request.probe_fencing_token <= 0
+        ):
+            raise ValueError("Demo probe intent 必须绑定当前 saga lease capability")
+        if request.source == "demo_validation_probe" and not request.probe_id:
+            raise ValueError("Demo probe intent 必须绑定 probe_id")
+        if request.source != "demo_validation_probe" and (
+            request.probe_id
+            or request.probe_lease_owner
+            or request.probe_fencing_token
+        ):
+            raise ValueError("非 Demo probe intent 禁止携带 probe capability")
+        if (
+            request.side == "buy"
+            and self.allowed_buy_sources is not None
+            and request.source not in self.allowed_buy_sources
+        ):
+            raise RuntimeError(
+                f"当前部署禁止 BUY source={request.source}"
+            )
         if request.side == "buy" and not self._projection_healthy.is_set():
             raise RuntimeError("订单投影已失败，禁止新增风险直至重启恢复")
 
@@ -198,7 +235,10 @@ class ExecutionCoordinator:
 
         intent = OrderIntent(
             intent_id=uuid.uuid4().hex,
-            cl_ord_id=generate_client_order_id(request.side),
+            cl_ord_id=(
+                request.cl_ord_id
+                or generate_client_order_id(request.side)
+            ),
             decision_id=request.decision_id,
             inst_id=request.inst_id,
             side=request.side,
@@ -207,6 +247,8 @@ class ExecutionCoordinator:
             submission_reference_price=request.reference_price,
             requested_stop_loss=request.stop_loss,
             requested_take_profit=request.take_profit,
+            source=request.source,
+            probe_id=request.probe_id,
             created_at=time.time(),
         )
         atomic_guard = (
@@ -217,6 +259,8 @@ class ExecutionCoordinator:
         intent = self.journal.create_order_intent(
             intent,
             risk_guard=atomic_guard,
+            probe_lease_owner=request.probe_lease_owner,
+            probe_fencing_token=request.probe_fencing_token,
         )
         if request.side == "buy":
             try:
@@ -243,6 +287,8 @@ class ExecutionCoordinator:
                     "inst_id": intent.inst_id,
                     "side": intent.side,
                     "requested_base_qty": str(intent.requested_base_qty),
+                    "source": intent.source,
+                    "probe_id": intent.probe_id,
                 },
             )
             return intent
@@ -261,11 +307,28 @@ class ExecutionCoordinator:
         self.journal.record_event(
             "order_submitting",
             correlation_id=intent.intent_id,
-            payload={"inst_id": intent.inst_id, "side": intent.side, "cl_ord_id": intent.cl_ord_id},
+            payload={
+                "inst_id": intent.inst_id,
+                "side": intent.side,
+                "cl_ord_id": intent.cl_ord_id,
+                "source": intent.source,
+                "probe_id": intent.probe_id,
+                "entry_fence_sha256": (
+                    hashlib.sha256(
+                        json.dumps(
+                            entry_token,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
+                    if request.side == "buy"
+                    else ""
+                ),
+            },
         )
-        # `order_submitting` 本身是可注入/可阻塞的 durable 写；它返回前 WS
-        # 可能已经跨入新的连接 epoch。POST 紧前必须做最后一次门禁校验，
-        # 否则会在明确 DEGRADED 后仍新增风险。
+        # `order_submitting` 本身是可注入/可阻塞的 durable 写；这里先快速
+        # 拒绝已经失效的门禁。真正的最终校验由 pre_send_guard 穿透到
+        # REST，在全局 rate-limit 等待完成后、socket write 紧前执行。
         if request.side == "buy":
             try:
                 self._assert_entry_guard(entry_token)
@@ -278,6 +341,21 @@ class ExecutionCoordinator:
                 )
                 raise
 
+        pre_send_guard: Callable[[], None] | None = None
+        if request.side == "buy":
+            def assert_buy_transport_capability() -> None:
+                self._assert_entry_guard(entry_token)
+                if request.source == "demo_validation_probe":
+                    self.journal.assert_probe_order_capability(
+                        probe_id=request.probe_id,
+                        owner=request.probe_lease_owner,
+                        fencing_token=request.probe_fencing_token,
+                        cl_ord_id=intent.cl_ord_id,
+                        inst_id=request.inst_id,
+                    )
+
+            pre_send_guard = assert_buy_transport_capability
+
         try:
             result = self.exchange.place_market_order(
                 inst_id=request.inst_id,
@@ -286,6 +364,7 @@ class ExecutionCoordinator:
                 tgt_ccy="base_ccy",
                 cl_ord_id=intent.cl_ord_id,
                 max_slippage=self.max_slippage_ratio,
+                pre_send_guard=pre_send_guard,
             )
         except Exception as exc:
             if self._is_ambiguous_submission_error(exc):

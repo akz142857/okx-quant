@@ -25,11 +25,21 @@ from okx_quant.research.provenance import (
 )
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+DEMO_LEDGER_VERSION = 2
+NOT_APPLICABLE_CANARY_READINESS_SHA256 = hashlib.sha256(
+    b"okx-quant/canary-readiness/not-applicable/v1"
+).hexdigest()
 _ADMISSION_KEYS = {
     "version",
     "action",
     "evidence_sha256",
     "ledger_head_hash",
+    "demo_ledger_version",
+    "slo_schema",
+    "slo_policy_hash",
+    "empty_host_restore_sha256",
+    "stage_c_coverage_sha256",
+    "canary_readiness_sha256",
     "commit_sha",
     "config_hash",
     "account_id",
@@ -66,11 +76,22 @@ _OBSERVATION_ANCHOR_KEYS = {
 }
 
 
+def _slo_v2_identity() -> tuple[str, str]:
+    # Lazy import avoids the package initialization cycle
+    # slo -> research.costs -> research.__init__ -> admission.
+    from okx_quant.ops.slo import SLO_V2_POLICY_HASH, SLO_V2_SCHEMA
+
+    return SLO_V2_SCHEMA, SLO_V2_POLICY_HASH
+
+
 def build_admission_request(
     evidence: dict,
     *,
     evidence_sha256: str,
     ledger_head_hash: str,
+    empty_host_restore_sha256: str,
+    stage_c_coverage_sha256: str,
+    canary_readiness_sha256: str,
     approved_max_stress_loss_usdt: float,
     lifetime_s: int = 3600,
     now: int | None = None,
@@ -82,6 +103,12 @@ def build_admission_request(
         raise ValueError("evidence_sha256 必须是 SHA-256")
     if not _SHA256.fullmatch(ledger_head_hash):
         raise ValueError("ledger_head_hash 必须是 SHA-256")
+    if not _SHA256.fullmatch(empty_host_restore_sha256):
+        raise ValueError("empty_host_restore_sha256 必须是 SHA-256")
+    if not _SHA256.fullmatch(stage_c_coverage_sha256):
+        raise ValueError("stage_c_coverage_sha256 必须是 SHA-256")
+    if not _SHA256.fullmatch(canary_readiness_sha256):
+        raise ValueError("canary_readiness_sha256 必须是 SHA-256")
     if (
         isinstance(approved_max_stress_loss_usdt, bool)
         or not isinstance(approved_max_stress_loss_usdt, (int, float))
@@ -92,11 +119,18 @@ def build_admission_request(
     if type(lifetime_s) is not int or not 300 <= lifetime_s <= 86400:
         raise ValueError("生产准入批准有效期必须是 300..86400 秒")
     issued_at = int(time.time() if now is None else now)
+    slo_schema, slo_policy_hash = _slo_v2_identity()
     return {
-        "version": 1,
+        "version": 2,
         "action": "admit-production",
         "evidence_sha256": evidence_sha256,
         "ledger_head_hash": ledger_head_hash,
+        "empty_host_restore_sha256": empty_host_restore_sha256,
+        "stage_c_coverage_sha256": stage_c_coverage_sha256,
+        "canary_readiness_sha256": canary_readiness_sha256,
+        "demo_ledger_version": DEMO_LEDGER_VERSION,
+        "slo_schema": slo_schema,
+        "slo_policy_hash": slo_policy_hash,
         "commit_sha": str(metadata["commit_sha"]).lower(),
         "config_hash": str(metadata["config_hash"]).lower(),
         "account_id": str(metadata["account_id"]),
@@ -131,6 +165,9 @@ class AdmissionApprovalVerifier:
         evidence: dict,
         evidence_sha256: str,
         ledger_head_hash: str,
+        empty_host_restore_sha256: str,
+        stage_c_coverage_sha256: str,
+        canary_readiness_sha256: str,
         approved_max_stress_loss_usdt: float,
     ) -> dict:
         claims = verify_ed25519_artifact(
@@ -140,12 +177,19 @@ class AdmissionApprovalVerifier:
         )
         if set(claims) != _ADMISSION_KEYS:
             raise ValueError("生产准入批准 claims 不完整或包含未知字段")
-        if claims["version"] != 1 or claims["action"] != "admit-production":
+        if claims["version"] != 2 or claims["action"] != "admit-production":
             raise ValueError("生产准入批准版本或 action 非法")
         metadata = evidence["evidence_metadata"]
+        slo_schema, slo_policy_hash = _slo_v2_identity()
         expected = {
             "evidence_sha256": evidence_sha256,
             "ledger_head_hash": ledger_head_hash,
+            "empty_host_restore_sha256": empty_host_restore_sha256,
+            "stage_c_coverage_sha256": stage_c_coverage_sha256,
+            "canary_readiness_sha256": canary_readiness_sha256,
+            "demo_ledger_version": DEMO_LEDGER_VERSION,
+            "slo_schema": slo_schema,
+            "slo_policy_hash": slo_policy_hash,
             "commit_sha": str(metadata["commit_sha"]).lower(),
             "config_hash": str(metadata["config_hash"]).lower(),
             "account_id": str(metadata["account_id"]),

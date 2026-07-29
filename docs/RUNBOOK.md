@@ -119,7 +119,10 @@ commit/tree、全源码/脚本/测试 manifest 和输出完整性，不依赖部
 缺少任一 CI artifact、源码 manifest 不一致或 evidence 非零退出都会拒绝发布。
 
 ```bash
-systemctl enable --now okx-quant-watchdog.service okx-quant-daily-backup.timer
+systemctl enable --now \
+  okx-quant-watchdog.service \
+  okx-quant-daily-backup.timer \
+  okx-quant-offsite-restore.timer
 /opt/okx-quant/current/scripts/verify_deploy.sh post-start
 ```
 
@@ -132,6 +135,73 @@ systemctl enable --now okx-quant-watchdog.service okx-quant-daily-backup.timer
 不重新按当前时间拒绝已经合法激活的部署；任一身份或 artifact 改变都会要求新的
 有效证据/批准并替换 receipt。风险批准公钥轮换时必须保留能验证当前 receipt 所引用
 批准的历史公钥，直到该 deployment 完成受控升级。
+
+Canary 是两阶段启动。第一阶段 `post-start` 只证明安全内核在真实 UID/cgroup/boot
+中存活；`/readyz` 此时必须返回非 2xx，entries 保持 `HALTED`。脚本把 `/healthz`
+中的一次性 `runtime_instance_id`、`boot_id`、startup nonce 和 hard epoch 原子保存为：
+
+```text
+/var/lib/okx-quant/admission/canary-runtime-status.json
+```
+
+独立核验人员必须在五项 post-start 事实都已写入 Object Lock 后，生成
+`checks.json`。它必须精确包含 `alert_challenge_received`、
+`backup_exact_version_restored`、`protected_position_or_flat`、
+`rest_ws_reconciliation_safe` 和 `runtime_safety_kernel_live_within_60s`；每项均包含
+`passed=true`、最近 5 分钟内的 `observed_at`、S3 URI、exact version 和 SHA-256。
+每个对象还必须由 transition 预先绑定的独立 verifier key 签名，并至少保留 35 天。
+五类事实生产者的公钥也必须在 transition 中按 check 名称预绑定，且与 operator、
+risk 和 check verifier 身份分离。check verifier 只能消费该来源签署、绑定当前
+runtime/boot 且不超过 5 分钟的严格 schema 机器证据，不能通过人工确认词自证。
+该 verifier 公钥以 `root:root 0644` 安装到
+`/etc/okx-quant/keys/canary-check-verifier-public.pem`，私钥不得进入 trader 主机。
+随后在不重启 trader 的前提下逐一 GET exact version、核验原始 bytes/签名/运行时身份，
+再完成短效双签：
+
+```bash
+uv run python scripts/canary_artifact.py request-activation \
+  --transition /etc/okx-quant/canary/transition.json \
+  --policy /etc/okx-quant/canary/policy.json \
+  --operator-public-key /etc/okx-quant/keys/canary-operator-public.pem \
+  --risk-public-key /etc/okx-quant/keys/canary-risk-public.pem \
+  --runtime-status /var/lib/okx-quant/admission/canary-runtime-status.json \
+  --checks /secure-transfer/checks.json \
+  --checks-verifier-public-key /etc/okx-quant/keys/canary-check-verifier-public.pem \
+  --minimum-retain-until 2027-09-01T00:00:00+00:00 \
+  --kms-key-id EVIDENCE_KMS_KEY_ID \
+  --lifetime-seconds 600 \
+  --output /secure-transfer/post-start-activation.request.json
+
+# 仅在独立审批工作站完成；私钥不得安装到 trader。
+# 两个签名必须在各自审批域分别完成，任何进程都不得同时接触两把私钥。
+uv run python scripts/canary_artifact.py sign-role \
+  --role operator \
+  --request /secure-transfer/post-start-activation.request.json \
+  --private-key /approval/operator-private.pem \
+  --output /secure-transfer/post-start-activation.operator-signature.json
+uv run python scripts/canary_artifact.py sign-role \
+  --role risk \
+  --request /secure-transfer/post-start-activation.request.json \
+  --private-key /approval/risk-private.pem \
+  --output /secure-transfer/post-start-activation.risk-signature.json
+uv run python scripts/canary_artifact.py combine-signatures \
+  --request /secure-transfer/post-start-activation.request.json \
+  --operator-signature /secure-transfer/post-start-activation.operator-signature.json \
+  --risk-signature /secure-transfer/post-start-activation.risk-signature.json \
+  --operator-public-key /etc/okx-quant/keys/canary-operator-public.pem \
+  --risk-public-key /etc/okx-quant/keys/canary-risk-public.pem \
+  --output /secure-transfer/post-start-activation.json
+
+sudo install -o root -g root -m 0644 \
+  /secure-transfer/post-start-activation.json \
+  /etc/okx-quant/canary/post-start-activation.json
+/opt/okx-quant/current/scripts/verify_deploy.sh post-activate
+```
+
+activation 只允许释放它所绑定的那一次 startup hard epoch，不能释放后来由人工、
+风控、备份 RPO 或故障触发的 HALT。它在消费前过期、替换或身份不匹配会保持
+HALTED；消费后由最长 6 小时的独立 Canary policy 控制运行窗口。任何重启都会创建
+新的 runtime/nonce/epoch 并要求新 activation，不得重放旧 artifact 绕过。
 
 receipt、历史批准、evidence 或 launch manifest 缺失/损坏时，root activation precheck
 允许失败，唯一 launcher 会用受控 venv Python 直接执行同发布目录 `main.py` 并降级
@@ -160,6 +230,7 @@ systemctl daemon-reload
 systemctl enable --now okx-quant.service
 systemctl enable --now okx-quant-watchdog.service
 systemctl enable --now okx-quant-daily-backup.timer
+systemctl enable --now okx-quant-offsite-restore.timer
 systemctl status okx-quant.service
 curl --fail http://127.0.0.1:9108/readyz
 curl --fail http://127.0.0.1:9108/metrics
@@ -312,10 +383,15 @@ protection。外部订单/成交会被导入并标记；重大数量差异进入
 
 ## 8. 备份和恢复演练
 
-交易进程每 5 分钟只生成本地 SQLite online backup；独立 `okxquant-backup` 身份也按
-5 分钟 timer 从只读数据库生成 AES-256/PBKDF2 加密归档并上传 S3。交易进程看不到备份口令，备份
+交易进程和独立 `okxquant-backup` 身份均按 1 分钟 cadence 生成一致性 SQLite
+快照；后者从只读数据库生成 AES-256/PBKDF2 加密归档并上传 S3。交易进程看不到备份口令，备份
 进程看不到 OKX key。归档只有在完整性、schema 与 account identity 校验通过后才原子
-发布；失败会 Page。交易 intents、fills、events 永不自动删除。
+发布；独立 `okx-quant-offsite-restore.timer` 每 2 分钟从 exact S3 version 下载并
+解密复核。publisher 的归档目录对 verifier 只读；签名 receipt 原子写入 verifier
+专属的
+`/var/lib/okx-quant-restore-evidence/daily/last-offsite-roundtrip.json`。trader 对该目录只读，
+验签并按 receipt 中最保守的快照时间执行 RPO 门禁；失败会 Page。交易 intents、
+fills、events 永不自动删除。
 
 立即备份：
 
@@ -349,6 +425,12 @@ mtime。归档发布前会真实解密并重跑完整性/身份检查；本地�
 绑定 S3 URI/version ID、下载记录、不可变 release SHA、配置/密钥安装、该组件报告、
 MAINTENANCE 启动和只读对账证据。目标是在 30 分钟内完成全部步骤。恢复后先
 以 `MAINTENANCE`/HALTED 启动并对账，禁止直接开放 BUY。
+
+完整演练 request 经独立 DR verifier 复核后，使用
+`scripts/sign_empty_host_restore.py` 签名。只有
+`measurement_scope=empty_host_end_to_end`、最近 31 日、端到端耗时严格小于
+1800 秒且绑定当前 soak account/release/unit/epoch 的 artifact 才能进入
+production/Canary Gate；组件 restore 报告不能替代。
 
 正式冷恢复使用受控安装器，不允许手工复制数据库。先停止交易服务，并确认目标路径：
 
@@ -429,49 +511,18 @@ evidence hash 再签 attestation。生产 Gate 使用
 参数网格、替换数据对象或手填压力损失。`ADMISSION_EVIDENCE.example.json` 是包含
 placeholder 的字段模板，按设计不可直接准入，producer 输出必须整体替换对应字段。
 
-连续运行证据必须由独立监控身份对每日请求做 Ed25519 签名，再使用
-`scripts/production_gate.py record` 实时结算。每行同时绑定 S3 URI、对象 SHA-256、
-S3 version ID、durable SLO 日报告 SHA-256、提交、配置、账户和至少 20 小时观测
-窗口；本地重算哈希链不能替代监控签名，禁止事后回填。
+SLO/ledger v2、双签 `soak_epoch`、完整 UTC 日、durable probe saga、Object Lock
+exact-version 回读和 Demo→Canary transition 已实现。部署、计时、告警演练、空主机
+恢复及失败停止条件统一见
+[Demo / Shadow 长期验证运行手册](DEMO_OPERATIONS_RUNBOOK.md)。工具就绪不能替代
+72 小时 Shadow、7 日 burn-in、最终 release chaos matrix 和连续 30 个 clean day；
+取得这些真实证据前仍为 **NOT ADMITTED**。
 
-先从交易数据库的 durable events 生成不可手填的 UTC 日报告：
-
-```bash
-python scripts/slo_report.py \
-  --database /var/lib/okx-quant/production/trading.db \
-  --day 2026-07-27 \
-  --output evidence/slo-2026-07-27.json
-```
-
-独立监控端上传包含该报告的日证据对象，生成的 anchor request 必须包含报告文件
-SHA-256，以及保护/滑点样本数和滑点 max。签名后再结算；命令行数值必须与报告中的
-保护 p99、滑点 p99 和未解释对账差异完全一致。record 会从同一报告写入样本数和
-max；无成交日可以记录零样本，但不会贡献最终至少 30 个保护与 30 个滑点样本的累计
-门槛，任一成交的 max 滑点越界都会中断 clean streak：
-
-```bash
-python scripts/production_gate.py \
-  --ledger /var/lib/okx-quant/admission/demo-observations.json \
-  record \
-  --day 2026-07-27 \
-  --mismatches 0 \
-  --protection-p99 2.4 \
-  --slippage 0.0012 \
-  --git-commit '<40-hex-release-commit>' \
-  --config-hash '<64-hex-runtime-config-hash>' \
-  --account-id '<okx-account-uid>' \
-  --source-uri 's3://bucket/demo-days/2026-07-27.json' \
-  --source-sha256 '<64-hex-object-sha>' \
-  --source-version-id '<immutable-s3-version-id>' \
-  --slo-report evidence/slo-2026-07-27.json \
-  --anchor evidence/demo-anchor-2026-07-27.json \
-  --observation-public-key /etc/okx-quant/keys/demo-monitor-public.pem \
-  --observation-started-at '2026-07-27T00:00:00+00:00' \
-  --observation-ended-at '2026-07-27T23:00:00+00:00'
-```
-
-最终 evidence metadata 的 `monitor_key_fingerprint` 必须是上述实际公钥文件字节的
-SHA-256；更换监控 key 后应作为证据身份变更重新开始观察。
+每日证据由 `okx-quant-demo-evidence-close@ROLE.timer` 从只读 durable facts 重算，
+上传并回读 exact S3 versions，签署完整 hard metrics anchor，并把
+`clean|invalid|burn-in` 追加到 hash-chain ledger。更换 release/config/account/key/
+unit/host/strategy 等冻结身份必须创建新 epoch；hard breach 必须保留 invalid 行并
+打断 streak。
 
 连续 30 日与全部研究/工程/运维检查通过后，operator 先生成准入根请求：
 
@@ -484,13 +535,29 @@ python scripts/production_launch.py \
   --identity-only
 
 python scripts/production_gate.py \
-  --ledger /var/lib/okx-quant/admission/demo-observations.json \
+  --ledger /var/lib/okx-quant/admission/demo-observations-v2.json \
   request \
   --evidence /etc/okx-quant/admission/evidence.json \
   --max-slippage 0.01 \
   --approved-max-stress-loss 100 \
   --observation-public-key /etc/okx-quant/keys/demo-monitor-public.pem \
+  --soak-epoch /etc/okx-quant/admission/demo-soak-epoch.json \
+  --epoch-monitor-public-key /etc/okx-quant/keys/epoch-monitor-public.pem \
+  --epoch-risk-public-key /etc/okx-quant/keys/epoch-risk-public.pem \
   --research-public-key /etc/okx-quant/keys/research-policy-public.pem \
+  --bundle-signing-public-key /etc/okx-quant/keys/demo-monitor-public.pem \
+  --stage-c-raw-observer-public-key /etc/okx-quant/keys/stage-c-raw-observer-public.pem \
+  --stage-c-trust-manifest /etc/okx-quant/admission/stage-c/trust-manifest.json \
+  --independent-verifier-public-key /etc/okx-quant/keys/evidence-verifier-public.pem \
+  --independent-verifier-attestations-dir /etc/okx-quant/admission/daily-verifier-attestations \
+  --stage-c-drill-receipts-dir /etc/okx-quant/admission/stage-c/drill-results \
+  --stage-c-drill-manifests-dir /etc/okx-quant/admission/stage-c/manifests \
+  --stage-c-drill-bundle-receipts-dir /etc/okx-quant/admission/stage-c/bundle-receipts \
+  --stage-c-drill-independent-attestations-dir /etc/okx-quant/admission/stage-c/independent-readbacks \
+  --stage-c-release-frozen-at "$OKX_QUANT_STAGE_C_RELEASE_FROZEN_AT" \
+  --empty-host-restore-evidence /etc/okx-quant/admission/empty-host-restore.json \
+  --empty-host-restore-public-key /etc/okx-quant/keys/empty-host-restore-public.pem \
+  --empty-host-restore-key-id "$OKX_QUANT_EMPTY_HOST_RESTORE_KEY_ID" \
   --config /etc/okx-quant/config.yaml \
   --release-commit-file /opt/okx-quant/current/REVISION \
   --launch-manifest /etc/okx-quant/launch.json \
@@ -498,7 +565,24 @@ python scripts/production_gate.py \
 ```
 
 风险审批人在独立设备检查全部证据后，用 `scripts/sign_admission_approval.py` 签名。
-签名 artifact 绑定证据文件哈希、30 日 ledger head、commit/config/account 和两项预算。
+其中 Stage-C raw observer、WORM bundle publisher 和第二故障域 readback verifier
+必须是三个不同的 Ed25519 身份。当前能力清单仍有 10 个 raw-event driver/parser
+场景和 3 个 instrumented barrier producer 标记为 `EXTERNAL OPEN`；生产 Gate 会
+直接拒绝这 13 项，签名 receipt、raw object locator 或手工摘要都不能替代缺失的
+生产 producer。完整清单见
+[`DEMO_OPERATIONS_RUNBOOK.md`](./DEMO_OPERATIONS_RUNBOOK.md#9-chaos-matrix)。
+`stage-c-trust-manifest.json` 不是部署完成声明：它只冻结 13 个 raw 文件的
+SHA-256/bytes 和每个场景的 registrar、capability authority、完整 source-role
+公钥路径/指纹。manifest、目录、raw 文件和公钥必须是绝对规范路径、非符号链接且
+不可由 group/world 写；角色集合必须精确匹配 parser。仅 `parser_signer` 可在场景间
+复用，且必须等于单一 global raw-observer key；其他信任根禁止跨角色或跨场景复用，
+并与 publisher/raw-observer/readback verifier 分钥。只有 production loader
+重新验证 signed challenge、短效 capability、
+systemd/proc/STS workload、source signatures 和 raw bytes 后，当前证据运行才获得
+`DEPLOYMENT_ATTESTED`；在 JSON 中自报该状态会被拒绝。
+签名 artifact 绑定证据文件哈希、30 日 ledger head、empty-host restore artifact
+哈希、完整 Stage-C coverage 哈希、commit/config/account 和两项预算。替换任一
+演练证据都必须重新请求风险批准并生成 deployment receipt v3。
 其中 config identity 覆盖实际导入的 Python 源码摘要、策略名、非秘密策略参数上下文、
 K 线周期、实际交易对、调度周期和生产风控；仅复制/改写 REVISION 不能让另一份代码
 或策略复用批准。制品身份还绑定 `pyproject.toml`、`uv.lock`、Python 启动路径/

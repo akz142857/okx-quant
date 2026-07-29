@@ -1,6 +1,7 @@
 """SQLite WAL 生产订单日志测试。"""
 
 import sqlite3
+import time
 from decimal import Decimal
 
 import pytest
@@ -294,6 +295,88 @@ def test_outbox_deduplication_key_is_durable(tmp_path):
 
 
 @pytest.mark.unit
+def test_alert_delivery_tracks_attempt_provider_ack_and_escalation(tmp_path):
+    journal = _journal(tmp_path)
+    event_id = journal.enqueue_outbox(
+        "page.unprotected_position",
+        {"inst_id": "BTC-USDT"},
+    )
+    event = journal.get_due_alerts()[0]
+    assert event["event_id"] == event_id
+    assert event["priority"] == "P0"
+    created = float(event["created_at"])
+    retried = journal.record_alert_attempt(
+        event_id,
+        started_at=created,
+        completed_at=created + 1,
+        http_status=503,
+        ingestion_accepted=False,
+        error="provider unavailable",
+    )
+    assert retried["state"] == "retry"
+    assert retried["attempt_count"] == 1
+    ingested = journal.record_alert_attempt(
+        event_id,
+        started_at=retried["next_attempt_at"],
+        completed_at=retried["next_attempt_at"] + 1,
+        http_status=202,
+        ingestion_accepted=True,
+    )
+    assert ingested["state"] == "ingested"
+    assert journal.get_unpublished_outbox() == []
+    provider_at = max(
+        float(ingested["created_at"]) + 2,
+        time.time() - 1,
+    )
+    provider = journal.record_alert_provider_received(
+        event_id,
+        provider_received_at=provider_at,
+        provider_event_id="provider-1",
+        artifact_sha256="a" * 64,
+    )
+    assert provider["state"] == "provider_received"
+    acknowledged = journal.record_alert_human_ack(
+        event_id,
+        human_ack_at=provider_at + 0.1,
+        actor="on-call",
+        artifact_sha256="b" * 64,
+    )
+    assert acknowledged["state"] == "acknowledged"
+    with pytest.raises(RuntimeError, match="不得标记"):
+        journal.record_alert_escalation(event_id)
+    journal.close()
+
+
+@pytest.mark.unit
+def test_alert_delivery_moves_to_dlq_after_bounded_attempts(tmp_path):
+    journal = _journal(tmp_path)
+    event_id = journal.enqueue_outbox("warning.ws_disconnect", {})
+    created = journal.get_due_alerts()[0]["created_at"]
+    first = journal.record_alert_attempt(
+        event_id,
+        started_at=created,
+        completed_at=created + 1,
+        http_status=None,
+        ingestion_accepted=False,
+        error="timeout",
+        max_attempts=2,
+    )
+    second = journal.record_alert_attempt(
+        event_id,
+        started_at=first["next_attempt_at"],
+        completed_at=first["next_attempt_at"] + 1,
+        http_status=None,
+        ingestion_accepted=False,
+        error="timeout",
+        max_attempts=2,
+    )
+    assert second["state"] == "dlq"
+    assert second["dlq_at"] is not None
+    assert journal.get_due_alerts(now=second["updated_at"] + 1000) == []
+    journal.close()
+
+
+@pytest.mark.unit
 def test_online_backup_is_consistent(tmp_path):
     journal = _journal(tmp_path)
     journal.create_order_intent(_intent())
@@ -343,12 +426,12 @@ def test_schema_migrations_are_contiguous_and_failure_is_reentrant(
     journal = SQLiteJournal(path)
     journal.close()
     raw = sqlite3.connect(path)
-    raw.execute("DELETE FROM schema_migrations WHERE version=9")
+    raw.execute("DELETE FROM schema_migrations WHERE version=11")
     raw.commit()
     raw.close()
 
     original = SQLiteJournal.__dict__[
-        "_migration_009_reconciliation_checkpoints"
+        "_migration_011_durable_alert_delivery"
     ]
 
     def fail_migration(_cls, _conn):
@@ -356,7 +439,7 @@ def test_schema_migrations_are_contiguous_and_failure_is_reentrant(
 
     monkeypatch.setattr(
         SQLiteJournal,
-        "_migration_009_reconciliation_checkpoints",
+        "_migration_011_durable_alert_delivery",
         classmethod(fail_migration),
     )
     with pytest.raises(RuntimeError, match="injected migration failure"):
@@ -365,13 +448,13 @@ def test_schema_migrations_are_contiguous_and_failure_is_reentrant(
     try:
         assert raw.execute(
             "SELECT MAX(version) FROM schema_migrations"
-        ).fetchone()[0] == 8
+        ).fetchone()[0] == 10
     finally:
         raw.close()
 
     monkeypatch.setattr(
         SQLiteJournal,
-        "_migration_009_reconciliation_checkpoints",
+        "_migration_011_durable_alert_delivery",
         original,
     )
     reopened = SQLiteJournal(path)
@@ -382,7 +465,7 @@ def test_schema_migrations_are_contiguous_and_failure_is_reentrant(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == list(range(1, 10))
+        assert versions == list(range(1, 12))
         assert reopened.get_mode() is SystemMode.MAINTENANCE
     finally:
         reopened.close()

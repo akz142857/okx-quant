@@ -1,0 +1,45 @@
+[Unit]
+Description=OKX Quant stage-2 independent WORM exact-version readback %i
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=oqc-worm
+Group=oqc-capability-readers
+UMask=0027
+EnvironmentFile=/etc/okx-quant/canary-producers/%i-worm-readback.env
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadOnlyPaths=/etc/okx-quant
+ReadOnlyPaths=/var/lib/okx-quant-canary-sources/signed/%i
+ReadWritePaths=/var/lib/okx-quant-canary-sources/worm-readback/%i
+LoadCredential=worm-private-key:/etc/okx-quant/keys/canary-worm-readback-private.pem
+LoadCredential=aws-access-key-id:/etc/okx-quant/credentials/worm-aws-access-key-id
+LoadCredential=aws-secret-access-key:/etc/okx-quant/credentials/worm-aws-secret-access-key
+LoadCredential=aws-session-token:/etc/okx-quant/credentials/worm-aws-session-token
+ExecStart=/usr/local/libexec/okx-quant-canary-worm-readback \
+  --producer-name ${PRODUCER_NAME} \
+  --transition /etc/okx-quant/canary-producers/transition.json \
+  --operator-public-key /etc/okx-quant/keys/canary-operator-public.pem \
+  --risk-public-key /etc/okx-quant/keys/canary-risk-public.pem \
+  --readiness-artifact /var/lib/okx-quant-canary-sources/signed/%i/source.json \
+  --object-uri ${OBJECT_URI} \
+  --request-uri ${REQUEST_URI} \
+  --version-id ${VERSION_ID} \
+  --kms-key-id ${KMS_KEY_ID} \
+  --host-image-sha256 /etc/okx-quant/host-image.sha256 \
+  --private-key %d/worm-private-key \
+  --output /var/lib/okx-quant-canary-sources/worm-readback/%i/receipt.json

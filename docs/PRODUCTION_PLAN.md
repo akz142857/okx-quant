@@ -64,6 +64,9 @@
 | 单机故障 RTO | 自动重启 ≤ 2 分钟；主机故障人工恢复 ≤ 30 分钟 |
 
 SLO 是系统验收指标，不是收益承诺。
+对于 Demo 正式准入，独立保护样本不足 300 时，p99 只报告、不作为独立统计门槛；
+使用聚合 p95≤3 秒、全样本 max≤10 秒和失败率为零作为硬门，详见
+`DEMO_SHADOW_VALIDATION_PLAN.md`。
 
 ### 2.2 风险预算
 
@@ -105,7 +108,7 @@ flowchart LR
     SE --> DI["Decision / Order Intent"]
     DI --> EC["Execution Coordinator<br/>single writer"]
     RC["Risk Coordinator"] --> EC
-    EC --> DB[("Durable Journal<br/>SQLite WAL schema v9")]
+    EC --> DB[("Durable Journal<br/>SQLite WAL schema v11")]
     EC --> OKX["OKX REST Trading API"]
     OKX --> PW["Private WS Gateway<br/>orders + balance"]
     PW --> OP["Order Projector"]
@@ -789,7 +792,8 @@ monitor，避免进程死亡后连告警也无法发送。
 ### 12.4 数据备份
 
 - SQLite 使用在线 backup API，不直接复制正在写入的主文件；
-- 每 5 分钟生成一致性快照并上传异地主机/对象存储；
+- 每分钟生成一致性快照并上传异地主机/对象存储；每 2 分钟执行一次 exact-version
+  异地回读和恢复验证；
 - 每日生成独立加密归档；
 - 保留 30 天；
 - 每月至少一次恢复演练；

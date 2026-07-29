@@ -55,6 +55,7 @@ class ProductionSettings:
 
     enabled: bool = True
     environment: str = "demo"
+    deployment_tier: str = "production"
     account_id: str = ""
     journal_path: str = "state/demo/trading.db"
     lock_path: str = "state/demo/trading.lock"
@@ -62,7 +63,7 @@ class ProductionSettings:
     reconciliation_interval_s: float = 30
     max_clock_skew_s: float = 1
     ws_ready_timeout_s: float = 30
-    backup_interval_s: float = 300
+    backup_interval_s: float = 60
     backup_retention_days: int = 30
     max_order_loss_usdt: Decimal = Decimal("100")
     max_position_notional_usdt: Decimal = Decimal("2000")
@@ -79,6 +80,17 @@ class ProductionSettings:
     max_account_snapshot_age_s: float = 90
     max_unprotected_position_s: float = 10
     max_consecutive_infrastructure_errors: int = 3
+    resource_sample_interval_s: float = 60
+    memory_high_bytes: int = 524288000
+    memory_max_bytes: int = 629145600
+    limit_nofile: int = 4096
+    tasks_max: int = 128
+    max_database_bytes: int = 2147483648
+    max_wal_bytes: int = 268435456
+    max_wal_checkpoint_age_s: int = 300
+    max_database_growth_bytes_per_day: int = 268435456
+    resource_min_free_bytes: int = 5368709120
+    resource_min_free_inodes: int = 10000
     alert_webhook_env: str = "OKX_QUANT_ALERT_WEBHOOK"
     resume_approval_public_key: str = ""
     release_root: str = "/opt/okx-quant/current"
@@ -98,10 +110,27 @@ class ProductionSettings:
     heartbeat_path: str = "state/demo/heartbeat"
     offsite_backup_uri: str = ""
     external_backup_managed: bool = False
+    backup_receipt_path: str = (
+        "/var/lib/okx-quant-restore-evidence/daily/last-offsite-roundtrip.json"
+    )
+    backup_receipt_public_key: str = (
+        "/etc/okx-quant/keys/restore-verifier-public.pem"
+    )
+    backup_receipt_key_id: str = "restore-verifier-2026q3"
     metrics_host: str = "127.0.0.1"
     metrics_port: int = 9108
     shadow_mode: bool = False
     allowed_instruments: tuple[str, ...] = ()
+    canary_transition_path: str = ""
+    canary_policy_path: str = ""
+    canary_activation_path: str = ""
+    canary_operator_public_key: str = ""
+    canary_risk_public_key: str = ""
+    canary_check_verifier_public_key: str = ""
+    host_image_sha256: str = ""
+    ip_allowlist_sha256: str = ""
+    api_permissions: tuple[str, ...] = ()
+    deployment_unit: str = "okx-quant.service"
 
     @classmethod
     def from_config(
@@ -133,7 +162,7 @@ class ProductionSettings:
         for key, value in raw.items():
             if key in decimal_fields:
                 values[key] = Decimal(str(value))
-            elif key == "allowed_instruments" and isinstance(
+            elif key in {"allowed_instruments", "api_permissions"} and isinstance(
                 value, (list, tuple)
             ):
                 values[key] = tuple(value)
@@ -164,6 +193,10 @@ class ProductionSettings:
             )
         if self.environment not in {"demo", "production"}:
             raise ValueError("production.environment 只能是 demo 或 production")
+        if self.deployment_tier not in {"canary", "production"}:
+            raise ValueError("deployment_tier 只能是 canary 或 production")
+        if self.environment == "demo" and self.deployment_tier != "production":
+            raise ValueError("Demo runtime 不能声明真实资金 canary tier")
         if self.environment == "production" and not self.enabled:
             raise ValueError("实盘禁止关闭 production.enabled 生产交易内核")
         if (
@@ -311,6 +344,14 @@ class ProductionSettings:
                         self.admission_approval_public_key,
                         Path("/etc/okx-quant/keys"),
                     ),
+                    "backup_receipt_path": (
+                        self.backup_receipt_path,
+                        Path("/var/lib/okx-quant-restore-evidence"),
+                    ),
+                    "backup_receipt_public_key": (
+                        self.backup_receipt_public_key,
+                        Path("/etc/okx-quant/keys"),
+                    ),
                 }
                 for name, (path_value, root) in controlled_paths.items():
                     candidate = Path(path_value)
@@ -322,6 +363,63 @@ class ProductionSettings:
                         raise ValueError(
                             f"实盘 {name} 必须位于受控目录 {root}"
                         )
+                if not self.backup_receipt_key_id.strip():
+                    raise ValueError(
+                        "实盘 backup_receipt_key_id 不能为空"
+                    )
+                if self.deployment_tier == "canary":
+                    if self.shadow_mode:
+                        raise ValueError("Canary 不允许 shadow_mode")
+                    if list(self.api_permissions) != ["read", "trade"]:
+                        raise ValueError("Canary API 权限必须精确为 Read+Trade")
+                    if self.deployment_unit != "okx-quant.service":
+                        raise ValueError("Canary deployment unit 非法")
+                    for name in (
+                        "host_image_sha256",
+                        "ip_allowlist_sha256",
+                    ):
+                        value = getattr(self, name)
+                        if (
+                            not re.fullmatch(r"[0-9a-f]{64}", value)
+                            or value == "0" * 64
+                        ):
+                            raise ValueError(f"Canary {name} 必须是非零 SHA-256")
+                    canary_paths = {
+                        "canary_transition_path": (
+                            self.canary_transition_path,
+                            Path("/etc/okx-quant/canary"),
+                        ),
+                        "canary_policy_path": (
+                            self.canary_policy_path,
+                            Path("/etc/okx-quant/canary"),
+                        ),
+                        "canary_activation_path": (
+                            self.canary_activation_path,
+                            Path("/etc/okx-quant/canary"),
+                        ),
+                        "canary_operator_public_key": (
+                            self.canary_operator_public_key,
+                            Path("/etc/okx-quant/keys"),
+                        ),
+                        "canary_risk_public_key": (
+                            self.canary_risk_public_key,
+                            Path("/etc/okx-quant/keys"),
+                        ),
+                        "canary_check_verifier_public_key": (
+                            self.canary_check_verifier_public_key,
+                            Path("/etc/okx-quant/keys"),
+                        ),
+                    }
+                    for name, (path_value, root) in canary_paths.items():
+                        candidate = Path(path_value)
+                        if (
+                            not candidate.is_absolute()
+                            or not candidate.is_relative_to(root)
+                            or ".." in candidate.parts
+                        ):
+                            raise ValueError(
+                                f"Canary {name} 必须位于受控目录 {root}"
+                            )
         integer_fields = {
             "max_open_positions": self.max_open_positions,
             "max_order_intents_per_hour": self.max_order_intents_per_hour,
@@ -330,6 +428,18 @@ class ProductionSettings:
             "max_consecutive_infrastructure_errors": (
                 self.max_consecutive_infrastructure_errors
             ),
+            "memory_high_bytes": self.memory_high_bytes,
+            "memory_max_bytes": self.memory_max_bytes,
+            "limit_nofile": self.limit_nofile,
+            "tasks_max": self.tasks_max,
+            "max_database_bytes": self.max_database_bytes,
+            "max_wal_bytes": self.max_wal_bytes,
+            "max_wal_checkpoint_age_s": self.max_wal_checkpoint_age_s,
+            "max_database_growth_bytes_per_day": (
+                self.max_database_growth_bytes_per_day
+            ),
+            "resource_min_free_bytes": self.resource_min_free_bytes,
+            "resource_min_free_inodes": self.resource_min_free_inodes,
         }
         for name, value in integer_fields.items():
             if type(value) is not int:
@@ -342,6 +452,7 @@ class ProductionSettings:
             "max_market_data_age_s": self.max_market_data_age_s,
             "max_account_snapshot_age_s": self.max_account_snapshot_age_s,
             "max_unprotected_position_s": self.max_unprotected_position_s,
+            "resource_sample_interval_s": self.resource_sample_interval_s,
         }
         for name, value in numeric_fields.items():
             if (
@@ -413,8 +524,8 @@ class ProductionSettings:
             raise ValueError("周期对账间隔必须在 (0, 30] 秒")
         if self.max_clock_skew_s <= 0 or self.max_clock_skew_s > 1:
             raise ValueError("最大时钟偏差必须在 (0, 1] 秒")
-        if self.backup_interval_s <= 0 or self.backup_interval_s > 300:
-            raise ValueError("备份间隔必须在 (0, 300] 秒")
+        if self.backup_interval_s <= 0 or self.backup_interval_s > 60:
+            raise ValueError("备份间隔必须在 (0, 60] 秒")
         if self.ws_ready_timeout_s <= 0:
             raise ValueError("WS READY 超时必须大于 0")
         if not 0 < self.max_account_snapshot_age_s <= 90:
@@ -425,6 +536,27 @@ class ProductionSettings:
             raise ValueError("无保护仓位最大持续时间必须在 (0, 10] 秒")
         if not 1 <= self.max_consecutive_infrastructure_errors <= 5:
             raise ValueError("连续基础设施错误阈值必须在 1..5")
+        if not 30 <= self.resource_sample_interval_s <= 60:
+            raise ValueError("资源采样间隔必须在 30..60 秒")
+        if not (
+            64 * 1024 * 1024
+            <= self.memory_high_bytes
+            < self.memory_max_bytes
+        ):
+            raise ValueError("MemoryHigh/MemoryMax 资源边界非法")
+        if not 256 <= self.limit_nofile <= 1_048_576:
+            raise ValueError("LimitNOFILE 资源边界非法")
+        if not 16 <= self.tasks_max <= 65_536:
+            raise ValueError("TasksMax 资源边界非法")
+        if min(
+            self.max_database_bytes,
+            self.max_wal_bytes,
+            self.max_wal_checkpoint_age_s,
+            self.max_database_growth_bytes_per_day,
+            self.resource_min_free_bytes,
+            self.resource_min_free_inodes,
+        ) <= 0:
+            raise ValueError("DB/WAL 绝对上限与增长上限必须为正")
         if self.min_24h_quote_volume_usdt <= 0:
             raise ValueError("24h 最低计价成交额必须大于 0")
         if self.backup_retention_days < 30:

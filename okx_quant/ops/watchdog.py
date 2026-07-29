@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -164,12 +165,132 @@ def inspect(
 
 
 def send_alert(webhook: str, report: dict) -> None:
+    event_id = str(report.get("event_id", ""))
+    if not event_id:
+        raise RuntimeError("watchdog Page 缺少稳定 event_id")
     response = requests.post(
         webhook,
-        json={"event_name": "page.external_watchdog", "payload": report},
+        json={
+            "event_name": "page.external_watchdog",
+            "event_id": event_id,
+            "payload": report,
+        },
         timeout=5,
     )
     response.raise_for_status()
+
+
+def _incident_fingerprint(report: dict) -> str:
+    return json.dumps(
+        {
+            "heartbeat_stale": not report["heartbeat_fresh"],
+            "unhealthy_heartbeat": report["unhealthy_heartbeat"],
+            "mode": report["mode"],
+            "database_error": report["database_error"],
+            "disk_unsafe": report["disk_unsafe"],
+            "unsafe_instruments": [
+                row["inst_id"] for row in report["unsafe_positions"]
+            ],
+            "overdue_unknown_buys": [
+                row["intent_id"]
+                for row in report["overdue_unknown_buys"]
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _load_incident_state(path: Path) -> dict:
+    empty = {
+        "version": 1,
+        "generation": 0,
+        "fingerprint": "",
+        "event_id": "",
+        "delivered": False,
+    }
+    if not path.exists():
+        return empty
+    info = path.lstat()
+    if path.is_symlink() or not path.is_file() or info.st_mode & 0o077:
+        raise RuntimeError("watchdog incident state 必须是 owner-only 普通文件")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(payload, dict)
+        or set(payload) != set(empty)
+        or payload["version"] != 1
+        or type(payload["generation"]) is not int
+        or payload["generation"] < 0
+        or type(payload["delivered"]) is not bool
+        or not isinstance(payload["fingerprint"], str)
+        or not isinstance(payload["event_id"], str)
+    ):
+        raise RuntimeError("watchdog incident state schema 非法")
+    return payload
+
+
+def _save_incident_state(path: Path, state: dict) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if path.parent.is_symlink():
+        raise RuntimeError("watchdog incident state 父目录不得是符号链接")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        os.write(
+            descriptor,
+            (
+                json.dumps(
+                    state,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n"
+            ).encode(),
+        )
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(temporary, path)
+    os.chmod(path, 0o600)
+
+
+def _advance_incident(
+    report: dict,
+    state: dict,
+    *,
+    identity: str,
+) -> tuple[dict, bool]:
+    if report["ok"]:
+        if state["fingerprint"] or state["event_id"]:
+            state = {
+                **state,
+                "fingerprint": "",
+                "event_id": "",
+                "delivered": False,
+            }
+        return state, False
+    fingerprint = _incident_fingerprint(report)
+    if fingerprint != state["fingerprint"]:
+        generation = int(state["generation"]) + 1
+        event_id = hashlib.sha256(
+            (
+                "okx-quant/watchdog-incident/v1\0"
+                f"{identity}\0{generation}\0{fingerprint}"
+            ).encode()
+        ).hexdigest()
+        state = {
+            "version": 1,
+            "generation": generation,
+            "fingerprint": fingerprint,
+            "event_id": event_id,
+            "delivered": False,
+        }
+    return state, not state["delivered"]
 
 
 def _positive_decimal(value: object) -> bool:
@@ -203,6 +324,7 @@ def main() -> None:
         default=0.05,
     )
     parser.add_argument("--interval", type=float, default=10)
+    parser.add_argument("--incident-state", required=True, type=Path)
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args()
     webhook = args.webhook or os.environ.get(args.webhook_env, "")
@@ -211,7 +333,12 @@ def main() -> None:
             f"缺少 watchdog webhook: --webhook 或环境变量 {args.webhook_env}"
         )
 
-    last_fingerprint = ""
+    incident_state = _load_incident_state(args.incident_state)
+    incident_identity = hashlib.sha256(
+        (
+            f"{args.heartbeat.resolve()}\0{args.database.resolve()}"
+        ).encode()
+    ).hexdigest()
     while True:
         report = inspect(
             args.heartbeat,
@@ -221,28 +348,24 @@ def main() -> None:
             min_free_ratio=args.min_free_ratio,
             min_free_inode_ratio=args.min_free_inode_ratio,
         )
-        fingerprint = json.dumps(
-            {
-                "heartbeat_stale": (
-                    not report["heartbeat_fresh"]
-                ),
-                "unhealthy_heartbeat": report["unhealthy_heartbeat"],
-                "mode": report["mode"],
-                "database_error": report["database_error"],
-                "disk_unsafe": report["disk_unsafe"],
-                "unsafe_instruments": [
-                    row["inst_id"] for row in report["unsafe_positions"]
-                ],
-                "overdue_unknown_buys": [
-                    row["intent_id"]
-                    for row in report["overdue_unknown_buys"]
-                ],
-            },
-            sort_keys=True,
+        incident_state, should_send = _advance_incident(
+            report,
+            incident_state,
+            identity=incident_identity,
         )
-        if not report["ok"] and fingerprint != last_fingerprint:
+        _save_incident_state(args.incident_state, incident_state)
+        if not report["ok"]:
+            report["event_id"] = incident_state["event_id"]
+            report["incident_generation"] = incident_state[
+                "generation"
+            ]
+        if should_send:
             send_alert(webhook, report)
-        last_fingerprint = fingerprint if not report["ok"] else ""
+            incident_state = {
+                **incident_state,
+                "delivered": True,
+            }
+            _save_incident_state(args.incident_state, incident_state)
         if args.once:
             print(json.dumps(report, ensure_ascii=False, default=str))
             raise SystemExit(0 if report["ok"] else 2)

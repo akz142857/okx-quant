@@ -33,13 +33,14 @@ uv run python scripts/non_live_validation.py \
   --output non-live-validation.json
 ```
 
-脚本会把全部测试文件分成六个可审计 suite，覆盖：
+脚本会把全部测试文件分成七个可审计 suite，覆盖：
 
 - 订单状态机、响应丢失、幂等成交和并发资金预留；
 - OKX adapter 与 demo 契约离线模型；
 - SQLite、投影重建、WS replay、启动恢复和联合对账；
 - 保护单、紧急退出、kill switch、备份恢复和 SLO；
 - 回测、策略循环、研究溯源和准入抗伪造；
+- Stage-C parser、外部 actor、内部 barrier 与实现清单的对抗验证；
 - 配置、脱敏、超时和证据工具自身。
 
 报告绑定提交、Git tree、完整源码/测试 manifest、测试清单、Python 和操作系统。
@@ -156,6 +157,12 @@ uv run python scripts/demo_contract.py \
 
 ## 4. Demo Shadow 与连续观察
 
+完整的工程补齐、三环境隔离、72 小时 Shadow、7 天 Active burn-in、故障演练和
+30 日签名 soak 计划见
+[Demo / Shadow 持续运行与长期稳定性验证计划](DEMO_SHADOW_VALIDATION_PLAN.md)。
+该计划已经过交易安全、SRE 和独立准入三角色评审：Shadow 必须使用 Read-only Key，
+Chaos 必须处于独立故障域；现有 SLO/Gate v1 升级为 v2 前不得开始正式 30 日计时。
+
 设置：
 
 ```yaml
@@ -164,7 +171,8 @@ production:
   shadow_mode: true
 ```
 
-再使用 Demo Key 启动 `live`。Shadow 会持久化策略决策和订单意图，但
+再使用专用、无 Trade 权限的 Demo Read-only Key 启动 `live`。Shadow 会持久化策略
+决策和订单意图，但
 `ExecutionCoordinator` 在交易所写调用之前将意图标记为
 `SHADOW_NOT_SUBMITTED`。建议使用零持仓的专用 Demo 子账户，避免已有 Demo 仓位触发
 无保护告警。
@@ -200,7 +208,7 @@ CI 生成的 `non-live-validation.json` 与 `fault-injection.json` 都会封入�
 
 1. 真实盘口深度、市场冲击和极端行情成交质量；
 2. 生产 API 权限、出口 IP 白名单和外部基础设施状态；
-3. 连续 30 个自然日的稳定运行；
+3. 同一 soak epoch 连续 30 个完整 UTC clean day 的稳定运行；
 4. 操作人员对真实 Page、恢复和回滚流程的响应；
 5. 独立风险审批和资金责任；
 6. 极小资金 Canary 下的端到端生产事实。

@@ -1,0 +1,27 @@
+[Unit]
+Description=Enqueue daily OKX Quant Demo alert delivery challenge (%i)
+After=okx-quant-demo-%i.service
+Requires=okx-quant-demo-%i.service
+OnFailure=okx-quant-demo-monitor-failure@%i.service
+
+[Service]
+Type=oneshot
+User=okxquant-demo-%i
+Group=okxquant-data-%i
+EnvironmentFile=/etc/okx-quant/demo-%i-monitor.env
+ExecStart=/opt/okx-quant/demo-%i/current/.venv/bin/python /opt/okx-quant/demo-%i/current/scripts/enqueue_alert_challenge.py --inbox /var/lib/okx-quant/demo-%i/operator-inbox --expected-account-id ${OKX_QUANT_ACCOUNT_ID} --role %i
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/etc/okx-quant /var/lib/okx-quant/demo-%i
+ReadWritePaths=/var/lib/okx-quant/demo-%i/operator-inbox
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native

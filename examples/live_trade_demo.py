@@ -1,14 +1,15 @@
 """实盘/模拟盘交易示例（需要 API Key）"""
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from okx_quant.config import load_yaml
 from okx_quant.client.rest import OKXRestClient
-from okx_quant.trading.executor import LiveTrader
+from okx_quant.config import load_yaml
 from okx_quant.risk.manager import RiskConfig
 from okx_quant.strategy import MACrossStrategy
+from okx_quant.trading.executor import LiveTrader
 
 
 def main():

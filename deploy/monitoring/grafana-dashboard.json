@@ -1,0 +1,183 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": false,
+  "panels": [
+    {
+      "title": "Runtime mode",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "system_mode",
+          "legendFormat": "{{instance}} {{mode}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 0}
+    },
+    {
+      "title": "WebSocket channel readiness",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "ws_connected",
+          "legendFormat": "{{instance}} {{channel}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 0}
+    },
+    {
+      "title": "Verified recovery-point age",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "backup_recovery_point_age_seconds",
+          "legendFormat": "{{instance}} {{location}}"
+        }
+      ],
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 0}
+    },
+    {
+      "title": "RSS / MemoryHigh",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "process_resident_memory_bytes / resource_memory_high_bytes",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 6}
+    },
+    {
+      "title": "FD / LimitNOFILE",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "process_open_fds / resource_limit_nofile",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 6, "y": 6}
+    },
+    {
+      "title": "SQLite DB and WAL bytes",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "database_bytes", "legendFormat": "{{instance}} DB"},
+        {"expr": "database_wal_bytes", "legendFormat": "{{instance}} WAL"}
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 12, "y": 6}
+    },
+    {
+      "title": "Clock absolute offset",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "clock_absolute_offset_seconds",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 18, "y": 6}
+    },
+    {
+      "title": "Alert delivery",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "alert_outbox_oldest_age_seconds",
+          "legendFormat": "{{instance}} oldest"
+        },
+        {
+          "expr": "alert_delivery_consecutive_failures",
+          "legendFormat": "{{instance}} failures"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 13}
+    },
+    {
+      "title": "Unknown BUY / unprotected position",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "unknown_buy_oldest_age_seconds",
+          "legendFormat": "{{instance}} unknown BUY"
+        },
+        {
+          "expr": "unprotected_position_seconds",
+          "legendFormat": "{{instance}} {{inst}} unprotected"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 13}
+    },
+    {
+      "title": "Disk capacity",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "database_volume_free_bytes",
+          "legendFormat": "{{instance}} free bytes"
+        },
+        {
+          "expr": "database_volume_free_inodes",
+          "legendFormat": "{{instance}} free inodes"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 13}
+    },
+    {
+      "title": "WAL checkpoint completion",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "wal_checkpoint_age_seconds",
+          "legendFormat": "{{instance}} age"
+        },
+        {
+          "expr": "wal_checkpoint_backlog_bytes",
+          "legendFormat": "{{instance}} backlog"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 0, "y": 20}
+    },
+    {
+      "title": "Account snapshot freshness budget",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "account_snapshot_age_seconds / account_snapshot_max_age_seconds",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 6, "y": 20}
+    },
+    {
+      "title": "Market data freshness budget",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "market_data_age_seconds / market_data_max_age_seconds",
+          "legendFormat": "{{instance}} {{channel}} {{inst}}"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 12, "y": 20}
+    },
+    {
+      "title": "Execution slippage budget",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "execution_slippage_ratio / execution_slippage_limit_ratio",
+          "legendFormat": "{{instance}} {{inst}}"
+        }
+      ],
+      "gridPos": {"h": 7, "w": 6, "x": 18, "y": 20}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["okx-quant", "demo", "shadow", "slo-v2"],
+  "templating": {"list": []},
+  "time": {"from": "now-24h", "to": "now"},
+  "title": "OKX Quant Demo / Shadow Production Validation",
+  "uid": "okx-quant-demo-v2",
+  "version": 1
+}

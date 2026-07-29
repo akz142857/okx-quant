@@ -1,0 +1,64 @@
+[Unit]
+Description=OKX Quant Stage-C TEST-ONLY PARSER_READY independent read-only OKX recovery source %i
+After=network-online.target
+Before=okx-quant-stage-c-test-only-driver@%i.service
+Wants=network-online.target
+OnSuccess=okx-quant-stage-c-test-only-recovery@%i.service
+ConditionPathExists=/opt/okx-quant-stage-c-test-only/instrumented.pyz
+ConditionFileIsExecutable=/opt/okx-quant-stage-c-test-only/venv/bin/python
+
+[Service]
+Type=simple
+User=okxq-stagec-okx
+Group=okxq-stagec-evidence
+UMask=0027
+StateDirectory=okx-quant-stage-c-test-only/source-okx/%i
+StateDirectoryMode=0750
+LoadCredential=scenario:/etc/okx-quant-stage-c-test-only/%i/scenario
+LoadCredential=registrar-public-key:/etc/okx-quant-stage-c-test-only/%i/registrar-public.pem
+LoadCredential=challenge-consumer-public-key:/etc/okx-quant-stage-c-test-only/%i/challenge-consumer-public.pem
+LoadCredential=kill-public-key:/etc/okx-quant-stage-c-test-only/%i/kill-public.pem
+LoadCredential=reached-public-key:/etc/okx-quant-stage-c-test-only/%i/attestor-public.pem
+LoadCredential=journal-readiness-public-key:/etc/okx-quant-stage-c-test-only/%i/journal-source-public.pem
+LoadCredential=config:/etc/okx-quant-stage-c-test-only/%i/okx-observer-config.yaml
+LoadCredential=environment:/etc/okx-quant-stage-c-test-only/%i/okx-observer-environment
+LoadCredential=source-private-key:/etc/okx-quant-stage-c-test-only/%i/okx-source-private.pem
+ExecStart=/opt/okx-quant-stage-c-test-only/venv/bin/python /opt/okx-quant-stage-c-test-only/instrumented.pyz run-recovery-source \
+  --scenario-file %d/scenario \
+  --activation-request /run/okx-quant-stage-c-activation/%i/request.json \
+  --registrar-public-key %d/registrar-public-key \
+  --challenge-consumer-public-key %d/challenge-consumer-public-key \
+  --kill-artifact /var/lib/okx-quant-stage-c-test-only/kill/%i/kill-attestation.json \
+  --kill-public-key %d/kill-public-key \
+  --reached-artifact /var/lib/okx-quant-stage-c-test-only/attestor/%i/reached-attestation.json \
+  --reached-public-key %d/reached-public-key \
+  --journal-readiness-artifact /var/lib/okx-quant-stage-c-test-only/source-journal/%i/readiness.json \
+  --journal-readiness-public-key %d/journal-readiness-public-key \
+  --source okx_collector \
+  --marker /var/lib/okx-quant-stage-c-test-only/hook/%i/reached.json \
+  --proof /var/lib/okx-quant-stage-c-test-only/hook/%i/boundary-proof.json \
+  --source-private-key %d/source-private-key \
+  --config %d/config \
+  --env-file %d/environment \
+  --output /var/lib/okx-quant-stage-c-test-only/source-okx/%i/artifact.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/opt/okx-quant-stage-c-test-only /run/okx-quant-stage-c-activation/%i /var/lib/okx-quant-stage-c-test-only/hook/%i /var/lib/okx-quant-stage-c-test-only/attestor/%i /var/lib/okx-quant-stage-c-test-only/kill/%i /var/lib/okx-quant-stage-c-test-only/source-journal/%i
+ReadWritePaths=/var/lib/okx-quant-stage-c-test-only/source-okx/%i

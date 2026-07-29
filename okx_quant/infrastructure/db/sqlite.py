@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -69,6 +70,8 @@ CREATE TABLE IF NOT EXISTS order_intents (
     avg_fill_px TEXT NOT NULL DEFAULT '0',
     fee TEXT NOT NULL DEFAULT '0',
     fee_ccy TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'strategy',
+    probe_id TEXT NOT NULL DEFAULT '',
     version INTEGER NOT NULL DEFAULT 0,
     last_error_code TEXT NOT NULL DEFAULT '',
     last_error_message TEXT NOT NULL DEFAULT '',
@@ -208,6 +211,8 @@ CREATE TABLE IF NOT EXISTS system_events (
     payload_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_system_events_name_created
+ON system_events(event_name, created_at DESC, event_id DESC);
 
 CREATE TABLE IF NOT EXISTS outbox_events (
     event_id TEXT PRIMARY KEY,
@@ -215,6 +220,50 @@ CREATE TABLE IF NOT EXISTS outbox_events (
     payload_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,
     published_at REAL
+);
+
+CREATE TABLE IF NOT EXISTS alert_deliveries (
+    event_id TEXT PRIMARY KEY,
+    priority TEXT NOT NULL CHECK(priority IN ('P0', 'P1')),
+    state TEXT NOT NULL CHECK(
+        state IN (
+            'pending', 'retry', 'ingested', 'provider_received',
+            'acknowledged', 'escalated', 'dlq'
+        )
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    next_attempt_at REAL NOT NULL,
+    ingestion_accepted_at REAL,
+    provider_received_at REAL,
+    provider_event_id TEXT NOT NULL DEFAULT '',
+    human_ack_at REAL,
+    human_ack_actor TEXT NOT NULL DEFAULT '',
+    escalation_at REAL,
+    last_http_status INTEGER,
+    last_error TEXT NOT NULL DEFAULT '',
+    dlq_at REAL,
+    provider_artifact_sha256 TEXT NOT NULL DEFAULT '',
+    human_ack_artifact_sha256 TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    FOREIGN KEY(event_id) REFERENCES outbox_events(event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_due
+    ON alert_deliveries(state, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_created
+    ON alert_deliveries(created_at);
+
+CREATE TABLE IF NOT EXISTS alert_delivery_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL,
+    attempt_no INTEGER NOT NULL CHECK(attempt_no > 0),
+    started_at REAL NOT NULL,
+    completed_at REAL NOT NULL,
+    http_status INTEGER,
+    ingestion_accepted INTEGER NOT NULL CHECK(ingestion_accepted IN (0, 1)),
+    error TEXT NOT NULL DEFAULT '',
+    UNIQUE(event_id, attempt_no),
+    FOREIGN KEY(event_id) REFERENCES alert_deliveries(event_id)
 );
 
 CREATE TABLE IF NOT EXISTS system_state (
@@ -259,8 +308,62 @@ CREATE TABLE IF NOT EXISTS control_commands (
 );
 CREATE INDEX IF NOT EXISTS idx_control_commands_status_created
     ON control_commands(status, created_at);
+
+CREATE TABLE IF NOT EXISTS probe_runs (
+    probe_id TEXT PRIMARY KEY CHECK(length(probe_id) = 32),
+    account_uid TEXT NOT NULL,
+    utc_day TEXT NOT NULL,
+    slot INTEGER NOT NULL CHECK(slot BETWEEN 1 AND 2),
+    inst_id TEXT NOT NULL,
+    nominal_usdt TEXT NOT NULL
+        CHECK(CAST(nominal_usdt AS REAL) BETWEEN 5 AND 10),
+    state TEXT NOT NULL CHECK(state IN (
+        'PREPARED','BUY_SUBMITTING','BUY_UNKNOWN','BUY_FILLED',
+        'PROTECTING','PROTECTED','CLEANING','DONE','REJECTED',
+        'MANUAL_REVIEW','FAILED'
+    )),
+    buy_cl_ord_id TEXT NOT NULL UNIQUE,
+    algo_cl_ord_id TEXT NOT NULL UNIQUE,
+    buy_intent_id TEXT UNIQUE,
+    exit_intent_id TEXT UNIQUE,
+    baseline_base_balance TEXT NOT NULL DEFAULT '0',
+    final_base_balance TEXT NOT NULL DEFAULT '0',
+    expected_base_dust TEXT NOT NULL DEFAULT '0',
+    duplicate_buy_count INTEGER NOT NULL DEFAULT 0
+        CHECK(duplicate_buy_count >= 0),
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_expires_at REAL NOT NULL DEFAULT 0,
+    fencing_token INTEGER NOT NULL DEFAULT 0,
+    version INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE(account_uid, utc_day, slot)
+);
+CREATE INDEX IF NOT EXISTS idx_probe_runs_state_updated
+    ON probe_runs(state, updated_at);
 """
-LATEST_SCHEMA_VERSION = 9
+LATEST_SCHEMA_VERSION = 11
+_FORMAL_PROBE_SCHEDULE_STATE_KEY = "formal_probe_schedule_binding_v1"
+_FORMAL_PROBE_SCHEDULE_KEYS = {
+    "version",
+    "action",
+    "schedule_id",
+    "created_at",
+    "slots",
+}
+_FORMAL_PROBE_SLOT_KEYS = {
+    "day",
+    "slot",
+    "inst_id",
+    "direction",
+    "window_start",
+    "window_end",
+    "spread_min_bps",
+    "spread_max_bps",
+    "volatility_min_bps",
+    "volatility_max_bps",
+}
 
 
 class SQLiteJournal:
@@ -478,6 +581,8 @@ class SQLiteJournal:
             self._migration_007_control_schema,
             self._migration_008_submission_reference,
             self._migration_009_reconciliation_checkpoints,
+            self._migration_010_demo_probe_saga,
+            self._migration_011_durable_alert_delivery,
         )
         current = self._schema_version()
         versions = [
@@ -650,6 +755,48 @@ class SQLiteJournal:
             "INTEGER NOT NULL DEFAULT 0",
         )
 
+    @classmethod
+    def _migration_010_demo_probe_saga(
+        cls,
+        conn: sqlite3.Connection,
+    ) -> None:
+        cls._execute_schema_conn(conn)
+        cls._ensure_column_conn(
+            conn,
+            "order_intents",
+            "source",
+            "TEXT NOT NULL DEFAULT 'strategy'",
+        )
+        cls._ensure_column_conn(
+            conn,
+            "order_intents",
+            "probe_id",
+            "TEXT NOT NULL DEFAULT ''",
+        )
+
+    @classmethod
+    def _migration_011_durable_alert_delivery(
+        cls,
+        conn: sqlite3.Connection,
+    ) -> None:
+        cls._execute_schema_conn(conn)
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO alert_deliveries(
+                event_id, priority, state, next_attempt_at,
+                created_at, updated_at
+            )
+            SELECT
+                event_id,
+                CASE WHEN event_name LIKE 'page.%' THEN 'P0' ELSE 'P1' END,
+                CASE WHEN published_at IS NULL THEN 'pending' ELSE 'ingested' END,
+                created_at,
+                created_at,
+                COALESCE(published_at, created_at)
+            FROM outbox_events
+            """
+        )
+
     def initialize_identity(
         self,
         *,
@@ -698,6 +845,15 @@ class SQLiteJournal:
                 ON CONFLICT(key) DO UPDATE SET
                     value=CAST(system_state.value AS INTEGER) + 1,
                     updated_at=excluded.updated_at
+                """,
+                (now,),
+            )
+            conn.execute(
+                """
+                INSERT INTO system_state(key, value, updated_at)
+                VALUES('mode_reason', 'journal_initialized_halted', ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value, updated_at=excluded.updated_at
                 """,
                 (now,),
             )
@@ -753,6 +909,36 @@ class SQLiteJournal:
                 "SELECT MAX(version) FROM schema_migrations"
             ).fetchone()
             return bool(row and row[0] == LATEST_SCHEMA_VERSION)
+
+    def passive_wal_checkpoint(self) -> dict:
+        """Run a non-blocking WAL checkpoint and return auditable counters."""
+        with self._lock:
+            row = self._conn.execute(
+                "PRAGMA wal_checkpoint(PASSIVE)"
+            ).fetchone()
+            page_size_row = self._conn.execute("PRAGMA page_size").fetchone()
+        if row is None or len(row) != 3:
+            raise RuntimeError("SQLite WAL checkpoint 返回结构非法")
+        if page_size_row is None or len(page_size_row) != 1:
+            raise RuntimeError("SQLite page_size 返回结构非法")
+        busy, log_frames, checkpointed_frames = map(int, row)
+        page_size_bytes = int(page_size_row[0])
+        if (
+            min(busy, log_frames, checkpointed_frames) < 0
+            or checkpointed_frames > log_frames
+            or page_size_bytes <= 0
+        ):
+            raise RuntimeError("SQLite WAL checkpoint 返回非法计数")
+        backlog_frames = log_frames - checkpointed_frames
+        return {
+            "busy": busy,
+            "log_frames": log_frames,
+            "checkpointed_frames": checkpointed_frames,
+            "backlog_frames": backlog_frames,
+            "page_size_bytes": page_size_bytes,
+            "backlog_bytes": backlog_frames * (page_size_bytes + 24),
+            "completed_at": time.time(),
+        }
 
     def create_decision(
         self,
@@ -1052,11 +1238,502 @@ class SQLiteJournal:
         result["result"] = json.loads(result.pop("result_json"))
         return result
 
+    @staticmethod
+    def _canonical_json_bytes(value: object) -> bytes:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+
+    @classmethod
+    def _validate_formal_probe_schedule_binding(
+        cls,
+        *,
+        account_uid: str,
+        soak_epoch_id: str,
+        schedule: object,
+        schedule_sha256: str,
+    ) -> dict:
+        if (
+            not account_uid.strip()
+            or not soak_epoch_id.strip()
+            or not re.fullmatch(r"[0-9a-f]{64}", schedule_sha256)
+            or not isinstance(schedule, dict)
+            or set(schedule) != _FORMAL_PROBE_SCHEDULE_KEYS
+            or schedule.get("version") != 2
+            or schedule.get("action") != "precommit-demo-probe-schedule"
+            or not str(schedule.get("schedule_id", "")).strip()
+        ):
+            raise ValueError("formal probe schedule DB binding identity 非法")
+        try:
+            created_at = datetime.fromisoformat(str(schedule["created_at"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "formal probe schedule created_at 非法"
+            ) from exc
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise ValueError("formal probe schedule created_at 必须带时区")
+        if hashlib.sha256(
+            cls._canonical_json_bytes(schedule)
+        ).hexdigest() != schedule_sha256:
+            raise ValueError("formal probe schedule hash 与 frozen bytes 不一致")
+        slots = schedule["slots"]
+        if not isinstance(slots, list) or len(slots) != 30:
+            raise ValueError("formal probe schedule DB binding 必须精确 30 日")
+        days: list[date] = []
+        slot_bindings: list[dict] = []
+        for item in slots:
+            if (
+                not isinstance(item, dict)
+                or set(item) != _FORMAL_PROBE_SLOT_KEYS
+                or item["slot"] != 1
+                or item["direction"] != "buy_then_exit"
+                or not re.fullmatch(
+                    r"[A-Z0-9]+-USDT",
+                    str(item["inst_id"]),
+                )
+            ):
+                raise ValueError(
+                    "formal probe schedule DB slot 必须为每日唯一 slot=1"
+                )
+            try:
+                day = date.fromisoformat(str(item["day"]))
+                started = datetime.fromisoformat(
+                    str(item["window_start"])
+                ).astimezone(UTC)
+                ended = datetime.fromisoformat(
+                    str(item["window_end"])
+                ).astimezone(UTC)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "formal probe schedule DB slot 时间非法"
+                ) from exc
+            if (
+                started.date() != day
+                or ended.date() != day
+                or not started < ended
+                or created_at.astimezone(UTC) >= started
+            ):
+                raise ValueError(
+                    "formal probe schedule DB slot 日期/窗口非法"
+                )
+            days.append(day)
+            slot_bindings.append({
+                "day": day.isoformat(),
+                "slot": 1,
+                "inst_id": str(item["inst_id"]),
+            })
+        ordered_days = sorted(days)
+        if (
+            len(set(days)) != 30
+            or any(
+                right - left != timedelta(days=1)
+                for left, right in zip(
+                    ordered_days,
+                    ordered_days[1:],
+                    strict=False,
+                )
+            )
+        ):
+            raise ValueError(
+                "formal probe schedule DB binding 必须是连续且每日精确一次"
+            )
+        return {
+            "version": 1,
+            "account_uid": account_uid,
+            "soak_epoch_id": soak_epoch_id,
+            "schedule_id": str(schedule["schedule_id"]),
+            "schedule_sha256": schedule_sha256,
+            "slots": sorted(slot_bindings, key=lambda row: row["day"]),
+        }
+
+    def bind_formal_probe_schedule(
+        self,
+        *,
+        account_uid: str,
+        soak_epoch_id: str,
+        schedule: object,
+        schedule_sha256: str,
+    ) -> dict:
+        binding = self._validate_formal_probe_schedule_binding(
+            account_uid=account_uid,
+            soak_epoch_id=soak_epoch_id,
+            schedule=schedule,
+            schedule_sha256=schedule_sha256,
+        )
+        encoded = self._canonical_json_bytes(binding).decode("utf-8")
+        with self.transaction() as conn:
+            existing = conn.execute(
+                "SELECT value FROM system_state WHERE key=?",
+                (_FORMAL_PROBE_SCHEDULE_STATE_KEY,),
+            ).fetchone()
+            if existing is not None and existing["value"] != encoded:
+                raise RuntimeError(
+                    "formal probe schedule 已冻结，禁止替换 epoch/schedule"
+                )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO system_state(key, value, updated_at)
+                VALUES(?, ?, ?)
+                """,
+                (_FORMAL_PROBE_SCHEDULE_STATE_KEY, encoded, time.time()),
+            )
+        return binding
+
+    @staticmethod
+    def _formal_probe_schedule_binding_conn(
+        conn: sqlite3.Connection,
+    ) -> dict | None:
+        row = conn.execute(
+            "SELECT value FROM system_state WHERE key=?",
+            (_FORMAL_PROBE_SCHEDULE_STATE_KEY,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            binding = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "durable formal probe schedule binding 损坏"
+            ) from exc
+        if (
+            not isinstance(binding, dict)
+            or set(binding)
+            != {
+                "version",
+                "account_uid",
+                "soak_epoch_id",
+                "schedule_id",
+                "schedule_sha256",
+                "slots",
+            }
+            or binding["version"] != 1
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(binding["schedule_sha256"]),
+            )
+            or not isinstance(binding["slots"], list)
+            or len(binding["slots"]) != 30
+        ):
+            raise RuntimeError(
+                "durable formal probe schedule binding schema 非法"
+            )
+        return binding
+
+    @classmethod
+    def _assert_formal_probe_slot_conn(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        account_uid: str,
+        soak_epoch_id: str,
+        schedule_sha256: str,
+        utc_day: str,
+        slot: int,
+        inst_id: str,
+    ) -> bool:
+        binding = cls._formal_probe_schedule_binding_conn(conn)
+        if binding is None:
+            if soak_epoch_id or schedule_sha256:
+                raise RuntimeError(
+                    "formal probe capability 缺少 durable frozen schedule"
+                )
+            return False
+        matches = [
+            item
+            for item in binding["slots"]
+            if (
+                isinstance(item, dict)
+                and set(item) == {"day", "slot", "inst_id"}
+                and item["day"] == utc_day
+            )
+        ]
+        if (
+            binding["account_uid"] != account_uid
+            or binding["soak_epoch_id"] != soak_epoch_id
+            or binding["schedule_sha256"] != schedule_sha256
+            or slot != 1
+            or len(matches) != 1
+            or matches[0] != {
+                "day": utc_day,
+                "slot": 1,
+                "inst_id": inst_id,
+            }
+        ):
+            raise RuntimeError(
+                "formal probe capability 与 frozen epoch/schedule/day/slot 不一致"
+            )
+        return True
+
+    def create_probe_run(
+        self,
+        *,
+        probe_id: str,
+        account_uid: str,
+        utc_day: str,
+        slot: int,
+        inst_id: str,
+        nominal_usdt: Decimal,
+        buy_cl_ord_id: str,
+        algo_cl_ord_id: str,
+        baseline_base_balance: Decimal,
+        soak_epoch_id: str = "",
+        formal_schedule_sha256: str = "",
+    ) -> dict:
+        if (
+            not re.fullmatch(r"[0-9a-f]{32}", probe_id)
+            or not account_uid.strip()
+            or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", utc_day)
+            or slot not in {1, 2}
+            or not re.fullmatch(r"[A-Z0-9]+-USDT", inst_id)
+            or not Decimal("5") <= nominal_usdt <= Decimal("10")
+            or not re.fullmatch(r"[A-Za-z0-9]{1,32}", buy_cl_ord_id)
+            or not re.fullmatch(r"[A-Za-z0-9]{1,32}", algo_cl_ord_id)
+        ):
+            raise ValueError("probe PREPARED identity/policy 非法")
+        now = time.time()
+        with self.transaction() as conn:
+            formal = self._assert_formal_probe_slot_conn(
+                conn,
+                account_uid=account_uid,
+                soak_epoch_id=soak_epoch_id,
+                schedule_sha256=formal_schedule_sha256,
+                utc_day=utc_day,
+                slot=slot,
+                inst_id=inst_id,
+            )
+            existing = conn.execute(
+                """
+                SELECT COUNT(*) FROM probe_runs
+                WHERE account_uid=? AND utc_day=?
+                """,
+                (account_uid, utc_day),
+            ).fetchone()[0]
+            if int(existing) >= (1 if formal else 2):
+                raise RuntimeError("该账户 UTC 日 probe 配额已耗尽")
+            unresolved = conn.execute(
+                """
+                SELECT probe_id FROM probe_runs
+                WHERE account_uid=?
+                  AND state NOT IN ('DONE','REJECTED','FAILED')
+                LIMIT 1
+                """,
+                (account_uid,),
+            ).fetchone()
+            if unresolved is not None:
+                raise RuntimeError("该账户已有未决 probe saga")
+            pending = conn.execute(
+                """
+                SELECT intent_id FROM order_intents
+                WHERE state NOT IN ('filled','canceled','rejected')
+                LIMIT 1
+                """
+            ).fetchone()
+            if pending is not None:
+                raise RuntimeError("账户存在未决普通订单，禁止 PREPARED")
+            positive_positions = [
+                row
+                for row in conn.execute(
+                    "SELECT inst_id, base_qty FROM positions"
+                ).fetchall()
+                if parse_decimal_fact(
+                    row["base_qty"],
+                    "positions.base_qty",
+                    nonnegative=True,
+                )
+                > 0
+            ]
+            if positive_positions:
+                raise RuntimeError("账户存在非 probe 仓位，禁止 PREPARED")
+            conn.execute(
+                """
+                INSERT INTO probe_runs(
+                    probe_id, account_uid, utc_day, slot, inst_id,
+                    nominal_usdt, state, buy_cl_ord_id, algo_cl_ord_id,
+                    baseline_base_balance, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,'PREPARED',?,?,?,?,?)
+                """,
+                (
+                    probe_id,
+                    account_uid,
+                    utc_day,
+                    slot,
+                    inst_id,
+                    str(nominal_usdt),
+                    buy_cl_ord_id,
+                    algo_cl_ord_id,
+                    str(baseline_base_balance),
+                    now,
+                    now,
+                ),
+            )
+        result = self.get_probe_run(probe_id)
+        assert result is not None
+        return result
+
+    def get_probe_run(self, probe_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM probe_runs WHERE probe_id=?",
+                (probe_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_probe_runs(
+        self,
+        *,
+        account_uid: str = "",
+        utc_day: str = "",
+        unresolved_only: bool = False,
+    ) -> list[dict]:
+        query = "SELECT * FROM probe_runs WHERE 1=1"
+        params: list[object] = []
+        if account_uid:
+            query += " AND account_uid=?"
+            params.append(account_uid)
+        if utc_day:
+            query += " AND utc_day=?"
+            params.append(utc_day)
+        if unresolved_only:
+            query += " AND state NOT IN ('DONE','REJECTED','FAILED')"
+        query += " ORDER BY created_at, probe_id"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def acquire_probe_lease(
+        self,
+        probe_id: str,
+        owner: str,
+        *,
+        ttl_s: float = 30,
+    ) -> tuple[int, dict] | None:
+        if (
+            not owner.strip()
+            or not math.isfinite(ttl_s)
+            or not 1 <= ttl_s <= 300
+        ):
+            raise ValueError("probe lease owner/ttl 非法")
+        now = time.time()
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM probe_runs WHERE probe_id=?",
+                (probe_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"probe 不存在: {probe_id}")
+            if row["state"] in {"DONE", "REJECTED", "FAILED"}:
+                return None
+            if (
+                row["lease_owner"]
+                and row["lease_owner"] != owner
+                and float(row["lease_expires_at"]) > now
+            ):
+                return None
+            token = int(row["fencing_token"]) + 1
+            cursor = conn.execute(
+                """
+                UPDATE probe_runs
+                SET lease_owner=?, lease_expires_at=?, fencing_token=?,
+                    version=version+1, updated_at=?
+                WHERE probe_id=? AND version=?
+                """,
+                (
+                    owner,
+                    now + ttl_s,
+                    token,
+                    now,
+                    probe_id,
+                    row["version"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+        updated = self.get_probe_run(probe_id)
+        assert updated is not None
+        return token, updated
+
+    def transition_probe_run(
+        self,
+        probe_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+        expected_states: tuple[str, ...],
+        new_state: str,
+        changes: dict | None = None,
+    ) -> dict:
+        allowed_fields = {
+            "buy_intent_id",
+            "exit_intent_id",
+            "final_base_balance",
+            "expected_base_dust",
+            "duplicate_buy_count",
+            "last_error",
+        }
+        changes = changes or {}
+        if not expected_states or set(changes) - allowed_fields:
+            raise ValueError("probe transition expected state/changes 非法")
+        now = time.time()
+        assignments = ["state=?", "version=version+1", "updated_at=?"]
+        params: list[object] = [new_state, now]
+        for key, value in changes.items():
+            assignments.append(f"{key}=?")
+            params.append(str(value) if isinstance(value, Decimal) else value)
+        placeholders = ",".join("?" for _ in expected_states)
+        params.extend(
+            [
+                probe_id,
+                owner,
+                fencing_token,
+                now,
+                *expected_states,
+            ]
+        )
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE probe_runs SET {", ".join(assignments)}
+                WHERE probe_id=? AND lease_owner=? AND fencing_token=?
+                  AND lease_expires_at>? AND state IN ({placeholders})
+                """,
+                params,
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("probe transition lease/fence/state 冲突")
+        updated = self.get_probe_run(probe_id)
+        assert updated is not None
+        return updated
+
+    def release_probe_lease(
+        self,
+        probe_id: str,
+        *,
+        owner: str,
+        fencing_token: int,
+    ) -> bool:
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE probe_runs
+                SET lease_owner='', lease_expires_at=0,
+                    version=version+1, updated_at=?
+                WHERE probe_id=? AND lease_owner=? AND fencing_token=?
+                """,
+                (time.time(), probe_id, owner, fencing_token),
+            )
+        return cursor.rowcount == 1
+
     def create_order_intent(
         self,
         intent: OrderIntent,
         *,
         risk_guard: IntentRiskGuard | None = None,
+        probe_lease_owner: str = "",
+        probe_fencing_token: int = 0,
     ) -> OrderIntent:
         if intent.state is not OrderState.CREATED:
             raise ValueError("新订单意图必须从 CREATED 开始")
@@ -1065,6 +1742,16 @@ class SQLiteJournal:
             created_at=intent.created_at or time.time(),
         )
         with self.transaction() as conn:
+            if persisted.side == "buy" and persisted.source == "demo_validation_probe":
+                self._assert_probe_order_capability_conn(
+                    conn,
+                    persisted,
+                    owner=probe_lease_owner,
+                    fencing_token=probe_fencing_token,
+                    require_persisted_intent=False,
+                )
+            elif probe_lease_owner or probe_fencing_token:
+                raise ValueError("非 Demo probe BUY 禁止携带 probe capability")
             if persisted.side == "buy" and risk_guard is not None:
                 self._assert_buy_risk_guard_conn(
                     conn,
@@ -1080,8 +1767,9 @@ class SQLiteJournal:
                     requested_stop_loss, requested_take_profit,
                     state, exchange_ord_id,
                     exchange_state, acc_fill_qty, avg_fill_px, fee, fee_ccy,
-                    version, last_error_code, last_error_message, created_at, updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    source, probe_id, version, last_error_code,
+                    last_error_message, created_at, updated_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 self._intent_values(persisted),
             )
@@ -1117,6 +1805,99 @@ class SQLiteJournal:
                     ),
                 )
         return persisted
+
+    @classmethod
+    def _assert_probe_order_capability_conn(
+        cls,
+        conn: sqlite3.Connection,
+        intent: OrderIntent,
+        *,
+        owner: str,
+        fencing_token: int,
+        require_persisted_intent: bool,
+    ) -> None:
+        now = time.time()
+        row = conn.execute(
+            """
+            SELECT probe_id, account_uid, utc_day, slot, inst_id,
+                   nominal_usdt, state, buy_cl_ord_id,
+                   buy_intent_id, lease_owner, lease_expires_at, fencing_token
+            FROM probe_runs WHERE probe_id=?
+            """,
+            (intent.probe_id,),
+        ).fetchone()
+        existing = conn.execute(
+            """
+            SELECT intent_id, cl_ord_id, inst_id FROM order_intents
+            WHERE source='demo_validation_probe' AND side='buy' AND probe_id=?
+            """,
+            (intent.probe_id,),
+        ).fetchall()
+        binding = cls._formal_probe_schedule_binding_conn(conn)
+        if row is not None and binding is not None:
+            cls._assert_formal_probe_slot_conn(
+                conn,
+                account_uid=str(row["account_uid"]),
+                soak_epoch_id=str(binding["soak_epoch_id"]),
+                schedule_sha256=str(binding["schedule_sha256"]),
+                utc_day=str(row["utc_day"]),
+                slot=int(row["slot"]),
+                inst_id=str(row["inst_id"]),
+            )
+        if (
+            row is None
+            or not owner
+            or type(fencing_token) is not int
+            or fencing_token <= 0
+            or row["state"] != "BUY_SUBMITTING"
+            or row["inst_id"] != intent.inst_id
+            or row["buy_cl_ord_id"] != intent.cl_ord_id
+            or row["buy_intent_id"] is not None
+            or row["lease_owner"] != owner
+            or int(row["fencing_token"]) != fencing_token
+            or float(row["lease_expires_at"]) <= now
+            or not Decimal("5") <= Decimal(str(row["nominal_usdt"])) <= Decimal("10")
+            or (
+                require_persisted_intent
+                and (
+                    len(existing) != 1
+                    or existing[0]["cl_ord_id"] != intent.cl_ord_id
+                    or existing[0]["inst_id"] != intent.inst_id
+                )
+            )
+            or (not require_persisted_intent and existing)
+        ):
+            raise RuntimeError(
+                "Demo probe BUY capability 与 durable saga state/lease/fence 不一致"
+            )
+
+    def assert_probe_order_capability(
+        self,
+        *,
+        probe_id: str,
+        owner: str,
+        fencing_token: int,
+        cl_ord_id: str,
+        inst_id: str,
+    ) -> None:
+        """Recheck the same capability immediately before an exchange write."""
+        intent = OrderIntent(
+            intent_id="probe-pre-send",
+            cl_ord_id=cl_ord_id,
+            inst_id=inst_id,
+            side="buy",
+            requested_base_qty=Decimal("1"),
+            source="demo_validation_probe",
+            probe_id=probe_id,
+        )
+        with self._lock:
+            self._assert_probe_order_capability_conn(
+                self._conn,
+                intent,
+                owner=owner,
+                fencing_token=fencing_token,
+                require_persisted_intent=True,
+            )
 
     @staticmethod
     def _assert_buy_risk_guard_conn(
@@ -2044,6 +2825,7 @@ class SQLiteJournal:
 
     def enqueue_outbox(self, event_name: str, payload: dict) -> str:
         event_id = uuid.uuid4().hex
+        now = time.time()
         with self.transaction() as conn:
             conn.execute(
                 """
@@ -2055,7 +2837,22 @@ class SQLiteJournal:
                     event_id,
                     event_name,
                     json.dumps(payload, ensure_ascii=False, default=str),
-                    time.time(),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO alert_deliveries(
+                    event_id, priority, state, next_attempt_at,
+                    created_at, updated_at
+                ) VALUES(?,?, 'pending', ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    "P0" if event_name.startswith("page.") else "P1",
+                    now,
+                    now,
+                    now,
                 ),
             )
         return event_id
@@ -2071,6 +2868,7 @@ class SQLiteJournal:
         event_id = hashlib.sha256(
             f"outbox:{deduplication_key}".encode()
         ).hexdigest()
+        now = time.time()
         with self.transaction() as conn:
             conn.execute(
                 """
@@ -2082,7 +2880,22 @@ class SQLiteJournal:
                     event_id,
                     event_name,
                     json.dumps(payload, ensure_ascii=False, default=str),
-                    time.time(),
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO alert_deliveries(
+                    event_id, priority, state, next_attempt_at,
+                    created_at, updated_at
+                ) VALUES(?,?, 'pending', ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    "P0" if event_name.startswith("page.") else "P1",
+                    now,
+                    now,
+                    now,
                 ),
             )
         return event_id
@@ -2100,11 +2913,325 @@ class SQLiteJournal:
         return [dict(row) for row in rows]
 
     def mark_outbox_published(self, event_id: str) -> None:
+        now = time.time()
         with self.transaction() as conn:
             conn.execute(
                 "UPDATE outbox_events SET published_at=? WHERE event_id=?",
-                (time.time(), event_id),
+                (now, event_id),
             )
+            conn.execute(
+                """
+                UPDATE alert_deliveries
+                SET state=CASE
+                        WHEN state IN ('pending', 'retry') THEN 'ingested'
+                        ELSE state
+                    END,
+                    ingestion_accepted_at=COALESCE(
+                        ingestion_accepted_at, ?
+                    ),
+                    updated_at=?
+                WHERE event_id=?
+                """,
+                (now, now, event_id),
+            )
+
+    def get_due_alerts(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
+        current = time.time() if now is None else now
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT o.event_id, o.event_name, o.payload_json, o.created_at,
+                       d.priority, d.state, d.attempt_count,
+                       d.next_attempt_at
+                FROM outbox_events AS o
+                JOIN alert_deliveries AS d USING(event_id)
+                WHERE o.published_at IS NULL
+                  AND d.state IN ('pending', 'retry')
+                  AND d.next_attempt_at <= ?
+                ORDER BY d.next_attempt_at, o.created_at
+                LIMIT ?
+                """,
+                (current, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_alert_attempt(
+        self,
+        event_id: str,
+        *,
+        started_at: float,
+        completed_at: float,
+        http_status: int | None,
+        ingestion_accepted: bool,
+        error: str = "",
+        max_attempts: int = 8,
+    ) -> dict:
+        if (
+            not event_id
+            or isinstance(started_at, bool)
+            or isinstance(completed_at, bool)
+            or completed_at < started_at
+            or type(ingestion_accepted) is not bool
+            or type(max_attempts) is not int
+            or max_attempts < 1
+        ):
+            raise ValueError("alert delivery attempt 参数非法")
+        if (
+            http_status is not None
+            and (type(http_status) is not int or not 100 <= http_status <= 599)
+        ):
+            raise ValueError("alert HTTP status 非法")
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"未知 alert event_id: {event_id}")
+            if row["state"] not in {"pending", "retry"}:
+                return dict(row)
+            attempt_no = int(row["attempt_count"]) + 1
+            conn.execute(
+                """
+                INSERT INTO alert_delivery_attempts(
+                    attempt_id, event_id, attempt_no, started_at,
+                    completed_at, http_status, ingestion_accepted, error
+                ) VALUES(?,?,?,?,?,?,?,?)
+                """,
+                (
+                    uuid.uuid4().hex,
+                    event_id,
+                    attempt_no,
+                    started_at,
+                    completed_at,
+                    http_status,
+                    int(ingestion_accepted),
+                    error[:1000],
+                ),
+            )
+            if ingestion_accepted:
+                state = "ingested"
+                next_attempt = completed_at
+                dlq_at = None
+                conn.execute(
+                    "UPDATE outbox_events SET published_at=? WHERE event_id=?",
+                    (completed_at, event_id),
+                )
+            elif attempt_no >= max_attempts:
+                state = "dlq"
+                next_attempt = completed_at
+                dlq_at = completed_at
+            else:
+                state = "retry"
+                deterministic_jitter = (
+                    int(hashlib.sha256(event_id.encode()).hexdigest()[:4], 16)
+                    % 1000
+                ) / 1000
+                next_attempt = completed_at + min(
+                    2 ** min(attempt_no, 8) + deterministic_jitter,
+                    300,
+                )
+                dlq_at = None
+            conn.execute(
+                """
+                UPDATE alert_deliveries
+                SET state=?, attempt_count=?, next_attempt_at=?,
+                    ingestion_accepted_at=CASE
+                        WHEN ? THEN ? ELSE ingestion_accepted_at
+                    END,
+                    last_http_status=?, last_error=?, dlq_at=?,
+                    updated_at=?
+                WHERE event_id=?
+                """,
+                (
+                    state,
+                    attempt_no,
+                    next_attempt,
+                    int(ingestion_accepted),
+                    completed_at,
+                    http_status,
+                    error[:1000],
+                    dlq_at,
+                    completed_at,
+                    event_id,
+                ),
+            )
+            updated = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        return dict(updated)
+
+    def record_alert_provider_received(
+        self,
+        event_id: str,
+        *,
+        provider_received_at: float,
+        provider_event_id: str,
+        artifact_sha256: str,
+    ) -> dict:
+        if (
+            not provider_event_id.strip()
+            or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256)
+        ):
+            raise ValueError("provider receipt identity 非法")
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"未知 alert event_id: {event_id}")
+            if (
+                isinstance(provider_received_at, bool)
+                or not isinstance(provider_received_at, (int, float))
+                or provider_received_at < float(row["created_at"])
+                or provider_received_at > time.time() + 300
+            ):
+                raise ValueError("provider received 时间非法")
+            if row["provider_received_at"] is not None and (
+                float(row["provider_received_at"]) != provider_received_at
+                or row["provider_event_id"] != provider_event_id
+                or row["provider_artifact_sha256"] != artifact_sha256
+            ):
+                raise RuntimeError("provider receipt 与已锁存事实冲突")
+            state = (
+                "acknowledged"
+                if row["human_ack_at"] is not None
+                else "provider_received"
+            )
+            conn.execute(
+                """
+                UPDATE alert_deliveries
+                SET state=?, provider_received_at=?, provider_event_id=?,
+                    provider_artifact_sha256=?, updated_at=?
+                WHERE event_id=?
+                """,
+                (
+                    state,
+                    provider_received_at,
+                    provider_event_id,
+                    artifact_sha256,
+                    time.time(),
+                    event_id,
+                ),
+            )
+            updated = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        return dict(updated)
+
+    def record_alert_human_ack(
+        self,
+        event_id: str,
+        *,
+        human_ack_at: float,
+        actor: str,
+        artifact_sha256: str,
+    ) -> dict:
+        if (
+            not actor.strip()
+            or not re.fullmatch(r"[0-9a-f]{64}", artifact_sha256)
+        ):
+            raise ValueError("human ack identity 非法")
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"未知 alert event_id: {event_id}")
+            if row["provider_received_at"] is None:
+                raise RuntimeError("human ack 不能先于 provider_received")
+            if (
+                isinstance(human_ack_at, bool)
+                or not isinstance(human_ack_at, (int, float))
+                or human_ack_at < float(row["provider_received_at"])
+                or human_ack_at > time.time() + 300
+            ):
+                raise ValueError("human ack 时间非法")
+            if row["human_ack_at"] is not None and (
+                float(row["human_ack_at"]) != human_ack_at
+                or row["human_ack_actor"] != actor
+                or row["human_ack_artifact_sha256"] != artifact_sha256
+            ):
+                raise RuntimeError("human ack 与已锁存事实冲突")
+            conn.execute(
+                """
+                UPDATE alert_deliveries
+                SET state='acknowledged', human_ack_at=?,
+                    human_ack_actor=?, human_ack_artifact_sha256=?,
+                    updated_at=?
+                WHERE event_id=?
+                """,
+                (
+                    human_ack_at,
+                    actor,
+                    artifact_sha256,
+                    time.time(),
+                    event_id,
+                ),
+            )
+            updated = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        return dict(updated)
+
+    def record_alert_escalation(
+        self,
+        event_id: str,
+        *,
+        escalation_at: float | None = None,
+    ) -> dict:
+        occurred = time.time() if escalation_at is None else escalation_at
+        with self.transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"未知 alert event_id: {event_id}")
+            if row["human_ack_at"] is not None:
+                raise RuntimeError("已人工 ACK 的告警不得标记无人响应升级")
+            conn.execute(
+                """
+                UPDATE alert_deliveries
+                SET state='escalated', escalation_at=COALESCE(
+                    escalation_at, ?
+                ), updated_at=?
+                WHERE event_id=?
+                """,
+                (occurred, time.time(), event_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM alert_deliveries WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        return dict(updated)
+
+    def list_alert_deliveries(
+        self,
+        *,
+        started_at: float = 0,
+        ended_at: float = float("inf"),
+    ) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM alert_deliveries
+                WHERE created_at >= ? AND created_at < ?
+                ORDER BY created_at, event_id
+                """,
+                (started_at, ended_at),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def set_mode(
         self,
@@ -2112,6 +3239,7 @@ class SQLiteJournal:
         *,
         allow_hard_release: bool = False,
         expected_hard_epoch: int | None = None,
+        reason: str = "",
     ) -> bool:
         hard_modes = {
             SystemMode.HALTED,
@@ -2120,13 +3248,17 @@ class SQLiteJournal:
         }
         with self.transaction() as conn:
             row = conn.execute(
-                "SELECT value FROM system_state WHERE key='mode'"
+                "SELECT value, updated_at FROM system_state WHERE key='mode'"
             ).fetchone()
             epoch_row = conn.execute(
                 "SELECT value FROM system_state WHERE key='mode_epoch'"
             ).fetchone()
             current = (
                 SystemMode(row["value"]) if row else SystemMode.STARTING
+            )
+            changed_at = time.time()
+            previous_updated_at = (
+                float(row["updated_at"]) if row is not None else changed_at
             )
             epoch = int(epoch_row["value"]) if epoch_row else 0
             if allow_hard_release and expected_hard_epoch is None:
@@ -2158,7 +3290,16 @@ class SQLiteJournal:
                 INSERT INTO system_state(key, value, updated_at) VALUES('mode', ?, ?)
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
                 """,
-                (mode.value, time.time()),
+                (mode.value, changed_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO system_state(key, value, updated_at)
+                VALUES('mode_reason', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value=excluded.value, updated_at=excluded.updated_at
+                """,
+                (reason or "runtime_transition", changed_at),
             )
             if mode in hard_modes:
                 conn.execute(
@@ -2168,7 +3309,35 @@ class SQLiteJournal:
                     ON CONFLICT(key) DO UPDATE SET
                         value=excluded.value, updated_at=excluded.updated_at
                     """,
-                    (str(epoch + 1), time.time()),
+                    (str(epoch + 1), changed_at),
+                )
+            if current is not mode:
+                conn.execute(
+                    """
+                    INSERT INTO system_events(
+                        event_id, event_name, severity, correlation_id,
+                        payload_json, created_at
+                    ) VALUES(?,?,?,?,?,?)
+                    """,
+                    (
+                        uuid.uuid4().hex,
+                        "runtime_readiness_transition",
+                        "info",
+                        "",
+                        json.dumps(
+                            {
+                                "old_mode": current.value,
+                                "new_mode": mode.value,
+                                "reason": reason or "runtime_transition",
+                                "previous_mode_duration_seconds": max(
+                                    changed_at - previous_updated_at,
+                                    0,
+                                ),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        changed_at,
+                    ),
                 )
             return True
 
@@ -2187,6 +3356,13 @@ class SQLiteJournal:
             SystemMode(rows.get("mode", SystemMode.STARTING.value)),
             int(rows.get("mode_epoch", "0")),
         )
+
+    def get_mode_reason(self) -> str:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM system_state WHERE key='mode_reason'"
+            ).fetchone()
+        return str(row["value"]) if row else ""
 
     def get_mode(self) -> SystemMode:
         with self._lock:
@@ -2384,6 +3560,44 @@ class SQLiteJournal:
                 ),
             )
 
+    def record_event_once(
+        self,
+        deduplication_key: str,
+        event_name: str,
+        *,
+        severity: str = "info",
+        correlation_id: str = "",
+        payload: dict | None = None,
+    ) -> bool:
+        """Persist an immutable fact exactly once across crash replays."""
+        if not deduplication_key:
+            raise ValueError("event deduplication_key 不能为空")
+        event_id = hashlib.sha256(
+            f"system-event:{deduplication_key}".encode()
+        ).hexdigest()
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO system_events(
+                    event_id, event_name, severity, correlation_id,
+                    payload_json, created_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    event_id,
+                    event_name,
+                    severity,
+                    correlation_id,
+                    json.dumps(
+                        payload or {},
+                        ensure_ascii=False,
+                        default=str,
+                    ),
+                    time.time(),
+                ),
+            )
+        return cursor.rowcount == 1
+
     def list_events(
         self,
         event_name: str = "",
@@ -2404,6 +3618,23 @@ class SQLiteJournal:
             item["payload"] = json.loads(item.pop("payload_json"))
             result.append(item)
         return result
+
+    def latest_event(self, event_name: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM system_events
+                WHERE event_name=?
+                ORDER BY created_at DESC, event_id DESC
+                LIMIT 1
+                """,
+                (event_name,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json"))
+        return item
 
     def acquire_exit_lease(self, inst_id: str, owner_id: str, ttl_s: float = 30) -> bool:
         now = time.time()
@@ -2471,6 +3702,8 @@ class SQLiteJournal:
             str(intent.avg_fill_px),
             str(intent.fee),
             intent.fee_ccy,
+            intent.source,
+            intent.probe_id,
             intent.version,
             intent.last_error_code,
             intent.last_error_message,
@@ -2500,6 +3733,8 @@ class SQLiteJournal:
             avg_fill_px=to_decimal(row["avg_fill_px"]),
             fee=to_decimal(row["fee"]),
             fee_ccy=row["fee_ccy"],
+            source=row["source"],
+            probe_id=row["probe_id"],
             version=int(row["version"]),
             last_error_code=row["last_error_code"],
             last_error_message=row["last_error_message"],

@@ -1,0 +1,216 @@
+groups:
+  - name: okx-quant-demo-p0
+    interval: 15s
+    rules:
+      - alert: OkxQuantDemoTargetDown
+        expr: up{job=~"okx-quant-demo-.+"} == 0
+        for: 30s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "Demo trader metrics target is unreachable"
+      - alert: OkxQuantDemoNotReady
+        expr: system_mode{mode="ready"} != 1
+        for: 60s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "Demo trader has not been READY for 60 seconds"
+      - alert: OkxQuantDemoWebSocketUnavailable
+        expr: ws_connected{channel=~"public|private|business"} == 0
+        for: 60s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "Required OKX WebSocket channel unavailable for 60 seconds"
+      - alert: OkxQuantDemoUnknownBuy
+        expr: unknown_buy_oldest_age_seconds > 30
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "BUY outcome remains UNKNOWN beyond the recovery budget"
+      - alert: OkxQuantDemoUnprotectedPosition
+        expr: unprotected_position_seconds > 0
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "A non-dust position lacks verified protection"
+      - alert: OkxQuantDemoInfrastructureBudgetExhausted
+        expr: consecutive_infrastructure_errors >= 3
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "A fail-closed infrastructure error budget is exhausted"
+      - alert: OkxQuantDemoAlertDeliveryBroken
+        expr: alert_delivery_consecutive_failures >= 3 or alert_outbox_oldest_age_seconds > 60
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "Alert delivery is failing or P0 facts are stuck"
+      - alert: OkxQuantDemoBackupRpoExceeded
+        expr: backup_recovery_point_age_seconds{location=~"local|offsite"} > 300 or backup_last_verification_ok != 1
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "Verified backup recovery point is older than five minutes"
+      - alert: OkxQuantDemoClockUnsafe
+        expr: clock_absolute_offset_seconds > 1
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "Host-to-OKX midpoint clock offset exceeds one second"
+      - alert: OkxQuantDemoResourceHardBreach
+        expr: resource_hard_breach == 1
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "A pre-registered resource hard limit is breached"
+      - alert: OkxQuantDemoMemoryHigh
+        expr: process_resident_memory_bytes / resource_memory_high_bytes >= 0.85
+        for: 60s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "RSS is at least 85% of systemd MemoryHigh"
+      - alert: OkxQuantDemoFdHigh
+        expr: process_open_fds / resource_limit_nofile >= 0.80
+        for: 60s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "Open FDs are at least 80% of LimitNOFILE"
+      - alert: OkxQuantDemoOomKill
+        expr: increase(cgroup_oom_kill_count[5m]) > 0
+        for: 0s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "The trader cgroup recorded an OOM kill"
+      - alert: OkxQuantDemoWalCheckpointStale
+        expr: wal_checkpoint_age_seconds >= resource_wal_checkpoint_max_age_seconds or wal_checkpoint_busy > 0
+        for: 60s
+        labels:
+          severity: page
+          priority: P0
+        annotations:
+          summary: "SQLite WAL checkpoint age or busy state is unsafe"
+
+  - name: okx-quant-demo-p1
+    interval: 30s
+    rules:
+      - alert: OkxQuantDemoWebSocketReconnect
+        expr: min_over_time(ws_connected{channel=~"public|private|business"}[5m]) == 0
+        for: 0s
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "A required WebSocket channel reconnected in the last five minutes"
+      - alert: OkxQuantDemoResourceWarning
+        expr: resource_warning == 1
+        for: 60s
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "A pre-registered resource warning threshold is active"
+      - alert: OkxQuantDemoMemoryWarning
+        expr: process_resident_memory_bytes / resource_memory_high_bytes >= 0.70
+        for: 5m
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "RSS is at least 70% of systemd MemoryHigh"
+      - alert: OkxQuantDemoFdWarning
+        expr: process_open_fds / resource_limit_nofile >= 0.60
+        for: 5m
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "Open FDs are at least 60% of LimitNOFILE"
+      - alert: OkxQuantDemoDatabaseGrowth
+        expr: predict_linear(database_bytes[6h], 86400) > resource_database_max_bytes
+        for: 15m
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "Database growth projects past its one-day hard limit"
+      - alert: OkxQuantDemoWalHigh
+        expr: database_wal_bytes / resource_wal_max_bytes >= 0.70
+        for: 5m
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "SQLite WAL is approaching its hard limit"
+      - alert: OkxQuantDemoApiLatency
+        expr: max by (instance, endpoint) (okx_api_latency_seconds) > 3
+        for: 5m
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "OKX REST latency is elevated"
+      - alert: OkxQuantDemoApiErrorRate
+        expr: sum by (instance) (rate(okx_api_requests_total{code!~"OKX:0|2..|3.."}[5m])) / clamp_min(sum by (instance) (rate(okx_api_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "OKX REST error rate is elevated"
+      - alert: OkxQuantDemoAccountSnapshotNearStale
+        expr: account_snapshot_age_seconds / account_snapshot_max_age_seconds >= 0.80
+        for: 30s
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "Account snapshot is approaching its stale limit"
+      - alert: OkxQuantDemoMarketDataNearStale
+        expr: market_data_age_seconds / market_data_max_age_seconds >= 0.80
+        for: 30s
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "Required market data is approaching its stale limit"
+      - alert: OkxQuantDemoSlippageNearLimit
+        expr: execution_slippage_ratio / execution_slippage_limit_ratio >= 0.80
+        for: 0s
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "Execution slippage is approaching its approved limit"
+      - alert: OkxQuantDemoWalCheckpointNearStale
+        expr: wal_checkpoint_backlog_frames > 0 and wal_checkpoint_age_seconds / resource_wal_checkpoint_max_age_seconds >= 0.80
+        for: 60s
+        labels:
+          severity: warning
+          priority: P1
+        annotations:
+          summary: "SQLite WAL checkpoint age is approaching its limit"

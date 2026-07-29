@@ -1,0 +1,35 @@
+[Unit]
+Description=OKX Quant account-UID writer lease broker (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=okxquant-lease
+Group=okxquant-lease
+WorkingDirectory=/opt/okx-quant-lease/current
+EnvironmentFile=/etc/okx-quant-account-lease/%i.env
+ExecStart=/opt/okx-quant-lease/current/.venv/bin/python /opt/okx-quant-lease/current/scripts/account_lease_broker.py --database /var/lib/okx-quant-account-lease/%i/leases.db --signing-private-key /etc/okx-quant-account-lease/keys/signing-private.pem --tls-cert /etc/okx-quant-account-lease/tls/server.crt --tls-private-key /etc/okx-quant-account-lease/tls/server.key --token-sha256 ${OKX_QUANT_LEASE_TOKEN_SHA256} --broker-id ${OKX_QUANT_LEASE_BROKER_ID} --allowed-account-uid ${OKX_QUANT_LEASE_ACCOUNT_UID} --listen-host ${OKX_QUANT_LEASE_LISTEN_HOST} --listen-port ${OKX_QUANT_LEASE_LISTEN_PORT}
+Restart=always
+RestartSec=2
+TimeoutStopSec=10
+UMask=0077
+StateDirectory=okx-quant-account-lease/%i
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/etc/okx-quant-account-lease
+ReadWritePaths=/var/lib/okx-quant-account-lease/%i
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

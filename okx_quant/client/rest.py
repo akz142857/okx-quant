@@ -77,6 +77,8 @@ class OKXRestClient:
         proxy: str = "",
         base_url: str = "",
         request_observer: Callable[[str, str, float], None] | None = None,
+        write_guard: Callable[[str, str], None] | None = None,
+        ca_bundle: str = "",
     ):
         self.api_key = api_key
         self.secret_key = secret_key
@@ -86,7 +88,9 @@ class OKXRestClient:
         self.max_retries = max_retries
         self.base_url = (base_url or self.BASE_URL).rstrip("/")
         self.request_observer = request_observer
+        self._write_guard = write_guard
         self._proxy = proxy
+        self.ca_bundle = ca_bundle
         # requests.Session 非线程安全；Supervisor 多 worker 线程共享同一个
         # OKXRestClient，故每线程持有独立 Session。连接出错时只重建本线程的
         # session，不影响其它线程的在途请求。
@@ -97,6 +101,8 @@ class OKXRestClient:
         s.headers.update({"Content-Type": "application/json"})
         if self._proxy:
             s.proxies = {"http": self._proxy, "https": self._proxy}
+        if self.ca_bundle:
+            s.verify = self.ca_bundle
         return s
 
     @property
@@ -114,6 +120,13 @@ class OKXRestClient:
             with contextlib.suppress(Exception):
                 s.close()
         self._local.session = self._make_session()
+
+    def set_write_guard(
+        self,
+        guard: Callable[[str, str], None] | None,
+    ) -> None:
+        """安装所有交易写在 transport boundary 必须通过的 endpoint-aware 门禁。"""
+        self._write_guard = guard
 
     # -------------------------------------------------------------------------
     # 内部签名方法
@@ -158,7 +171,9 @@ class OKXRestClient:
         *,
         max_attempts: int | None = None,
         timeout_override: float | None = None,
+        pre_send_guard: Callable[[], None] | None = None,
     ) -> OKXData:
+        method_upper = method.upper()
         url = self.base_url + path
         body_str = json.dumps(body) if body else ""
         headers: dict[str, str] = {}
@@ -177,17 +192,36 @@ class OKXRestClient:
 
         data: Any = None
         last_exc: Exception | None = None
-        attempt_limit = (
-            self.max_retries
-            if max_attempts is None
-            else max(1, min(max_attempts, self.max_retries))
-        )
+        # 写请求无论调用方如何配置都只允许一次 transport attempt。连接
+        # 丢失、HTTP 429/5xx 等歧义统一交给上层稳定 client id resolver。
+        attempt_limit = 1
+        if method_upper == "GET":
+            attempt_limit = (
+                max(1, self.max_retries)
+                if max_attempts is None
+                else max(
+                    1,
+                    min(max_attempts, max(1, self.max_retries)),
+                )
+            )
         for attempt in range(1, attempt_limit + 1):
+            # 先创建/解析线程本地 Session，再等待全局退避。门禁通过后不再
+            # 做连接池初始化等潜在阻塞工作，直接进入 socket write。
+            session = self._session
             self._wait_for_global_rate_limit()
+            if auth:
+                headers.update(
+                    self._refresh_auth(method, path, params, body_str)
+                )
+            if method_upper != "GET":
+                if self._write_guard is not None:
+                    self._write_guard(method_upper, path)
+                if pre_send_guard is not None:
+                    pre_send_guard()
             request_started = time.monotonic()
             request_observed = False
             try:
-                resp = self._session.request(
+                resp = session.request(
                     method,
                     url,
                     headers=headers,
@@ -198,7 +232,7 @@ class OKXRestClient:
                         if timeout_override is not None
                         else (
                             self.timeout
-                            if method.upper() == "GET"
+                            if method_upper == "GET"
                             else min(
                                 self.timeout,
                                 self._MAX_WRITE_TIMEOUT_SECONDS,
@@ -216,7 +250,7 @@ class OKXRestClient:
                 # GET 的 429 可以显式退避。写请求的 429 无法证明请求未被
                 # 交易所接受，必须原样交给上层 UNKNOWN resolver，绝不能
                 # 在 REST 层重放 POST。
-                if resp.status_code == 429 and method.upper() == "GET":
+                if resp.status_code == 429 and method_upper == "GET":
                     wait = self._backoff_delay(attempt, resp.headers.get("Retry-After"))
                     self._defer_global_requests(wait)
                     logger.warning(
@@ -275,7 +309,7 @@ class OKXRestClient:
                 self._reset_session()
                 # 交易类 POST 的请求是否已被 OKX 接受不可知。这里必须把
                 # 歧义交给上层 UNKNOWN resolver，绝不能在 REST 层盲重试。
-                if method.upper() != "GET":
+                if method_upper != "GET":
                     logger.error(
                         "POST 响应丢失，禁止自动重试: %s %s -> %s",
                         method,
@@ -315,7 +349,7 @@ class OKXRestClient:
             # 写失败交给 clOrdId/algoClOrdId 查询解析。
             if (
                 code in self._RATE_LIMIT_CODES
-                and method.upper() == "GET"
+                and method_upper == "GET"
                 and attempt < attempt_limit
             ):
                 wait = self._backoff_delay(attempt)
@@ -327,9 +361,9 @@ class OKXRestClient:
                 if auth:
                     headers.update(self._refresh_auth(method, path, params, body_str))
                 continue
-            if code in self._RATE_LIMIT_CODES and method.upper() == "GET":
+            if code in self._RATE_LIMIT_CODES and method_upper == "GET":
                 self._defer_global_requests(self._backoff_delay(attempt))
-            if code in self._RATE_LIMIT_CODES and method.upper() != "GET":
+            if code in self._RATE_LIMIT_CODES and method_upper != "GET":
                 self._defer_global_requests(self._backoff_delay(attempt))
                 msg = data.get("msg", "交易写请求被限速")
                 raise requests.RequestException(
@@ -375,15 +409,19 @@ class OKXRestClient:
 
     @classmethod
     def _wait_for_global_rate_limit(cls) -> None:
-        with cls._GLOBAL_RATE_LOCK:
-            deadline = cls._GLOBAL_NOT_BEFORE
-        delay = deadline - time.monotonic()
-        if delay <= 0:
-            return
-        time.sleep(delay)
-        with cls._GLOBAL_RATE_LOCK:
-            if deadline >= cls._GLOBAL_NOT_BEFORE:
-                cls._GLOBAL_NOT_BEFORE = 0.0
+        while True:
+            with cls._GLOBAL_RATE_LOCK:
+                deadline = cls._GLOBAL_NOT_BEFORE
+            delay = deadline - time.monotonic()
+            if delay <= 0:
+                return
+            time.sleep(delay)
+            with cls._GLOBAL_RATE_LOCK:
+                if deadline >= cls._GLOBAL_NOT_BEFORE:
+                    cls._GLOBAL_NOT_BEFORE = 0.0
+                    return
+            # 其它线程在本次 sleep 期间延长了全局 deadline；继续等到
+            # 最新 deadline，再执行 transport guards。
 
     @staticmethod
     def _backoff_delay(attempt: int, retry_after: str | None = None) -> float:
@@ -412,8 +450,21 @@ class OKXRestClient:
     def get(self, path: str, params: dict | None = None, auth: bool = False) -> Any:
         return self._request("GET", path, params=params, auth=auth)
 
-    def post(self, path: str, body: Any = None, auth: bool = True) -> Any:
-        return self._request("POST", path, body=body, auth=auth)
+    def post(
+        self,
+        path: str,
+        body: Any = None,
+        auth: bool = True,
+        *,
+        pre_send_guard: Callable[[], None] | None = None,
+    ) -> Any:
+        return self._request(
+            "POST",
+            path,
+            body=body,
+            auth=auth,
+            pre_send_guard=pre_send_guard,
+        )
 
     # -------------------------------------------------------------------------
     # 公共行情接口
@@ -525,6 +576,7 @@ class OKXRestClient:
         cl_ord_id: str | None = None,
         max_slippage: str | None = None,
         attach_algo_orders: list[dict] | None = None,
+        pre_send_guard: Callable[[], None] | None = None,
     ) -> dict:
         """下单
 
@@ -559,7 +611,12 @@ class OKXRestClient:
         if attach_algo_orders:
             body["attachAlgoOrds"] = attach_algo_orders
 
-        result = self.post("/api/v5/trade/order", body)
+        post_kwargs = (
+            {"pre_send_guard": pre_send_guard}
+            if pre_send_guard is not None
+            else {}
+        )
+        result = self.post("/api/v5/trade/order", body, **post_kwargs)
         return self._business_result(result, "place order")
 
     def cancel_order(

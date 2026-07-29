@@ -7,7 +7,9 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -15,7 +17,9 @@ import subprocess
 import tempfile
 import time
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -23,6 +27,33 @@ from okx_quant.application.approval import (
     canonical_bytes,
     verify_ed25519_artifact,
 )
+from okx_quant.infrastructure.immutable_bundle import (
+    put_locked_object,
+    verify_locked_object,
+)
+
+_BACKUP_COMPONENT_KEYS = {
+    "object_uri",
+    "version_id",
+    "sha256",
+    "bytes",
+}
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_OFFSITE_RECEIPT_KEYS = {
+    "version",
+    "action",
+    "file",
+    "account_id",
+    "schema_version",
+    "snapshot_completed_at",
+    "readback_completed_at",
+    "signing_key_id",
+    "encryption_key_id",
+    "kms_key_id",
+    "retention",
+    "archive",
+    "manifest",
+}
 
 
 def _page_failure(webhook_env: str, error: BaseException) -> None:
@@ -75,9 +106,11 @@ def _sign_manifest(payload: dict, private_key: Path) -> dict:
         not stat.S_ISREG(key_stat.st_mode)
         or private_key.is_symlink()
         or key_stat.st_size <= 0
-        or key_stat.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or stat.S_IMODE(key_stat.st_mode) not in {0o600, 0o640}
     ):
-        raise RuntimeError("备份签名私钥必须是非空普通文件且不能被 group/other 写入")
+        raise RuntimeError(
+            "备份签名私钥必须是受控的 0600/0640 普通文件"
+        )
     with (
         tempfile.NamedTemporaryFile() as message,
         tempfile.NamedTemporaryFile() as signature,
@@ -102,6 +135,68 @@ def _sign_manifest(payload: dict, private_key: Path) -> dict:
         )
         encoded = base64.b64encode(Path(signature.name).read_bytes()).decode("ascii")
     return {"payload": payload, "signature": encoded}
+
+
+def _s3_object_uri(prefix_uri: str, name: str) -> str:
+    parsed = urlparse(prefix_uri)
+    if parsed.scheme != "s3" or not parsed.netloc:
+        raise ValueError("--offsite-uri 必须是 s3://bucket/prefix")
+    prefix = parsed.path.strip("/")
+    key = "/".join(part for part in (prefix, name) if part)
+    if not key:
+        raise ValueError("S3 object key 不能为空")
+    return f"s3://{parsed.netloc}/{key}"
+
+
+def validate_offsite_receipt(payload: object) -> dict:
+    if not isinstance(payload, dict) or set(payload) != _OFFSITE_RECEIPT_KEYS:
+        raise RuntimeError("offsite backup receipt schema 非法")
+    if (
+        payload["version"] != 1
+        or payload["action"] != "attest-offsite-backup-publication"
+        or not str(payload["file"]).endswith(".db.enc")
+        or not str(payload["account_id"]).strip()
+        or type(payload["schema_version"]) is not int
+        or payload["schema_version"] <= 0
+        or type(payload["snapshot_completed_at"]) not in {int, float}
+        or type(payload["readback_completed_at"]) not in {int, float}
+        or not math.isfinite(float(payload["snapshot_completed_at"]))
+        or not math.isfinite(float(payload["readback_completed_at"]))
+        or payload["snapshot_completed_at"] <= 0
+        or payload["readback_completed_at"] < payload["snapshot_completed_at"]
+        or not all(
+            str(payload[key]).strip()
+            for key in (
+                "signing_key_id",
+                "encryption_key_id",
+                "kms_key_id",
+            )
+        )
+    ):
+        raise RuntimeError("offsite backup receipt identity/time 非法")
+    retention = payload["retention"]
+    if (
+        not isinstance(retention, dict)
+        or set(retention) != {"mode", "retain_until"}
+        or retention["mode"] != "COMPLIANCE"
+    ):
+        raise RuntimeError("offsite backup receipt retention 非法")
+    retain_until = datetime.fromisoformat(str(retention["retain_until"]))
+    if retain_until.tzinfo is None or retain_until.utcoffset() is None:
+        raise RuntimeError("offsite backup receipt retain_until 必须带时区")
+    for name in ("archive", "manifest"):
+        component = payload[name]
+        if (
+            not isinstance(component, dict)
+            or set(component) != _BACKUP_COMPONENT_KEYS
+            or not str(component["version_id"]).strip()
+            or type(component["bytes"]) is not int
+            or component["bytes"] <= 0
+            or not _SHA256.fullmatch(str(component["sha256"]))
+        ):
+            raise RuntimeError(f"offsite backup receipt {name} 非法")
+        _s3_object_uri(str(component["object_uri"]), "probe")
+    return payload
 
 
 def _decrypt_for_verification(
@@ -162,9 +257,26 @@ def _prune(output_dir: Path, *, retention_days: int, now: float) -> None:
             keep_buckets.add(bucket)
         if delete:
             candidate.unlink(missing_ok=True)
-            candidate.with_suffix(
-                candidate.suffix + ".manifest.json"
-            ).unlink(missing_ok=True)
+            for suffix in (
+                ".manifest.json",
+                ".offsite-receipt.json",
+                ".offsite-publication.json",
+            ):
+                candidate.with_suffix(
+                    candidate.suffix + suffix
+                ).unlink(missing_ok=True)
+
+
+def _durable_replace(source: Path, destination: Path) -> None:
+    """fsync content and directory so a success survives power loss."""
+    with source.open("rb") as handle:
+        os.fsync(handle.fileno())
+    os.replace(source, destination)
+    parent_fd = os.open(destination.parent, os.O_RDONLY)
+    try:
+        os.fsync(parent_fd)
+    finally:
+        os.close(parent_fd)
 
 
 def main() -> int:
@@ -172,9 +284,11 @@ def main() -> int:
     parser.add_argument("--database", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--offsite-uri", default="")
+    parser.add_argument("--kms-key-id", default="")
+    parser.add_argument("--object-lock-retention-days", type=int, default=35)
     parser.add_argument("--retention-days", type=int, default=30)
     parser.add_argument("--expected-account-id", required=True)
-    parser.add_argument("--expected-schema-version", type=int, default=9)
+    parser.add_argument("--expected-schema-version", type=int, default=11)
     parser.add_argument(
         "--manifest-private-key",
         required=True,
@@ -209,6 +323,14 @@ def main() -> int:
                 char.isalnum() or char in "._-" for char in key_id
             ):
                 raise RuntimeError(f"{label} key id 非法")
+        if args.offsite_uri:
+            _s3_object_uri(args.offsite_uri, "probe")
+            if not args.kms_key_id.strip():
+                raise RuntimeError("offsite backup 必须指定 --kms-key-id")
+            if args.object_lock_retention_days < 35:
+                raise RuntimeError(
+                    "offsite backup Object Lock retention 不能少于 35 天"
+                )
         if not os.environ.get(args.passphrase_env):
             raise RuntimeError(
                 f"缺少加密口令环境变量: {args.passphrase_env}"
@@ -236,11 +358,23 @@ def main() -> int:
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
     encrypted = args.output_dir / f"trading-{stamp}.db.enc"
     manifest = encrypted.with_suffix(encrypted.suffix + ".manifest.json")
+    receipt = encrypted.with_suffix(
+        encrypted.suffix + ".offsite-receipt.json"
+    )
+    publication = encrypted.with_suffix(
+        encrypted.suffix + ".offsite-publication.json"
+    )
     temporary_encrypted = args.output_dir / (
         f".{encrypted.name}.{uuid.uuid4().hex}.tmp"
     )
     temporary_manifest = args.output_dir / (
         f".{manifest.name}.{uuid.uuid4().hex}.tmp"
+    )
+    temporary_receipt = args.output_dir / (
+        f".{receipt.name}.{uuid.uuid4().hex}.tmp"
+    )
+    temporary_publication = args.output_dir / (
+        f".{publication.name}.{uuid.uuid4().hex}.tmp"
     )
     try:
         with tempfile.TemporaryDirectory(
@@ -292,13 +426,38 @@ def main() -> int:
                 expected_account_id=args.expected_account_id,
                 expected_schema_version=args.expected_schema_version,
             )
+        encrypted_bytes = temporary_encrypted.read_bytes()
+        encrypted_sha256 = hashlib.sha256(encrypted_bytes).hexdigest()
+        retain_until: datetime | None = None
+        archive_uri = ""
+        archive_version_id = ""
+        archive_readback_at = 0
+        if args.offsite_uri:
+            retain_until = datetime.now(UTC).replace(
+                microsecond=0
+            ) + timedelta(days=args.object_lock_retention_days)
+            archive_uri = _s3_object_uri(args.offsite_uri, encrypted.name)
+            archive_version_id = put_locked_object(
+                source=temporary_encrypted,
+                object_uri=archive_uri,
+                retain_until=retain_until,
+                kms_key_id=args.kms_key_id,
+                content_type="application/octet-stream",
+            )
+            verify_locked_object(
+                object_uri=archive_uri,
+                version_id=archive_version_id,
+                expected_sha256=encrypted_sha256,
+                expected_bytes=len(encrypted_bytes),
+                minimum_retain_until=retain_until,
+                expected_kms_key_id=args.kms_key_id,
+            )
+            archive_readback_at = int(time.time())
         payload = {
             "version": 1,
             "action": "publish-encrypted-sqlite-backup",
             "file": encrypted.name,
-            "sha256": hashlib.sha256(
-                temporary_encrypted.read_bytes()
-            ).hexdigest(),
+            "sha256": encrypted_sha256,
             "snapshot_started_at": snapshot_started_at,
             "snapshot_completed_at": snapshot_completed_at,
             "published_at": int(time.time()),
@@ -307,6 +466,18 @@ def main() -> int:
             "signing_key_id": args.signing_key_id,
             "encryption_key_id": args.encryption_key_id,
         }
+        if retain_until is not None:
+            payload.update({
+                "version": 2,
+                "offsite_archive": {
+                    "object_uri": archive_uri,
+                    "version_id": archive_version_id,
+                    "bytes": len(encrypted_bytes),
+                    "retain_until": retain_until.isoformat(),
+                    "kms_key_id": args.kms_key_id,
+                    "readback_at": archive_readback_at,
+                },
+            })
         artifact = _sign_manifest(payload, args.manifest_private_key)
         verified = verify_ed25519_artifact(
             artifact,
@@ -325,30 +496,125 @@ def main() -> int:
             + "\n",
             encoding="utf-8",
         )
-        os.replace(temporary_encrypted, encrypted)
+        _durable_replace(temporary_encrypted, encrypted)
         # The signed manifest is the ready marker and is always published last.
-        os.replace(temporary_manifest, manifest)
+        _durable_replace(temporary_manifest, manifest)
+        if args.offsite_uri:
+            if retain_until is None:
+                raise AssertionError("offsite retention 未初始化")
+            manifest_bytes = manifest.read_bytes()
+            manifest_uri = _s3_object_uri(args.offsite_uri, manifest.name)
+            manifest_version_id = put_locked_object(
+                source=manifest,
+                object_uri=manifest_uri,
+                retain_until=retain_until,
+                kms_key_id=args.kms_key_id,
+            )
+            verify_locked_object(
+                object_uri=manifest_uri,
+                version_id=manifest_version_id,
+                expected_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
+                expected_bytes=len(manifest_bytes),
+                minimum_retain_until=retain_until,
+                expected_kms_key_id=args.kms_key_id,
+            )
+            readback_completed_at = int(time.time())
+            receipt_claims = validate_offsite_receipt({
+                "version": 1,
+                "action": "attest-offsite-backup-publication",
+                "file": encrypted.name,
+                "account_id": args.expected_account_id,
+                "schema_version": args.expected_schema_version,
+                "snapshot_completed_at": snapshot_completed_at,
+                "readback_completed_at": readback_completed_at,
+                "signing_key_id": args.signing_key_id,
+                "encryption_key_id": args.encryption_key_id,
+                "kms_key_id": args.kms_key_id,
+                "retention": {
+                    "mode": "COMPLIANCE",
+                    "retain_until": retain_until.isoformat(),
+                },
+                "archive": {
+                    "object_uri": archive_uri,
+                    "version_id": archive_version_id,
+                    "sha256": encrypted_sha256,
+                    "bytes": len(encrypted_bytes),
+                },
+                "manifest": {
+                    "object_uri": manifest_uri,
+                    "version_id": manifest_version_id,
+                    "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+                    "bytes": len(manifest_bytes),
+                },
+            })
+            receipt_artifact = _sign_manifest(
+                receipt_claims,
+                args.manifest_private_key,
+            )
+            if (
+                validate_offsite_receipt(
+                    verify_ed25519_artifact(
+                        receipt_artifact,
+                        args.manifest_public_key,
+                        label="offsite backup receipt",
+                    )
+                )
+                != receipt_claims
+            ):
+                raise RuntimeError("offsite backup receipt 签名回验不一致")
+            temporary_receipt.write_text(
+                json.dumps(
+                    receipt_artifact,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            receipt_bytes = temporary_receipt.read_bytes()
+            receipt_uri = _s3_object_uri(args.offsite_uri, receipt.name)
+            receipt_version_id = put_locked_object(
+                source=temporary_receipt,
+                object_uri=receipt_uri,
+                retain_until=retain_until,
+                kms_key_id=args.kms_key_id,
+            )
+            verify_locked_object(
+                object_uri=receipt_uri,
+                version_id=receipt_version_id,
+                expected_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+                expected_bytes=len(receipt_bytes),
+                minimum_retain_until=retain_until,
+                expected_kms_key_id=args.kms_key_id,
+            )
+            temporary_publication.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "action": "verify-offsite-backup-receipt-storage",
+                        "receipt_uri": receipt_uri,
+                        "receipt_version_id": receipt_version_id,
+                        "receipt_sha256": hashlib.sha256(
+                            receipt_bytes
+                        ).hexdigest(),
+                        "receipt_bytes": len(receipt_bytes),
+                        "verified_at": int(time.time()),
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            _durable_replace(temporary_receipt, receipt)
+            _durable_replace(temporary_publication, publication)
     except Exception as exc:
         temporary_encrypted.unlink(missing_ok=True)
         temporary_manifest.unlink(missing_ok=True)
-        _page_failure(args.alert_webhook_env, exc)
-        raise
-    try:
-        if args.offsite_uri:
-            if not args.offsite_uri.startswith("s3://"):
-                raise ValueError("--offsite-uri 当前仅支持 s3://")
-            destination = args.offsite_uri.rstrip("/") + "/"
-            subprocess.run(
-                ["aws", "s3", "cp", str(encrypted), destination],
-                check=True,
-                timeout=120,
-            )
-            subprocess.run(
-                ["aws", "s3", "cp", str(manifest), destination],
-                check=True,
-                timeout=120,
-            )
-    except Exception as exc:
+        temporary_receipt.unlink(missing_ok=True)
+        temporary_publication.unlink(missing_ok=True)
         _page_failure(args.alert_webhook_env, exc)
         raise
     finally:

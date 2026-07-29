@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "action": "precommit-demo-probe-schedule",
+  "schedule_id": "NON_FORMAL_SINGLE_SLOT_SHAPE_ONLY",
+  "created_at": "2026-07-28T00:00:00+00:00",
+  "slots": [
+    {
+      "day": "2026-08-01",
+      "slot": 1,
+      "inst_id": "BTC-USDT",
+      "direction": "buy_then_exit",
+      "window_start": "2026-08-01T08:00:00+00:00",
+      "window_end": "2026-08-01T12:00:00+00:00",
+      "spread_min_bps": 0,
+      "spread_max_bps": 5,
+      "volatility_min_bps": 0,
+      "volatility_max_bps": 30
+    }
+  ]
+}

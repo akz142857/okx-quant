@@ -1,0 +1,28 @@
+{
+  "backup_max_recovery_point_age_seconds": 300,
+  "clock_max_absolute_offset_seconds": 1,
+  "expected_channels": [
+    "public",
+    "private",
+    "business"
+  ],
+  "max_evidence_gap_seconds": 300,
+  "max_unobservable_seconds": 432,
+  "p0_ack_or_escalation_required": true,
+  "p0_provider_received_seconds": 60,
+  "p1_provider_received_seconds": 300,
+  "probe_maximum_daily_done": 2,
+  "probe_minimum_daily_done": 1,
+  "protection_max_seconds": 10,
+  "protection_p95_seconds": 3,
+  "protection_p99_min_samples": 300,
+  "reconciliation_interval_seconds": 30,
+  "reconciliation_max_completion_gap_seconds": 90,
+  "reconciliation_min_success_ratio": 0.999,
+  "resource_sample_max_gap_seconds": 300,
+  "startup_max_seconds": 60,
+  "version": 2,
+  "websocket_max_disconnect_seconds": 60,
+  "websocket_state_sample_max_gap_seconds": 90,
+  "websocket_min_availability_ratio": 0.995
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 import secrets
 import time
 from dataclasses import dataclass, replace
@@ -224,6 +225,8 @@ class OrderIntent:
     requested_take_profit: Decimal = ZERO
     state: OrderState = OrderState.CREATED
     decision_id: str = ""
+    source: str = "strategy"
+    probe_id: str = ""
     exchange_ord_id: str = ""
     exchange_state: str = ""
     acc_fill_qty: Decimal = ZERO
@@ -247,6 +250,16 @@ class OrderIntent:
             updated_at=now,
             **changes,
         )
+
+
+def probe_client_order_ids(probe_id: str) -> tuple[str, str]:
+    """把 durable probe ID 映射为稳定、符合 OKX 长度限制的 client IDs。"""
+    if not re.fullmatch(r"[0-9a-f]{32}", probe_id):
+        raise ValueError("probe_id 必须是 32 位小写十六进制")
+    digest = hashlib.sha256(
+        f"okx-quant/demo-probe/v1:{probe_id}".encode()
+    ).hexdigest()
+    return f"pb{digest[:30]}", f"pa{digest[30:60]}"
 
 
 @dataclass(frozen=True)

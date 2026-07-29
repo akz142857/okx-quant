@@ -1,0 +1,42 @@
+[Unit]
+Description=OKX Quant Stage-C TEST-ONLY PARSER_READY capability check %i
+Documentation=man:false
+After=time-sync.target
+Wants=time-sync.target
+ConditionPathExists=/opt/okx-quant-stage-c-test-only/instrumented.pyz
+ConditionFileIsExecutable=/opt/okx-quant-stage-c-test-only/venv/bin/python
+
+[Service]
+Type=oneshot
+User=okxq-stagec-hook
+Group=okxq-stagec-evidence
+UMask=0027
+StateDirectory=okx-quant-stage-c-test-only/hook/%i
+StateDirectoryMode=0750
+LoadCredential=scenario:/etc/okx-quant-stage-c-test-only/%i/scenario
+ExecStart=/opt/okx-quant-stage-c-test-only/venv/bin/python /opt/okx-quant-stage-c-test-only/instrumented.pyz self-check \
+  --scenario-file %d/scenario \
+  --output /var/lib/okx-quant-stage-c-test-only/hook/%i/capability.json
+SuccessExitStatus=2
+TimeoutStopSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/opt/okx-quant-stage-c-test-only
+ReadWritePaths=/var/lib/okx-quant-stage-c-test-only/hook/%i

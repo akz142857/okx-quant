@@ -1,0 +1,19 @@
+[Unit]
+Description=Independent Page for failed Demo monitor unit %i
+
+[Service]
+Type=oneshot
+User=okxquant-monitor-%i
+Group=okxquant-data-%i
+EnvironmentFile=/etc/okx-quant/demo-%i-monitor.env
+ExecStart=/opt/okx-quant/demo-%i/current/.venv/bin/python /opt/okx-quant/demo-%i/current/scripts/page_service_failure.py --service %i --webhook-env OKX_QUANT_EXTERNAL_MONITOR_WEBHOOK
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -7,6 +7,7 @@ from .ma_cross import MACrossStrategy
 from .multi_agent_strategy import MultiAgentStrategy
 from .rsi_mean import RSIMeanReversionStrategy
 from .trend_momentum import TrendMomentumStrategy
+from .validation_probe import ValidationProbeStrategy
 
 # 策略注册表：key -> (class, 中文名, 描述)
 STRATEGY_REGISTRY: dict[str, tuple[type[BaseStrategy], str, str]] = {
@@ -18,6 +19,11 @@ STRATEGY_REGISTRY: dict[str, tuple[type[BaseStrategy], str, str]] = {
     "multi_agent": (MultiAgentStrategy, "多Agent AI策略", "4分析师+辩论+交易员+风控"),
     "adaptive": (AdaptiveStrategy, "自适应策略", "ADX+布林带宽检测市场状态，自动切换子策略"),
     "trend_momentum": (TrendMomentumStrategy, "趋势动量策略", "多指标趋势确认+移动止盈"),
+    "validation_probe": (
+        ValidationProbeStrategy,
+        "Demo 验证探针",
+        "永不产生策略订单；仅允许 durable validation probe",
+    ),
 }
 
 _LLM_STRATEGY_CLASSES = (LLMStrategy, EnsembleStrategy, MultiAgentStrategy)
@@ -44,6 +50,7 @@ __all__ = [
     "MultiAgentStrategy",
     "AdaptiveStrategy",
     "TrendMomentumStrategy",
+    "ValidationProbeStrategy",
     "STRATEGY_REGISTRY",
     "is_llm_strategy",
 ]

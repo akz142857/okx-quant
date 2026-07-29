@@ -1,0 +1,12 @@
+[Unit]
+Description=Run isolated OKX Quant Demo backup every minute (%i)
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Persistent=true
+AccuracySec=5s
+Unit=okx-quant-demo-backup@%i.service
+
+[Install]
+WantedBy=timers.target

@@ -26,6 +26,7 @@ CASES = [
     "tests/test_timeout.py",
     "tests/test_failure_injection.py",
     "tests/test_operations.py",
+    "tests/test_demo_chaos_evidence.py",
 ]
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _SHA1 = re.compile(r"[0-9a-f]{40}")

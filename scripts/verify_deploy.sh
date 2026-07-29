@@ -2,8 +2,9 @@
 set -euo pipefail
 
 MODE="${1:-preflight}"
-if [[ "${MODE}" != "preflight" && "${MODE}" != "post-start" ]]; then
-  echo "usage: $0 [preflight|post-start]" >&2
+if [[ "${MODE}" != "preflight" && "${MODE}" != "post-start" &&
+  "${MODE}" != "post-activate" ]]; then
+  echo "usage: $0 [preflight|post-start|post-activate]" >&2
   exit 64
 fi
 
@@ -11,6 +12,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${OKX_QUANT_ENV_FILE:-/etc/okx-quant/production.env}"
 BACKUP_ENV_FILE="${OKX_QUANT_BACKUP_ENV_FILE:-/etc/okx-quant/backup.env}"
+RESTORE_ENV_FILE="${OKX_QUANT_RESTORE_ENV_FILE:-/etc/okx-quant/restore.env}"
 WATCHDOG_ENV_FILE="${OKX_QUANT_WATCHDOG_ENV_FILE:-/etc/okx-quant/watchdog.env}"
 CONFIG_FILE="${OKX_QUANT_CONFIG_FILE:-/etc/okx-quant/config.yaml}"
 SERVICE_NAME="${OKX_QUANT_SERVICE:-okx-quant}"
@@ -24,6 +26,9 @@ echo "project: ${PROJECT_DIR}"
 
 test -f "${CONFIG_FILE}"
 test -x "${PYTHON_BIN}"
+DEPLOYMENT_TIER="$("${PYTHON_BIN}" -c \
+  'import sys; from okx_quant.config import load_yaml; print(load_yaml(sys.argv[1]).get("production", {}).get("deployment_tier", "production"))' \
+  "${CONFIG_FILE}")"
 
 check_secret_file() {
   local path="$1"
@@ -99,15 +104,23 @@ check_shared_journal() {
 
 check_secret_file "${ENV_FILE}" "root:okxquant-trader"
 check_secret_file "${BACKUP_ENV_FILE}" "root:okxquant-backup"
+check_secret_file "${RESTORE_ENV_FILE}" "root:okxquant-restore-verifier"
 check_secret_file "${WATCHDOG_ENV_FILE}" "root:okxquant-watchdog"
 check_secret_file \
   /etc/okx-quant/keys/backup-manifest-private.pem \
   "root:okxquant-backup"
+check_secret_file \
+  /etc/okx-quant/keys/restore-verifier-private.pem \
+  "root:okxquant-restore-verifier"
 check_public_key /etc/okx-quant/keys/control-approval-public.pem
 check_public_key /etc/okx-quant/keys/risk-approval-public.pem
 check_public_key /etc/okx-quant/keys/demo-monitor-public.pem
+check_public_key /etc/okx-quant/keys/epoch-monitor-public.pem
+check_public_key /etc/okx-quant/keys/epoch-risk-public.pem
+check_public_key /etc/okx-quant/keys/evidence-verifier-public.pem
 check_public_key /etc/okx-quant/keys/research-policy-public.pem
 check_public_key /etc/okx-quant/keys/backup-manifest-public.pem
+check_public_key /etc/okx-quant/keys/restore-verifier-public.pem
 check_public_key /etc/okx-quant/launch.json
 check_public_key "${CONFIG_FILE}"
 check_public_key /etc/okx-quant/admission/evidence.json
@@ -115,6 +128,16 @@ check_public_key /etc/okx-quant/admission/approval.json
 check_root_directory_chain /etc/okx-quant
 check_root_directory_chain /etc/okx-quant/keys
 check_root_directory_chain /etc/okx-quant/admission
+check_root_directory_chain \
+  /etc/okx-quant/admission/daily-verifier-attestations
+if [[ "${DEPLOYMENT_TIER}" == "canary" ]]; then
+  check_public_key /etc/okx-quant/keys/canary-operator-public.pem
+  check_public_key /etc/okx-quant/keys/canary-risk-public.pem
+  check_public_key /etc/okx-quant/keys/canary-check-verifier-public.pem
+  check_public_key /etc/okx-quant/canary/transition.json
+  check_public_key /etc/okx-quant/canary/policy.json
+  check_root_directory_chain /etc/okx-quant/canary
+fi
 check_shared_journal
 
 if [[ "${MODE}" == "preflight" ]]; then
@@ -161,6 +184,7 @@ if command -v systemctl >/dev/null 2>&1; then
   test "$(systemctl show -p User --value okx-quant.service)" = "okxquant-trader"
   test "$(systemctl show -p User --value okx-quant-watchdog.service)" = "okxquant-watchdog"
   test "$(systemctl show -p User --value okx-quant-daily-backup.service)" = "okxquant-backup"
+  test "$(systemctl show -p User --value okx-quant-offsite-restore.service)" = "okxquant-restore-verifier"
   systemctl show -p ExecStart --value okx-quant.service |
     grep -F "production_launch.py" >/dev/null
   systemctl show -p ExecStartPre --value okx-quant.service |
@@ -214,29 +238,65 @@ post_start_fail_safe() {
 }
 trap post_start_fail_safe ERR
 
+if [[ "${MODE}" == "post-activate" ]]; then
+  echo "[1/2] verify Canary activation without restarting its bound runtime"
+  test "${DEPLOYMENT_TIER}" = "canary"
+  systemctl is-active "${SERVICE_NAME}" >/dev/null
+  curl --fail --silent --max-time 3 \
+    http://127.0.0.1:9108/healthz >/dev/null
+  curl --fail --silent --max-time 3 \
+    http://127.0.0.1:9108/readyz >/dev/null
+  curl --fail --silent --max-time 3 \
+    http://127.0.0.1:9108/metrics >/dev/null
+  echo "[2/2] verify durable READY status"
+  status_json="$("${PYTHON_BIN}" "${PROJECT_DIR}/main.py" \
+    --env-file "${ENV_FILE}" \
+    --config "${CONFIG_FILE}" production-status)"
+  printf '%s' "${status_json}" |
+    "${PYTHON_BIN}" -c \
+      'import json,sys; data=json.load(sys.stdin); assert data["mode"] == "ready"'
+  trap - ERR
+  echo "Canary post-activation verification passed"
+  exit 0
+fi
+
 echo "[1/5] verify isolated dependencies before any trader restart"
 test "$(systemctl show -p User --value okx-quant.service)" = "okxquant-trader"
 test "$(systemctl show -p User --value okx-quant-watchdog.service)" = "okxquant-watchdog"
 test "$(systemctl show -p User --value okx-quant-daily-backup.service)" = "okxquant-backup"
+test "$(systemctl show -p User --value okx-quant-offsite-restore.service)" = "okxquant-restore-verifier"
 systemctl is-enabled okx-quant-watchdog.service >/dev/null
 systemctl is-active okx-quant-watchdog.service >/dev/null
 systemctl is-enabled okx-quant-daily-backup.timer >/dev/null
 systemctl is-active okx-quant-daily-backup.timer >/dev/null
+systemctl is-enabled okx-quant-offsite-restore.timer >/dev/null
+systemctl is-active okx-quant-offsite-restore.timer >/dev/null
 trader_mount="$(findmnt -n -o TARGET --target /var/lib/okx-quant/production)"
 backup_mount="$(findmnt -n -o TARGET --target /var/lib/okx-quant-backup)"
 test "${trader_mount}" != "${backup_mount}"
 test "$(df --output=avail -B1 /var/lib/okx-quant-backup | tail -1)" -ge 5368709120
 systemctl start okx-quant-daily-backup.service
 test "$(systemctl show -p Result --value okx-quant-daily-backup.service)" = "success"
-"${PYTHON_BIN}" "${PROJECT_DIR}/scripts/offsite_restore_check.py" \
-  --backup-env "${BACKUP_ENV_FILE}" \
-  --local-backup-dir /var/lib/okx-quant-backup/daily \
-  --manifest-public-key /etc/okx-quant/keys/backup-manifest-public.pem \
-  --output /var/lib/okx-quant-backup/last-offsite-roundtrip.json
+systemctl start okx-quant-offsite-restore.service
+test "$(systemctl show -p Result --value okx-quant-offsite-restore.service)" = "success"
 
 echo "[2/5] restart the admitted release"
-systemctl restart "${SERVICE_NAME}"
+restart_requested_at="$(date +%s)"
+timeout --signal=TERM 60s systemctl restart "${SERVICE_NAME}"
 systemctl is-active "${SERVICE_NAME}" >/dev/null
+runtime_health_snapshot=""
+if [[ "${DEPLOYMENT_TIER}" == "canary" ]]; then
+  runtime_health_snapshot="$(
+    mktemp /var/lib/okx-quant/admission/.canary-health.XXXXXX
+  )"
+  curl --fail --silent --max-time 3 \
+    http://127.0.0.1:9108/healthz -o "${runtime_health_snapshot}"
+else
+  curl --fail --silent --max-time 3 \
+    http://127.0.0.1:9108/healthz >/dev/null
+fi
+first_health_at="$(date +%s)"
+test "$((first_health_at - restart_requested_at))" -le 60
 check_public_key /var/lib/okx-quant/admission/deployment-receipt.json
 
 echo "[3/5] verify running release identity equals immutable admission evidence"
@@ -253,9 +313,26 @@ actual_identity="$("${PYTHON_BIN}" \
 test "${actual_identity}" = "${expected_identity}"
 
 echo "[4/5] runtime readiness and local metrics"
-curl --fail --silent http://127.0.0.1:9108/healthz >/dev/null
-curl --fail --silent http://127.0.0.1:9108/readyz >/dev/null
-curl --fail --silent http://127.0.0.1:9108/metrics >/dev/null
+if [[ "${DEPLOYMENT_TIER}" == "canary" ]]; then
+  runtime_status=/var/lib/okx-quant/admission/canary-runtime-status.json
+  temporary_status="${runtime_status}.tmp"
+  mv -f "${runtime_health_snapshot}" "${temporary_status}"
+  "${PYTHON_BIN}" -c \
+    'import json,sys; data=json.load(open(sys.argv[1], encoding="utf-8")); assert data["live"] is True; assert data["mode"] == "halted"; assert data["canary_startup_hard_epoch"] > 0; assert len(data["canary_startup_nonce"]) == 32; assert data["canary_startup_latch_reason"] == "canary_post_start_activation_pending"; assert float(data["runtime_started_at"]) >= float(sys.argv[2]) - 2; assert float(sys.argv[3]) - float(sys.argv[2]) <= 60' \
+    "${temporary_status}" "${restart_requested_at}" "${first_health_at}"
+  chmod 0644 "${temporary_status}"
+  mv -f "${temporary_status}" "${runtime_status}"
+  curl --fail --silent --max-time 3 \
+    http://127.0.0.1:9108/metrics >/dev/null
+  trap - ERR
+  echo \
+    "Canary safety kernel passed post-start; generate/install the runtime-bound activation, then run post-activate"
+  exit 0
+fi
+curl --fail --silent --max-time 3 \
+  http://127.0.0.1:9108/readyz >/dev/null
+curl --fail --silent --max-time 3 \
+  http://127.0.0.1:9108/metrics >/dev/null
 
 echo "[5/5] durable status and local online backup"
 "${PYTHON_BIN}" "${PROJECT_DIR}/main.py" --env-file "${ENV_FILE}" \

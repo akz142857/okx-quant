@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily OKX Quant Demo alert delivery challenge (%i)
+
+[Timer]
+OnCalendar=*-*-* 12:00:00 UTC
+Persistent=true
+AccuracySec=30s
+Unit=okx-quant-demo-alert-challenge@%i.service
+
+[Install]
+WantedBy=timers.target

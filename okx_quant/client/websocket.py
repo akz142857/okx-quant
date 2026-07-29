@@ -57,11 +57,24 @@ class OKXWebSocketClient:
         secret_key: str = "",
         passphrase: str = "",
         simulated: bool = False,
+        connection_targets: dict[str, tuple[str, int]] | None = None,
     ):
         self.api_key = api_key
         self.secret_key = secret_key
         self.passphrase = passphrase
         self.simulated = simulated
+        self.connection_targets = dict(connection_targets or {})
+        if set(self.connection_targets) - {"public", "private", "business"}:
+            raise ValueError("未知 WebSocket connection target")
+        for name, target in self.connection_targets.items():
+            if (
+                not isinstance(target, tuple)
+                or len(target) != 2
+                or target[0] not in {"127.0.0.1", "::1", "localhost"}
+                or type(target[1]) is not int
+                or not 1 <= target[1] <= 65535
+            ):
+                raise ValueError(f"{name} WebSocket target 必须是 loopback host/port")
         self._handlers: dict[str, list[Callable]] = {}  # channel -> [callback]
         self._public_channels: list[dict] = []
         self._private_channels: list[dict] = []
@@ -249,11 +262,16 @@ class OKXWebSocketClient:
         while self._running:
             try:
                 self._set_state(name, ConnectionState.CONNECTING)
+                connect_kwargs: dict = {"proxy": None}
+                if name in self.connection_targets:
+                    host, port = self.connection_targets[name]
+                    connect_kwargs.update({"host": host, "port": port})
                 async with websockets.connect(
                     url,
                     ping_interval=WS_PING_INTERVAL_SECONDS,
                     ping_timeout=WS_PING_TIMEOUT_SECONDS,
                     close_timeout=5,
+                    **connect_kwargs,
                 ) as ws:
                     self._connections[name] = ws
                     if authenticated:

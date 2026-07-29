@@ -2,7 +2,12 @@
 
 项目当前的实盘安全、回测可信度和后续建设路线，见
 [项目综合评估](docs/PROJECT_EVALUATION.md)；生产升级的具体架构和实施阶段见
-[生产级升级方案](docs/PRODUCTION_PLAN.md)。
+[生产级升级方案](docs/PRODUCTION_PLAN.md)。持续 Demo 验证的实际部署与计时流程见
+[Demo / Shadow 长期验证运行手册](docs/DEMO_OPERATIONS_RUNBOOK.md)。
+
+> 当前仓库具备生产候选内核和 Demo/Canary 准入工具，但尚未取得 72 小时 Shadow、
+> 7 日 burn-in、连续 30 个完整 UTC clean day、第二故障域告警和空主机恢复等真实
+> 证据，状态仍为 **NOT ADMITTED**。下方 `live` 命令不是绕过准入门禁的授权。
 
 ## 安装
 
@@ -269,6 +274,7 @@ uv run python scripts/non_live_validation.py \
 
 - [实施与证据矩阵](docs/IMPLEMENTATION_STATUS.md)
 - [非实盘验证指南](docs/NON_LIVE_VALIDATION.md)
+- [Demo / Shadow 持续运行计划](docs/DEMO_SHADOW_VALIDATION_PLAN.md)
 - [生产运行手册](docs/RUNBOOK.md)
 - [生产准入清单](docs/RELEASE_CHECKLIST.md)
 - [安全模型](docs/SECURITY.md)
@@ -278,7 +284,9 @@ uv run python scripts/non_live_validation.py \
 非 root 身份，以及 `/etc/okx-quant` 配置、`/var/lib/okx-quant` 交易状态和
 `/var/log/okx-quant` 日志。模板位于 `deploy/`；systemd unit 已配置
 `ProtectSystem=strict`、`NoNewPrivileges`、资源上限、独立 watchdog、5 分钟加密
-异地归档，并在启动 trader 前强制验证 30 日证据与独立风险审批签名。
+异地归档，并在启动 trader 前验证现有 v1 证据与独立风险审批签名。多角色评审已确认
+v1 不能启动正式 30 日计时；必须先完成持续运行计划中的 SLO/Gate v2、Probe saga、
+三环境能力隔离和 Demo→Canary identity transition。
 
 常用安全命令：
 
@@ -293,6 +301,45 @@ okx-quant --config /etc/okx-quant/config.yaml backup-now
 全新生产账户必须先按运行手册执行一次 `init-journal`；正常 `live` 不会在数据库
 缺失或为空时创建新账本。解除 `HALTED` 需要 operator 生成短效请求、独立风险审批人
 用离线 Ed25519 私钥签名，再提交一次性批准文件；交易主机仅保存公钥。
+
+Canary 准入采用不可跳步的两阶段 systemd 流程。第一阶段显式运行全部 12 路
+collector → signer；独立 IAM issuer 先把原生签名 STS receipt 放入
+`/run/okx-quant-canary-iam/<00..11>.json`，signer 再把实际读取的精确 bytes 固化到
+对应 signed 目录。对象存储发布角色随后把本轮 `source.json` 上传到 inventory 冻结的
+Object Lock locator/KMS policy，取得真实 `versionId`，并把 exact version 同时写入
+每路 WORM 环境文件和 root-owned capability manifest。上传动作不由 collector、
+signer 或 capability authority 代做。
+
+第二阶段才启动 `okx-quant-canary-capability@<hard-epoch>.service`。它只要求 12 路
+WORM exact-version GET 与独立 deployment verifier，不会直接或间接重启
+collector/signer；`ExecStartPre --check-inputs-only` 先检查全部 manifest 输入存在且
+安全，最终 builder 再执行密码学与内容验证。WORM、deployment 和 capability 输出
+create-if-absent；新 hard epoch 必须停止旧的 stage-2 unit、使用全新的空证据目录，
+并在并行 WORM 回读后的 30 秒 freshness 窗口内构建 capability。直接跳过阶段 1、
+复用旧 version/receipt 或在活动 epoch 内覆盖文件都会 fail closed。
+
+密码学验证仍是最终边界：capability manifest 必须精确列出 12 份 source、12 份原生
+STS receipt、12 份独立签名 WORM 回读和一份覆盖 12 路 unit/权限/可执行文件哈希的部署
+证明；缺一项或多一项都失败。capability、IAM、WORM 回读、deployment verifier 使用
+四把互不相同且不与 producer/审批复用的密钥。OKX collector 从实际 systemd credential
+动态生成 V5 签名并校验真实 API key 指纹；备份证明执行 archive 与 manifest 两次精确
+version GET，并对恢复出的 SQLite 运行 `PRAGMA integrity_check`。
+WORM verifier 同样不接受静态 Authorization：它从独立 systemd credentials 读取
+AWS access key、secret 和短效 session token，按冻结的 S3 region/origin/object/version
+动态生成 SigV4 `x-amz-date`、空 payload SHA 与 Authorization；receipt 只记录 access
+key 指纹，capability 必须将其与 inventory 冻结值精确匹配，secret/token 不进入证据。
+每个 collector 实例必须在
+`/etc/okx-quant/canary-producers/credentials/<00..11>/` 提供 unit 声明的四个
+credential 文件；只给需要 OKX V5 的隔离实例填入真实三元凭据，其他实例使用不含秘密
+的占位值，外部源令牌仅写入 `source-authorization`。collector request 中的 credential
+名称也被冻结进 request hash，不能在启动时改指向其他文件。
+
+通过 Gate 只会在 root-owned、不可组/其他写的 admission 目录中建立短效 reservation；
+审批必须绑定该 bundle，activate 在同一个 companion `flock` 事务锁下只消费一次。
+并发 Gate/activate 不能重复预留或消费同一 capability。全部 receipt 还必须绑定同一
+transition、startup nonce、hard epoch、boot/host identity，并满足 30 秒新鲜度窗口，
+所以手工启动 unit 或遗留旧文件不能绕过验证。没有真实外部 API、STS、Object Lock 和
+主机 systemd 产出的这些证据时，状态保持 `OPEN`，不得宣称已获生产准入。
 
 `flatten-and-cancel` 是破坏性资金操作，必须先生成绑定具体交易对集合的短效请求，
 由独立风险审批人签名，再使用账户绑定的精确确认词提交。禁止通过删除状态文件、
@@ -441,7 +488,7 @@ ssh root@64.23.157.26 'cd /opt/okx-quant && /root/.local/bin/uv lock --upgrade &
 ```
 okx_quant/
 ├── client/rest.py           OKX V5 REST（带限流重试、HMAC 签名）
-├── client/websocket.py      WS 客户端（未集成）
+├── client/websocket.py      WS 客户端（已接入 production runtime）
 ├── exchange/                抽象层：Exchange Protocol + OKXExchange/FakeExchange
 ├── data/market.py           K 线/Ticker 拉取（带缓存 + 分页）
 ├── data/news.py             CryptoPanic 新闻（可选）

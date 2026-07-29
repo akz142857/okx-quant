@@ -1,11 +1,11 @@
 [Unit]
-Description=Run isolated encrypted OKX Quant backup every five minutes
+Description=Run isolated encrypted OKX Quant backup every minute
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
+OnBootSec=1min
+OnUnitActiveSec=1min
 Persistent=true
-AccuracySec=10s
+AccuracySec=5s
 
 [Install]
 WantedBy=timers.target

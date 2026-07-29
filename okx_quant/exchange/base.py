@@ -7,6 +7,7 @@ LiveTrader / Supervisor / RiskManager 等领域代码只依赖这些类型。
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import ROUND_DOWN, ROUND_UP, Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Protocol
@@ -212,6 +213,12 @@ class ExchangeReader(Protocol):
 class ExchangeTrader(Protocol):
     """可能改变交易所状态的最小写端口。"""
 
+    def set_write_guard(
+        self,
+        guard: Callable[[str, str], None] | None,
+    ) -> None:
+        """安装覆盖所有交易写的 endpoint-aware 最终 transport guard。"""
+
     def place_market_order(
         self,
         inst_id: str,
@@ -221,6 +228,7 @@ class ExchangeTrader(Protocol):
         tgt_ccy: str = "base_ccy",
         cl_ord_id: str = "",
         max_slippage: Decimal | None = None,
+        pre_send_guard: Callable[[], None] | None = None,
     ) -> OrderResult:
         """市价下单。size 单位由 tgt_ccy 决定。"""
 

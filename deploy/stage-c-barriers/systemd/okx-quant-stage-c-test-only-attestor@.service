@@ -1,0 +1,52 @@
+[Unit]
+Description=OKX Quant Stage-C TEST-ONLY PARSER_READY marker attestor %i
+After=okx-quant-stage-c-test-only-harness@%i.service
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/hook/%i/reached.json
+ConditionPathExists=/opt/okx-quant-stage-c-test-only/instrumented.pyz
+ConditionFileIsExecutable=/opt/okx-quant-stage-c-test-only/venv/bin/python
+
+[Service]
+Type=oneshot
+User=okxq-stagec-attestor
+Group=okxq-stagec-evidence
+UMask=0027
+StateDirectory=okx-quant-stage-c-test-only/attestor/%i
+StateDirectoryMode=0750
+LoadCredential=scenario:/etc/okx-quant-stage-c-test-only/%i/scenario
+LoadCredential=challenge:/etc/okx-quant-stage-c-test-only/%i/challenge.json
+LoadCredential=registrar-public-key:/etc/okx-quant-stage-c-test-only/%i/registrar-public.pem
+LoadCredential=reached-consumption:/var/lib/okx-quant-stage-c-test-only/consumer/%i/reached-consumption.json
+LoadCredential=reached-consumer-public-key:/etc/okx-quant-stage-c-test-only/%i/reached-consumer-public.pem
+LoadCredential=attestor-private-key:/etc/okx-quant-stage-c-test-only/%i/attestor-private.pem
+ExecStart=/opt/okx-quant-stage-c-test-only/venv/bin/python /opt/okx-quant-stage-c-test-only/instrumented.pyz attest-reached \
+  --scenario-file %d/scenario \
+  --challenge %d/challenge \
+  --registrar-public-key %d/registrar-public-key \
+  --marker /var/lib/okx-quant-stage-c-test-only/hook/%i/reached.json \
+  --proof /var/lib/okx-quant-stage-c-test-only/hook/%i/boundary-proof.json \
+  --phase-consumption %d/reached-consumption \
+  --phase-consumer-public-key %d/reached-consumer-public-key \
+  --attestor-private-key %d/attestor-private-key \
+  --output /var/lib/okx-quant-stage-c-test-only/attestor/%i/reached-attestation.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/opt/okx-quant-stage-c-test-only /var/lib/okx-quant-stage-c-test-only/hook/%i /var/lib/okx-quant-stage-c-test-only/consumer/%i
+ReadWritePaths=/var/lib/okx-quant-stage-c-test-only/attestor/%i

@@ -1,0 +1,71 @@
+[Unit]
+Description=OKX Quant Stage-C TEST-ONLY PARSER_READY challenge-bound fault driver %i
+Documentation=man:false
+After=time-sync.target network-online.target
+Wants=time-sync.target network-online.target
+Wants=okx-quant-stage-c-test-only-journal-source@%i.service okx-quant-stage-c-test-only-okx-source@%i.service okx-quant-stage-c-test-only-systemd-source@%i.service
+After=okx-quant-stage-c-test-only-journal-source@%i.service okx-quant-stage-c-test-only-okx-source@%i.service okx-quant-stage-c-test-only-systemd-source@%i.service
+ConditionPathExists=/opt/okx-quant-stage-c-test-only/instrumented.pyz
+ConditionFileIsExecutable=/opt/okx-quant-stage-c-test-only/venv/bin/python
+
+[Service]
+Type=simple
+User=okxq-stagec-hook
+Group=okxq-stagec-evidence
+UMask=0027
+StateDirectory=okx-quant-stage-c-test-only/hook/%i okx-quant-stage-c-test-only/runtime/%i
+StateDirectoryMode=0750
+LoadCredential=scenario:/etc/okx-quant-stage-c-test-only/%i/scenario
+LoadCredential=config:/etc/okx-quant-stage-c-test-only/%i/config.yaml
+LoadCredential=environment:/etc/okx-quant-stage-c-test-only/%i/environment
+LoadCredential=registrar-public-key:/etc/okx-quant-stage-c-test-only/%i/registrar-public.pem
+LoadCredential=challenge-consumer-public-key:/etc/okx-quant-stage-c-test-only/%i/challenge-consumer-public.pem
+LoadCredential=fault-driver-private-key:/etc/okx-quant-stage-c-test-only/%i/fault-driver-private.pem
+LoadCredential=kill-public-key:/etc/okx-quant-stage-c-test-only/%i/kill-public.pem
+LoadCredential=tls-certificate:/etc/okx-quant-stage-c-test-only/%i/tls-certificate.pem
+LoadCredential=tls-private-key:/etc/okx-quant-stage-c-test-only/%i/tls-private-key.pem
+ExecStart=/opt/okx-quant-stage-c-test-only/venv/bin/python /opt/okx-quant-stage-c-test-only/instrumented.pyz run-pipeline \
+  --scenario-file %d/scenario \
+  --activation-request /run/okx-quant-stage-c-activation/%i/request.json \
+  --registrar-public-key %d/registrar-public-key \
+  --challenge-consumer-public-key %d/challenge-consumer-public-key \
+  --fault-driver-private-key %d/fault-driver-private-key \
+  --kill-artifact /var/lib/okx-quant-stage-c-test-only/kill/%i/kill-attestation.json \
+  --kill-public-key %d/kill-public-key \
+  --config %d/config \
+  --env-file %d/environment \
+  --inst BTC-USDT \
+  --state-database /var/lib/okx-quant-stage-c-test-only/hook/%i/markers.sqlite3 \
+  --marker-output /var/lib/okx-quant-stage-c-test-only/hook/%i/reached.json \
+  --proof-output /var/lib/okx-quant-stage-c-test-only/hook/%i/boundary-proof.json \
+  --tls-certificate %d/tls-certificate \
+  --tls-private-key %d/tls-private-key \
+  --activation-attestation-output /var/lib/okx-quant-stage-c-test-only/hook/%i/activation-attestation.json \
+  --recovery-activation-attestation-output /var/lib/okx-quant-stage-c-test-only/hook/%i/recovery-activation-attestation.json
+Restart=on-failure
+# Keep an attested inactive window for the kill controller before automatic
+# recovery starts a new InvocationID.
+RestartSec=10s
+TimeoutStartSec=900
+TimeoutStopSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/opt/okx-quant-stage-c-test-only /run/okx-quant-stage-c-activation/%i /var/lib/okx-quant-stage-c-test-only/kill/%i
+ReadWritePaths=/var/lib/okx-quant-stage-c-test-only/hook/%i /var/lib/okx-quant-stage-c-test-only/runtime/%i

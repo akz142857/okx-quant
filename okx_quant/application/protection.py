@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from decimal import Decimal
 
 from okx_quant.application.execution import (
@@ -25,6 +26,7 @@ from okx_quant.domain.orders import (
     SystemMode,
     generate_client_order_id,
     map_exchange_algo_state,
+    probe_client_order_ids,
     to_decimal,
 )
 from okx_quant.exchange import (
@@ -35,6 +37,15 @@ from okx_quant.exchange import (
 from okx_quant.infrastructure.db import JournalRepository
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ProtectionLossTransition:
+    """A durable ACTIVE -> unprotected state transition."""
+
+    protection: ProtectionOrder
+    previous_state: ProtectionState
+    current_state: ProtectionState
 
 
 class ProtectionManager:
@@ -85,6 +96,11 @@ class ProtectionManager:
                     stop_loss=stop,
                     take_profit=take,
                     parent_intent_id=intent.intent_id,
+                    algo_cl_ord_id=(
+                        probe_client_order_ids(intent.probe_id)[1]
+                        if intent.probe_id
+                        else ""
+                    ),
                 )
             except Exception as exc:
                 self._emergency_exit(
@@ -134,6 +150,7 @@ class ProtectionManager:
         stop_loss: Decimal = Decimal("0"),
         take_profit: Decimal = Decimal("0"),
         parent_intent_id: str = "",
+        algo_cl_ord_id: str = "",
     ) -> ProtectionOrder:
         if qty <= 0:
             raise ValueError("保护数量必须大于 0")
@@ -232,7 +249,9 @@ class ProtectionManager:
             trigger_px=stop_loss,
             take_profit_px=take_profit,
             state=ProtectionState.REQUIRED,
-            algo_cl_ord_id=generate_client_order_id("sell"),
+            algo_cl_ord_id=(
+                algo_cl_ord_id or generate_client_order_id("sell")
+            ),
             parent_intent_id=parent_intent_id,
             created_at=time.time(),
             updated_at=time.time(),
@@ -488,7 +507,10 @@ class ProtectionManager:
                     return None
                 time.sleep(0.2)
 
-    def process_algo_events(self, rows: list[dict]) -> None:
+    def process_algo_events(
+        self, rows: list[dict]
+    ) -> list[ProtectionLossTransition]:
+        losses: list[ProtectionLossTransition] = []
         for raw in rows:
             algo_id = str(raw.get("algoId", ""))
             client_id = str(raw.get("algoClOrdId", ""))
@@ -506,9 +528,16 @@ class ProtectionManager:
                 continue
             state = map_exchange_algo_state(str(raw.get("state", "")))
             try:
-                self.journal.update_protection(
+                updated = self.journal.update_protection(
                     local,
-                    state=state,
+                    state=(
+                        ProtectionState.UNKNOWN
+                        if (
+                            local.state is ProtectionState.ACTIVE
+                            and state is ProtectionState.FAILED
+                        )
+                        else state
+                    ),
                     exchange_algo_id=algo_id or local.exchange_algo_id,
                     protected_qty=to_decimal(
                         raw.get("sz"), str(local.protected_qty)
@@ -522,6 +551,32 @@ class ProtectionManager:
                         str(local.take_profit_px),
                     ),
                 )
+                # ACTIVE -> FAILED is not a legal direct domain transition.
+                # Persist the uncertainty boundary before the terminal result.
+                if (
+                    local.state is ProtectionState.ACTIVE
+                    and state is ProtectionState.FAILED
+                ):
+                    updated = self.journal.update_protection(
+                        updated,
+                        state=ProtectionState.FAILED,
+                    )
+                if (
+                    local.state is ProtectionState.ACTIVE
+                    and state
+                    in {
+                        ProtectionState.CANCELED,
+                        ProtectionState.FAILED,
+                        ProtectionState.UNKNOWN,
+                    }
+                ):
+                    losses.append(
+                        ProtectionLossTransition(
+                            protection=updated,
+                            previous_state=local.state,
+                            current_state=state,
+                        )
+                    )
             except ValueError as exc:
                 self.journal.set_mode(SystemMode.DEGRADED)
                 self.journal.record_event(
@@ -530,6 +585,7 @@ class ProtectionManager:
                     correlation_id=local.protection_id,
                     payload={"error": str(exc), "raw": raw},
                 )
+        return losses
 
     def reconcile(self, inst_id: str = "") -> list[str]:
         """对账本地和交易所 pending algo，返回未解决问题。"""
@@ -893,11 +949,33 @@ class ExitCoordinator:
         self.operation_lock = operation_lock or execution.operation_lock
         self.balance_release_timeout_s = balance_release_timeout_s
 
-    def exit_position(self, inst_id: str, reason: str = "") -> OrderIntent | None:
+    def exit_position(
+        self,
+        inst_id: str,
+        reason: str = "",
+        *,
+        source: str = "strategy",
+        probe_id: str = "",
+        cl_ord_id: str = "",
+    ) -> OrderIntent | None:
         with self.operation_lock:
-            return self._exit_position(inst_id, reason)
+            return self._exit_position(
+                inst_id,
+                reason,
+                source=source,
+                probe_id=probe_id,
+                cl_ord_id=cl_ord_id,
+            )
 
-    def _exit_position(self, inst_id: str, reason: str = "") -> OrderIntent | None:
+    def _exit_position(
+        self,
+        inst_id: str,
+        reason: str = "",
+        *,
+        source: str = "strategy",
+        probe_id: str = "",
+        cl_ord_id: str = "",
+    ) -> OrderIntent | None:
         owner = uuid.uuid4().hex
         if not self.journal.acquire_exit_lease(inst_id, owner, ttl_s=30):
             raise RuntimeError(f"{inst_id} 已有退出流程执行中")
@@ -1067,6 +1145,9 @@ class ExitCoordinator:
                 inst_id=inst_id,
                 side="sell",
                 base_qty=sell_qty,
+                cl_ord_id=cl_ord_id,
+                source=source,
+                probe_id=probe_id,
             ))
             if intent.state is OrderState.UNKNOWN:
                 release = False

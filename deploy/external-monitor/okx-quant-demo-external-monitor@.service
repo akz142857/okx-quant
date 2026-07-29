@@ -1,0 +1,24 @@
+[Unit]
+Description=Off-host synthetic monitor for OKX Quant Demo (%i)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=okxquant-external-monitor
+Group=okxquant-external-monitor
+EnvironmentFile=/etc/okx-quant-external-monitor/%i.env
+ExecStart=/opt/okx-quant-monitor/current/.venv/bin/python /opt/okx-quant-monitor/current/scripts/external_demo_monitor.py --target %i --health-url ${OKX_QUANT_EXTERNAL_HEALTH_URL} --ready-url ${OKX_QUANT_EXTERNAL_READY_URL} --signal-url host=${OKX_QUANT_HOST_SIGNAL_URL} --signal-url service=${OKX_QUANT_SERVICE_SIGNAL_URL} --signal-url provider=${OKX_QUANT_PROVIDER_SIGNAL_URL} --signal-url evidence-close=${OKX_QUANT_EVIDENCE_CLOSE_SIGNAL_URL} --signal-url backup=${OKX_QUANT_BACKUP_SIGNAL_URL} --expected-release ${OKX_QUANT_EXPECTED_RELEASE} --expected-config ${OKX_QUANT_EXPECTED_CONFIG} --expected-account-uid ${OKX_QUANT_EXPECTED_ACCOUNT_UID} --expected-unit ${OKX_QUANT_EXPECTED_UNIT} --soak-epoch-id ${OKX_QUANT_SOAK_EPOCH_ID} --private-key ${OKX_QUANT_EXTERNAL_MONITOR_PRIVATE_KEY} --signing-key-id ${OKX_QUANT_EXTERNAL_MONITOR_KEY_ID} --primary-page-url ${OKX_QUANT_PRIMARY_PAGE_URL} --independent-page-url ${OKX_QUANT_INDEPENDENT_PAGE_URL} --incident-state /var/lib/okx-quant-external-monitor/%i/incidents.json --output-dir /var/lib/okx-quant-external-monitor/%i
+UMask=0077
+StateDirectory=okx-quant-external-monitor/%i
+StateDirectoryMode=0700
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/okx-quant-external-monitor/%i
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

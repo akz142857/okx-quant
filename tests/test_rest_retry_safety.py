@@ -84,6 +84,68 @@ def test_ambiguous_post_is_attempted_only_once(monkeypatch):
 
 
 @pytest.mark.unit
+def test_write_guards_run_after_global_wait_immediately_before_socket(
+    monkeypatch,
+):
+    events = []
+
+    class Session:
+        def request(self, *_args, **_kwargs):
+            events.append("socket")
+            return _Response("0")
+
+        def close(self):
+            return None
+
+    client = OKXRestClient(
+        api_key="k",
+        secret_key="s",
+        passphrase="p",
+        write_guard=lambda method, endpoint: events.append(
+            f"writer_guard:{method}:{endpoint}"
+        ),
+    )
+    monkeypatch.setattr(client, "_make_session", Session)
+    monkeypatch.setattr(
+        client,
+        "_wait_for_global_rate_limit",
+        lambda: events.append("global_wait"),
+    )
+
+    client.post(
+        "/api/v5/trade/order",
+        {"instId": "BTC-USDT"},
+        pre_send_guard=lambda: events.append("entry_guard"),
+    )
+
+    assert events == [
+        "global_wait",
+        "writer_guard:POST:/api/v5/trade/order",
+        "entry_guard",
+        "socket",
+    ]
+
+
+@pytest.mark.unit
+def test_failed_writer_guard_prevents_socket_write(monkeypatch):
+    session = _ResponseSession([_Response("0")])
+    client = OKXRestClient(
+        api_key="k",
+        secret_key="s",
+        passphrase="p",
+        write_guard=lambda _method, _endpoint: (_ for _ in ()).throw(
+            RuntimeError("lease expired")
+        ),
+    )
+    monkeypatch.setattr(client, "_make_session", lambda: session)
+
+    with pytest.raises(RuntimeError, match="lease expired"):
+        client.post("/api/v5/trade/order", {"instId": "BTC-USDT"})
+
+    assert session.calls == 0
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "response",
     [
@@ -116,6 +178,21 @@ def test_rate_limited_get_remains_retryable(monkeypatch):
     monkeypatch.setattr("okx_quant.client.rest.time.sleep", lambda _delay: None)
     assert client.get("/api/v5/public/time") == []
     assert session.calls == 2
+
+
+@pytest.mark.unit
+def test_zero_get_retries_still_performs_one_transport_attempt(monkeypatch):
+    client = OKXRestClient(
+        api_key="key",
+        secret_key="secret",
+        passphrase="passphrase",
+        max_retries=0,
+    )
+    session = _ResponseSession([_Response("0")])
+    monkeypatch.setattr(client, "_make_session", lambda: session)
+
+    assert client.get("/api/v5/account/config", auth=True) == []
+    assert session.calls == 1
 
 
 @pytest.mark.unit
@@ -152,6 +229,32 @@ def test_rate_limit_backoff_is_shared_across_client_instances(monkeypatch):
     first._defer_global_requests(2.0)
     second._wait_for_global_rate_limit()
     assert sleeps == [2.0]
+    assert OKXRestClient._GLOBAL_NOT_BEFORE == 0.0
+
+
+@pytest.mark.unit
+def test_global_wait_honors_deadline_extended_during_sleep(monkeypatch):
+    sleeps = []
+    clock = iter([100.0, 102.0])
+    OKXRestClient._GLOBAL_NOT_BEFORE = 102.0
+    monkeypatch.setattr(
+        "okx_quant.client.rest.time.monotonic",
+        lambda: next(clock),
+    )
+
+    def extend_on_first_sleep(delay):
+        sleeps.append(delay)
+        if len(sleeps) == 1:
+            OKXRestClient._GLOBAL_NOT_BEFORE = 105.0
+
+    monkeypatch.setattr(
+        "okx_quant.client.rest.time.sleep",
+        extend_on_first_sleep,
+    )
+
+    OKXRestClient._wait_for_global_rate_limit()
+
+    assert sleeps == [2.0, 3.0]
     assert OKXRestClient._GLOBAL_NOT_BEFORE == 0.0
 
 

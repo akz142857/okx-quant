@@ -1,0 +1,33 @@
+[Unit]
+Description=OKX Quant Canary external source collector %i (fail closed)
+Before=okx-quant-canary-source-signer@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=oqc-c%i
+Group=oqc-p%i
+UMask=0027
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/okx-quant-canary-sources/raw/%i
+ReadOnlyPaths=/etc/okx-quant/canary-producers
+LoadCredential=okx-api-key:/etc/okx-quant/canary-producers/credentials/%i/okx-api-key
+LoadCredential=okx-secret-key:/etc/okx-quant/canary-producers/credentials/%i/okx-secret-key
+LoadCredential=okx-passphrase:/etc/okx-quant/canary-producers/credentials/%i/okx-passphrase
+LoadCredential=source-authorization:/etc/okx-quant/canary-producers/credentials/%i/source-authorization
+ExecStart=/usr/local/libexec/okx-quant-canary-source-collector \
+  --inventory /etc/okx-quant/canary-producers/inventory.json \
+  --request /etc/okx-quant/canary-producers/%i-collector.json \
+  --collection-receipt /var/lib/okx-quant-canary-sources/raw/%i/evidence.raw.collection.json

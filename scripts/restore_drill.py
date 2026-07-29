@@ -10,12 +10,15 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 from okx_quant.application.approval import verify_ed25519_artifact
 
 REQUIRED_TABLES = {
     "account_snapshots",
+    "alert_deliveries",
+    "alert_delivery_attempts",
     "candle_watermarks",
     "control_commands",
     "decisions",
@@ -26,6 +29,7 @@ REQUIRED_TABLES = {
     "journal_identity",
     "outbox_events",
     "positions",
+    "probe_runs",
     "protective_orders",
     "realized_pnl_events",
     "reconciliation_adjustments",
@@ -67,7 +71,7 @@ def verify_manifest(source: Path, public_key: Path) -> dict:
         public_key,
         label="备份 manifest",
     )
-    required = {
+    required_v1 = {
         "version",
         "action",
         "file",
@@ -80,17 +84,57 @@ def verify_manifest(source: Path, public_key: Path) -> dict:
         "signing_key_id",
         "encryption_key_id",
     }
-    if set(claims) != required:
+    required_v2 = required_v1 | {"offsite_archive"}
+    if frozenset(claims) not in {
+        frozenset(required_v1),
+        frozenset(required_v2),
+    }:
         raise RuntimeError("备份 manifest 字段不完整或包含未知字段")
     if (
-        claims["version"] != 1
+        claims["version"] not in {1, 2}
         or claims["action"] != "publish-encrypted-sqlite-backup"
         or claims["file"] != source.name
+        or (claims["version"] == 1 and set(claims) != required_v1)
+        or (claims["version"] == 2 and set(claims) != required_v2)
     ):
         raise RuntimeError("备份 manifest 版本、action 或文件名不匹配")
+    if claims["version"] == 2:
+        offsite = claims["offsite_archive"]
+        try:
+            retain_until = datetime.fromisoformat(
+                str(offsite.get("retain_until", ""))
+            )
+        except (AttributeError, ValueError):
+            retain_until = None
+        if (
+            not isinstance(offsite, dict)
+            or set(offsite)
+            != {
+                "object_uri",
+                "version_id",
+                "bytes",
+                "retain_until",
+                "kms_key_id",
+                "readback_at",
+            }
+            or not str(offsite["object_uri"]).startswith("s3://")
+            or not str(offsite["version_id"]).strip()
+            or type(offsite["bytes"]) is not int
+            or offsite["bytes"] <= 0
+            or not str(offsite["kms_key_id"]).strip()
+            or type(offsite["readback_at"]) is not int
+            or retain_until is None
+            or retain_until.tzinfo is None
+            or retain_until.utcoffset() is None
+        ):
+            raise RuntimeError("备份 manifest offsite_archive 非法")
     actual = hashlib.sha256(source.read_bytes()).hexdigest()
     if actual != claims["sha256"]:
         raise RuntimeError("加密备份 SHA-256 校验失败")
+    if claims["version"] == 2 and claims["offsite_archive"]["bytes"] != (
+        source.stat().st_size
+    ):
+        raise RuntimeError("备份 manifest offsite_archive bytes 不匹配")
     return claims
 
 
@@ -156,7 +200,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("backup", type=Path)
     parser.add_argument("--expected-account-id", required=True)
-    parser.add_argument("--expected-schema-version", type=int, default=9)
+    parser.add_argument("--expected-schema-version", type=int, default=11)
     parser.add_argument("--max-rto-seconds", type=float, default=300)
     parser.add_argument("--max-backup-age-seconds", type=float, default=172800)
     parser.add_argument("--passphrase-env", default="OKX_QUANT_BACKUP_PASSPHRASE")

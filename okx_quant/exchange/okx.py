@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from decimal import Decimal
 
 import pandas as pd
@@ -50,6 +51,12 @@ class OKXExchange(Exchange):
     @property
     def quote_ccy(self) -> str:
         return self._quote
+
+    def set_write_guard(
+        self,
+        guard: Callable[[str, str], None] | None,
+    ) -> None:
+        self._client.set_write_guard(guard)
 
     # ------------------ 行情 ------------------
 
@@ -186,6 +193,7 @@ class OKXExchange(Exchange):
         tgt_ccy: str = "base_ccy",
         cl_ord_id: str = "",
         max_slippage: Decimal | None = None,
+        pre_send_guard: Callable[[], None] | None = None,
     ) -> OrderResult:
         size = parse_decimal_fact(size, "order.size", positive=True)
         size_str = _fmt_decimal(size)
@@ -207,6 +215,7 @@ class OKXExchange(Exchange):
                 if side == "buy" and max_slippage is not None
                 else None
             ),
+            pre_send_guard=pre_send_guard,
         ) or {}
         ord_id = str(raw.get("ordId", ""))
         if not ord_id:

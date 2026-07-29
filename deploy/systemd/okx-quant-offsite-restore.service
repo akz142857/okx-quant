@@ -1,0 +1,31 @@
+[Unit]
+Description=OKX Quant exact-version offsite restore verification
+Requires=okx-quant-daily-backup.service
+After=okx-quant-daily-backup.service
+OnFailure=okx-quant-backup-failure@%n.service
+
+[Service]
+Type=oneshot
+User=okxquant-restore-verifier
+Group=okxquant-data
+WorkingDirectory=/opt/okx-quant/current
+EnvironmentFile=/etc/okx-quant/restore.env
+ExecStart=/opt/okx-quant/venv/bin/python /opt/okx-quant/current/scripts/offsite_restore_check.py --backup-env /etc/okx-quant/restore.env --local-backup-dir /var/lib/okx-quant-backup/daily --manifest-public-key ${OKX_QUANT_BACKUP_MANIFEST_PUBLIC_KEY} --evidence-private-key ${OKX_QUANT_RESTORE_EVIDENCE_PRIVATE_KEY} --evidence-public-key ${OKX_QUANT_RESTORE_EVIDENCE_PUBLIC_KEY} --evidence-key-id ${OKX_QUANT_RESTORE_EVIDENCE_KEY_ID} --minimum-remaining-retention-days 30 --output /var/lib/okx-quant-restore-evidence/daily/last-offsite-roundtrip.json
+TimeoutStartSec=360
+UMask=0027
+StateDirectory=okx-quant-restore-evidence/daily
+StateDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/etc/okx-quant/keys /var/lib/okx-quant-backup/daily
+ReadWritePaths=/var/lib/okx-quant-restore-evidence/daily
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

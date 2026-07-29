@@ -19,6 +19,7 @@ import yaml
 from okx_quant.application.approval import canonical_bytes
 from okx_quant.backtest import BacktestEngine
 from okx_quant.config import ProductionSettings
+from okx_quant.ops.demo_chaos_evidence import DRILL_SCENARIOS
 from okx_quant.research.admission import (
     AdmissionApprovalVerifier,
     AdmissionGate,
@@ -41,9 +42,25 @@ from scripts.deployment_receipt import (
     build_deployment_receipt,
     validate_deployment_receipt,
 )
-from scripts.production_gate import _evaluate, _runtime_config_hash
+from scripts.production_gate import (
+    _evaluate,
+    _runtime_config_hash,
+    _validate_clean_streak_aggregate,
+)
 from scripts.production_launch import _live_argv, _load_launch_manifest
 from scripts.sign_research_artifact import _validate as validate_research_request
+
+
+def _stage_c_coverage() -> dict:
+    return {
+        "version": 1,
+        "action": "verify-stage-c-wp4-wp5-coverage",
+        "scenario_count": len(DRILL_SCENARIOS),
+    }
+
+
+def _stage_c_coverage_sha256() -> str:
+    return hashlib.sha256(canonical_bytes(_stage_c_coverage())).hexdigest()
 
 
 class BuyHold(BaseStrategy):
@@ -1646,6 +1663,9 @@ def test_admission_root_signature_binds_evidence_ledger_and_budget(tmp_path):
         evidence,
         evidence_sha256=evidence_hash,
         ledger_head_hash="d" * 64,
+        empty_host_restore_sha256="f" * 64,
+        stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+        canary_readiness_sha256="c" * 64,
         approved_max_stress_loss_usdt=100,
         now=int(time.time()),
     )
@@ -1659,6 +1679,9 @@ def test_admission_root_signature_binds_evidence_ledger_and_budget(tmp_path):
         evidence=evidence,
         evidence_sha256=evidence_hash,
         ledger_head_hash="d" * 64,
+        empty_host_restore_sha256="f" * 64,
+        stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+        canary_readiness_sha256="c" * 64,
         approved_max_stress_loss_usdt=100,
     )
     with pytest.raises(ValueError, match="evidence_sha256"):
@@ -1667,6 +1690,42 @@ def test_admission_root_signature_binds_evidence_ledger_and_budget(tmp_path):
             evidence=evidence,
             evidence_sha256="e" * 64,
             ledger_head_hash="d" * 64,
+            empty_host_restore_sha256="f" * 64,
+            stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+            canary_readiness_sha256="c" * 64,
+            approved_max_stress_loss_usdt=100,
+        )
+    with pytest.raises(ValueError, match="empty_host_restore_sha256"):
+        verifier.verify(
+            artifact,
+            evidence=evidence,
+            evidence_sha256=evidence_hash,
+            ledger_head_hash="d" * 64,
+            empty_host_restore_sha256="e" * 64,
+            stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+            canary_readiness_sha256="c" * 64,
+            approved_max_stress_loss_usdt=100,
+        )
+    with pytest.raises(ValueError, match="stage_c_coverage_sha256"):
+        verifier.verify(
+            artifact,
+            evidence=evidence,
+            evidence_sha256=evidence_hash,
+            ledger_head_hash="d" * 64,
+            empty_host_restore_sha256="f" * 64,
+            stage_c_coverage_sha256="e" * 64,
+            canary_readiness_sha256="c" * 64,
+            approved_max_stress_loss_usdt=100,
+        )
+    with pytest.raises(ValueError, match="canary_readiness_sha256"):
+        verifier.verify(
+            artifact,
+            evidence=evidence,
+            evidence_sha256=evidence_hash,
+            ledger_head_hash="d" * 64,
+            empty_host_restore_sha256="f" * 64,
+            stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+            canary_readiness_sha256="e" * 64,
             approved_max_stress_loss_usdt=100,
         )
     public_key.chmod(0o666)
@@ -1676,6 +1735,9 @@ def test_admission_root_signature_binds_evidence_ledger_and_budget(tmp_path):
             evidence=evidence,
             evidence_sha256=evidence_hash,
             ledger_head_hash="d" * 64,
+            empty_host_restore_sha256="f" * 64,
+            stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+            canary_readiness_sha256="c" * 64,
             approved_max_stress_loss_usdt=100,
         )
 
@@ -1991,6 +2053,9 @@ def test_deployment_receipt_allows_same_identity_restart_after_window(
         evidence,
         evidence_sha256=evidence_sha256,
         ledger_head_hash="d" * 64,
+        empty_host_restore_sha256="f" * 64,
+        stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+        canary_readiness_sha256="c" * 64,
         approved_max_stress_loss_usdt=100,
         lifetime_s=600,
         now=1000,
@@ -2015,6 +2080,9 @@ def test_deployment_receipt_allows_same_identity_restart_after_window(
         approval_bytes=approval_bytes,
         evidence_sha256=evidence_sha256,
         ledger_head_hash="d" * 64,
+        empty_host_restore_sha256="f" * 64,
+        stage_c_coverage=_stage_c_coverage(),
+        canary_readiness_sha256="c" * 64,
         activated_at=1200,
     )
     receipt_path = tmp_path / "receipt.json"
@@ -2038,6 +2106,104 @@ def test_deployment_receipt_allows_same_identity_restart_after_window(
             approval_public_key=public_key,
             evidence_path=evidence_path,
         )
+
+
+@pytest.mark.unit
+def test_formal_gate_validates_latest_exact_30_days_after_longer_streak(
+    monkeypatch,
+):
+    observed = []
+    ledger = object()
+    monkeypatch.setattr(
+        gate_module,
+        "validate_30_day_aggregate",
+        lambda actual, *, clean_days: observed.append(
+            (actual, clean_days)
+        ),
+    )
+    _validate_clean_streak_aggregate(ledger, 29)
+    assert observed == []
+    _validate_clean_streak_aggregate(ledger, 30)
+    _validate_clean_streak_aggregate(ledger, 31)
+    assert observed == [(ledger, 30), (ledger, 30)]
+
+
+@pytest.mark.unit
+def test_deployment_receipt_rejects_legacy_unbound_ledger_policy(tmp_path):
+    evidence = {"evidence_metadata": _metadata()}
+    evidence_bytes = json.dumps(evidence, sort_keys=True).encode()
+    evidence_path = tmp_path / "evidence.json"
+    evidence_path.write_bytes(evidence_bytes)
+    evidence_sha256 = hashlib.sha256(evidence_bytes).hexdigest()
+    request = build_admission_request(
+        evidence,
+        evidence_sha256=evidence_sha256,
+        ledger_head_hash="d" * 64,
+        empty_host_restore_sha256="f" * 64,
+        stage_c_coverage_sha256=_stage_c_coverage_sha256(),
+        canary_readiness_sha256="c" * 64,
+        approved_max_stress_loss_usdt=100,
+        lifetime_s=600,
+        now=1000,
+    )
+    request["risk_approver"] = evidence["evidence_metadata"][
+        "risk_approver"
+    ]
+    public_key, artifact = _sign_payload(tmp_path, request)
+    approval_path = tmp_path / "approval.json"
+    approval_path.write_text(json.dumps(artifact), encoding="utf-8")
+    identity = {
+        "commit_sha": request["commit_sha"],
+        "config_hash": request["config_hash"],
+        "account_id": request["account_id"],
+        "environment": request["environment"],
+        "deployed_source_sha256": "f" * 64,
+    }
+    receipt = build_deployment_receipt(
+        identity=identity,
+        approval_claims=request,
+        approval_bytes=approval_path.read_bytes(),
+        evidence_sha256=evidence_sha256,
+        ledger_head_hash="d" * 64,
+        empty_host_restore_sha256="f" * 64,
+        stage_c_coverage=_stage_c_coverage(),
+        canary_readiness_sha256="c" * 64,
+        activated_at=1200,
+    )
+    for version in (1, 2):
+        legacy_version = dict(receipt, version=version)
+        legacy_version_path = tmp_path / f"legacy-version-{version}.json"
+        legacy_version_path.write_text(
+            json.dumps(legacy_version),
+            encoding="utf-8",
+        )
+        legacy_version_path.chmod(0o600)
+        with pytest.raises(ValueError, match="版本、ledger"):
+            validate_deployment_receipt(
+                legacy_version_path,
+                identity=identity,
+                approval_path=approval_path,
+                approval_public_key=public_key,
+                evidence_path=evidence_path,
+            )
+    for field in (
+        "demo_ledger_version",
+        "slo_schema",
+        "slo_policy_hash",
+    ):
+        legacy = dict(receipt)
+        legacy.pop(field)
+        path = tmp_path / f"legacy-{field}.json"
+        path.write_text(json.dumps(legacy), encoding="utf-8")
+        path.chmod(0o600)
+        with pytest.raises(ValueError, match="字段不完整"):
+            validate_deployment_receipt(
+                path,
+                identity=identity,
+                approval_path=approval_path,
+                approval_public_key=public_key,
+                evidence_path=evidence_path,
+            )
 
 
 @pytest.mark.unit

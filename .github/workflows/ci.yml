@@ -24,8 +24,20 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --dev
 
+      - name: Install upstream monitoring validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            prometheus \
+            prometheus-alertmanager
+
       - name: Compile sources
         run: uv run python -m compileall -q main.py okx_quant scripts tests
+
+      - name: Recompute Stage-C freeze identities
+        run: >-
+          uv run python scripts/recompute_stage_c_evidence.py
+          --output stage-c-freeze-report.json
 
       - name: Static lint
         run: uv run ruff check main.py okx_quant scripts tests
@@ -34,6 +46,14 @@ jobs:
         run: |
           bash -n scripts/*.sh
           shellcheck scripts/*.sh
+
+      - name: Validate monitoring assets
+        run: |
+          uv run python scripts/validate_monitoring_config.py
+          promtool check rules deploy/monitoring/prometheus-rules.yaml
+          amtool check-config deploy/monitoring/alertmanager.yaml.example
+          uv run python -m json.tool \
+            deploy/monitoring/grafana-dashboard.json >/dev/null
 
       - name: Validate systemd units
         run: |
@@ -45,8 +65,15 @@ jobs:
           sudo usermod -a -G okxquant-data okxquant-watchdog
           sudo usermod -a -G okxquant-data okxquant-backup
           sudo install -d \
+            /usr/local/libexec \
+            /opt/okx-quant-lease/current/.venv/bin \
+            /opt/okx-quant/demo-active/current/.venv/bin \
+            /opt/okx-quant/demo-shadow/current/.venv/bin \
+            /opt/okx-quant/demo-chaos/current/.venv/bin \
+            /opt/okx-quant/demo-i/current/.venv/bin \
             /opt/okx-quant/venv/bin \
             /opt/okx-quant/current/scripts \
+            /opt/okx-quant-stage-c-test-only/venv/bin \
             /etc/okx-quant \
             /etc/okx-quant/admission \
             /etc/okx-quant/keys \
@@ -57,8 +84,21 @@ jobs:
           sudo chown okxquant-trader:okxquant-data /var/lib/okx-quant/production
           sudo chmod 2750 /var/lib/okx-quant/production
           sudo touch \
+            /usr/local/libexec/okx-quant-canary-source-collector \
+            /usr/local/libexec/okx-quant-canary-source-signer \
+            /usr/local/libexec/okx-quant-canary-worm-readback \
+            /usr/local/libexec/okx-quant-canary-deployment-verifier \
+            /usr/local/libexec/okx-quant-build-canary-capability \
+            /opt/okx-quant-lease/current/.venv/bin/python \
+            /opt/okx-quant/demo-active/current/.venv/bin/python \
+            /opt/okx-quant/demo-shadow/current/.venv/bin/python \
+            /opt/okx-quant/demo-chaos/current/.venv/bin/python \
+            /opt/okx-quant/demo-i/current/.venv/bin/python \
+            /opt/okx-quant/demo-i/current/.venv/bin/okx-quant-watchdog \
             /opt/okx-quant/venv/bin/python \
             /opt/okx-quant/venv/bin/okx-quant-watchdog \
+            /opt/okx-quant-stage-c-test-only/instrumented.pyz \
+            /opt/okx-quant-stage-c-test-only/venv/bin/python \
             /opt/okx-quant/current/scripts/activate_release.py \
             /opt/okx-quant/current/scripts/production_launch.py \
             /opt/okx-quant/current/scripts/daily_archive.py \
@@ -70,11 +110,33 @@ jobs:
             /etc/okx-quant/backup.env \
             /etc/okx-quant/watchdog.env
           sudo chmod +x \
+            /usr/local/libexec/okx-quant-canary-source-collector \
+            /usr/local/libexec/okx-quant-canary-source-signer \
+            /usr/local/libexec/okx-quant-canary-worm-readback \
+            /usr/local/libexec/okx-quant-canary-deployment-verifier \
+            /usr/local/libexec/okx-quant-build-canary-capability \
+            /opt/okx-quant-lease/current/.venv/bin/python \
+            /opt/okx-quant/demo-active/current/.venv/bin/python \
+            /opt/okx-quant/demo-shadow/current/.venv/bin/python \
+            /opt/okx-quant/demo-chaos/current/.venv/bin/python \
+            /opt/okx-quant/demo-i/current/.venv/bin/python \
+            /opt/okx-quant/demo-i/current/.venv/bin/okx-quant-watchdog \
             /opt/okx-quant/venv/bin/python \
-            /opt/okx-quant/venv/bin/okx-quant-watchdog
+            /opt/okx-quant/venv/bin/okx-quant-watchdog \
+            /opt/okx-quant-stage-c-test-only/instrumented.pyz \
+            /opt/okx-quant-stage-c-test-only/venv/bin/python
+          # systemd-analyze instantiates @.service templates as @i.service.
+          # Supply the corresponding synthetic parent only in the CI verifier
+          # load path; real deployments use active/shadow/chaos instances.
+          sudo ln -s \
+            "$GITHUB_WORKSPACE/deploy/systemd/okx-quant-demo-shadow.service" \
+            /etc/systemd/system/okx-quant-demo-i.service
           systemd-analyze verify \
             deploy/systemd/*.service \
-            deploy/systemd/*.timer
+            deploy/systemd/*.timer \
+            deploy/stage-c-barriers/systemd/*.service
+          uv run python scripts/verify_systemd_security.py \
+            --output /tmp/okx-quant-systemd-security-report.json
           sudo install -o okxquant-trader -g okxquant-data -m 0640 \
             /dev/null /var/lib/okx-quant/production/permission-probe.db
           sudo -u okxquant-trader python3 -c \
@@ -161,3 +223,10 @@ jobs:
         with:
           name: non-live-validation-evidence
           path: non-live-validation.json
+
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: stage-c-freeze-evidence
+          path: |
+            stage-c-freeze-report.json
+            /tmp/okx-quant-systemd-security-report.json

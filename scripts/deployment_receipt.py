@@ -7,7 +7,15 @@ import json
 import stat
 from pathlib import Path
 
-from okx_quant.application.approval import verify_ed25519_artifact
+from okx_quant.application.approval import (
+    canonical_bytes,
+    verify_ed25519_artifact,
+)
+from okx_quant.ops.demo_chaos_evidence import DRILL_SCENARIOS
+from okx_quant.research.admission import (
+    DEMO_LEDGER_VERSION,
+    _slo_v2_identity,
+)
 
 _RECEIPT_KEYS = {
     "version",
@@ -20,6 +28,12 @@ _RECEIPT_KEYS = {
     "deployed_source_sha256",
     "evidence_sha256",
     "ledger_head_hash",
+    "demo_ledger_version",
+    "slo_schema",
+    "slo_policy_hash",
+    "empty_host_restore_sha256",
+    "stage_c_coverage_sha256",
+    "canary_readiness_sha256",
     "approval_sha256",
 }
 _APPROVAL_KEYS = {
@@ -27,6 +41,12 @@ _APPROVAL_KEYS = {
     "action",
     "evidence_sha256",
     "ledger_head_hash",
+    "demo_ledger_version",
+    "slo_schema",
+    "slo_policy_hash",
+    "empty_host_restore_sha256",
+    "stage_c_coverage_sha256",
+    "canary_readiness_sha256",
     "commit_sha",
     "config_hash",
     "account_id",
@@ -41,6 +61,18 @@ _APPROVAL_KEYS = {
 }
 
 
+def _stage_c_coverage_sha256(coverage: object) -> str:
+    if (
+        not isinstance(coverage, dict)
+        or coverage.get("version") != 1
+        or coverage.get("action")
+        != "verify-stage-c-wp4-wp5-coverage"
+        or coverage.get("scenario_count") != len(DRILL_SCENARIOS)
+    ):
+        raise ValueError("deployment receipt 缺少完整 Stage-C coverage")
+    return hashlib.sha256(canonical_bytes(coverage)).hexdigest()
+
+
 def build_deployment_receipt(
     *,
     identity: dict,
@@ -48,12 +80,46 @@ def build_deployment_receipt(
     approval_bytes: bytes,
     evidence_sha256: str,
     ledger_head_hash: str,
+    empty_host_restore_sha256: str,
+    stage_c_coverage: dict,
+    canary_readiness_sha256: str,
     activated_at: int,
 ) -> dict:
     if not approval_claims["issued_at"] <= activated_at <= approval_claims["expires_at"]:
         raise ValueError("deployment receipt 激活时间不在批准窗口内")
+    if (
+        approval_claims.get("empty_host_restore_sha256")
+        != empty_host_restore_sha256
+        or len(empty_host_restore_sha256) != 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in empty_host_restore_sha256
+        )
+    ):
+        raise ValueError(
+            "deployment receipt empty-host restore 未绑定批准"
+        )
+    stage_c_coverage_sha256 = _stage_c_coverage_sha256(
+        stage_c_coverage
+    )
+    if (
+        approval_claims.get("stage_c_coverage_sha256")
+        != stage_c_coverage_sha256
+    ):
+        raise ValueError("deployment receipt Stage-C coverage 未绑定批准")
+    if (
+        approval_claims.get("canary_readiness_sha256")
+        != canary_readiness_sha256
+        or not isinstance(canary_readiness_sha256, str)
+        or len(canary_readiness_sha256) != 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in canary_readiness_sha256
+        )
+    ):
+        raise ValueError("deployment receipt Canary readiness 未绑定批准")
     return {
-        "version": 1,
+        "version": 3,
         "action": "activate-immutable-production-release",
         "activated_at": activated_at,
         "commit_sha": identity["commit_sha"],
@@ -63,6 +129,12 @@ def build_deployment_receipt(
         "deployed_source_sha256": identity["deployed_source_sha256"],
         "evidence_sha256": evidence_sha256,
         "ledger_head_hash": ledger_head_hash,
+        "demo_ledger_version": approval_claims["demo_ledger_version"],
+        "slo_schema": approval_claims["slo_schema"],
+        "slo_policy_hash": approval_claims["slo_policy_hash"],
+        "empty_host_restore_sha256": empty_host_restore_sha256,
+        "stage_c_coverage_sha256": stage_c_coverage_sha256,
+        "canary_readiness_sha256": canary_readiness_sha256,
         "approval_sha256": hashlib.sha256(approval_bytes).hexdigest(),
     }
 
@@ -103,13 +175,35 @@ def validate_deployment_receipt(
 ) -> dict:
     _secure_receipt(receipt_path)
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    slo_schema, slo_policy_hash = _slo_v2_identity()
     if not isinstance(receipt, dict) or set(receipt) != _RECEIPT_KEYS:
         raise ValueError("deployment receipt 字段不完整或包含未知字段")
     if (
-        receipt["version"] != 1
+        receipt["version"] != 3
         or receipt["action"] != "activate-immutable-production-release"
+        or receipt["demo_ledger_version"] != DEMO_LEDGER_VERSION
+        or receipt["slo_schema"] != slo_schema
+        or receipt["slo_policy_hash"] != slo_policy_hash
+        or not isinstance(receipt["empty_host_restore_sha256"], str)
+        or len(receipt["empty_host_restore_sha256"]) != 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in receipt["empty_host_restore_sha256"]
+        )
+        or not isinstance(receipt["stage_c_coverage_sha256"], str)
+        or not len(receipt["stage_c_coverage_sha256"]) == 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in receipt["stage_c_coverage_sha256"]
+        )
+        or not isinstance(receipt["canary_readiness_sha256"], str)
+        or len(receipt["canary_readiness_sha256"]) != 64
+        or any(
+            char not in "0123456789abcdef"
+            for char in receipt["canary_readiness_sha256"]
+        )
     ):
-        raise ValueError("deployment receipt 版本或 action 非法")
+        raise ValueError("deployment receipt 版本、ledger 或 SLO policy 非法")
     approval_bytes = approval_path.read_bytes()
     approval = json.loads(approval_bytes)
     claims = verify_ed25519_artifact(
@@ -119,8 +213,11 @@ def validate_deployment_receipt(
     )
     if (
         set(claims) != _APPROVAL_KEYS
-        or claims["version"] != 1
+        or claims["version"] != 2
         or claims["action"] != "admit-production"
+        or claims["demo_ledger_version"] != DEMO_LEDGER_VERSION
+        or claims["slo_schema"] != slo_schema
+        or claims["slo_policy_hash"] != slo_policy_hash
     ):
         raise ValueError("deployment receipt 引用的生产批准结构非法")
     evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
@@ -132,6 +229,18 @@ def validate_deployment_receipt(
         "deployed_source_sha256": identity["deployed_source_sha256"],
         "evidence_sha256": evidence_sha256,
         "ledger_head_hash": claims.get("ledger_head_hash"),
+        "empty_host_restore_sha256": claims.get(
+            "empty_host_restore_sha256"
+        ),
+        "stage_c_coverage_sha256": claims.get(
+            "stage_c_coverage_sha256"
+        ),
+        "canary_readiness_sha256": claims.get(
+            "canary_readiness_sha256"
+        ),
+        "demo_ledger_version": DEMO_LEDGER_VERSION,
+        "slo_schema": slo_schema,
+        "slo_policy_hash": slo_policy_hash,
         "approval_sha256": hashlib.sha256(approval_bytes).hexdigest(),
     }
     for key, value in expected.items():
@@ -144,6 +253,12 @@ def validate_deployment_receipt(
         "environment",
         "evidence_sha256",
         "ledger_head_hash",
+        "empty_host_restore_sha256",
+        "stage_c_coverage_sha256",
+        "canary_readiness_sha256",
+        "demo_ledger_version",
+        "slo_schema",
+        "slo_policy_hash",
     ):
         if claims.get(key) != receipt.get(key):
             raise ValueError(f"生产批准与 deployment receipt 的 {key} 不一致")

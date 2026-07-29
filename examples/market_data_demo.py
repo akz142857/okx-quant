@@ -1,12 +1,13 @@
 """行情数据示例：获取 K 线和实时行情（无需 API Key）"""
 
-import sys
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from okx_quant.client.rest import OKXRestClient
 from okx_quant.data.market import MarketDataFetcher
-from okx_quant.indicators import ema, macd, rsi, bollinger_bands
+from okx_quant.indicators import bollinger_bands, ema, macd, rsi
 
 
 def main():

@@ -98,6 +98,10 @@ class PrivateStreamService:
         self._event_sequence = 0
         self._inflight_events = 0
         self._event_lock = threading.RLock()
+        self._generations = {
+            "private": 0,
+            "business": 0,
+        }
         self._register()
 
     def _register(self) -> None:
@@ -221,9 +225,15 @@ class PrivateStreamService:
                 )
                 raise
             try:
-                self.coordinator.process_exchange_update(update)
+                projected, _ = self.coordinator.process_exchange_update(
+                    update
+                )
+                dedupe_result = "projected_or_deduplicated"
+                probe_id = projected.probe_id
             except KeyError:
                 imported = self.coordinator.import_external_update(update)
+                dedupe_result = "external_imported"
+                probe_id = imported.probe_id
                 self.journal.set_mode(SystemMode.DEGRADED)
                 self.journal.record_event(
                     "external_order_from_ws",
@@ -232,6 +242,8 @@ class PrivateStreamService:
                     payload={"ord_id": update.ord_id, "inst_id": update.inst_id},
                 )
             except ValueError as exc:
+                dedupe_result = "illegal_transition_rejected"
+                probe_id = ""
                 self.journal.set_mode(SystemMode.DEGRADED)
                 self.journal.record_event(
                     "out_of_order_illegal_transition",
@@ -260,6 +272,21 @@ class PrivateStreamService:
                     )
                 finally:
                     raise
+            self.journal.record_event(
+                "exchange_fact_consumed",
+                correlation_id=update.cl_ord_id or update.ord_id,
+                payload={
+                    "source": "websocket",
+                    "channel": "private",
+                    "generation": self._generations["private"],
+                    "event_sequence": self.event_sequence,
+                    "ord_id": update.ord_id,
+                    "cl_ord_id": update.cl_ord_id,
+                    "algo_id": "",
+                    "probe_id": probe_id,
+                    "dedupe_result": dedupe_result,
+                },
+            )
 
     def _on_balance(self, rows: list[dict]) -> None:
         self._begin_event()
@@ -285,6 +312,39 @@ class PrivateStreamService:
                     self.journal.record_event(
                         "algo_ws_update", payload={"rows": rows}
                     )
+                for row in rows:
+                    local = self.journal.find_protection(
+                        exchange_algo_id=str(row.get("algoId", "")),
+                        algo_cl_ord_id=str(
+                            row.get("algoClOrdId", "")
+                        ),
+                    )
+                    parent = (
+                        self.journal.get_intent(local.parent_intent_id)
+                        if local is not None and local.parent_intent_id
+                        else None
+                    )
+                    self.journal.record_event(
+                        "exchange_fact_consumed",
+                        correlation_id=str(
+                            row.get("algoClOrdId")
+                            or row.get("algoId")
+                            or ""
+                        ),
+                        payload={
+                            "source": "websocket",
+                            "channel": "business",
+                            "generation": self._generations["business"],
+                            "event_sequence": self.event_sequence,
+                            "ord_id": "",
+                            "cl_ord_id": "",
+                            "algo_id": str(row.get("algoId", "")),
+                            "probe_id": (
+                                parent.probe_id if parent is not None else ""
+                            ),
+                            "dedupe_result": "projected_or_deduplicated",
+                        },
+                    )
             except Exception as exc:
                 try:
                     self.journal.set_mode(SystemMode.HALTED)
@@ -305,6 +365,8 @@ class PrivateStreamService:
     def _on_state(self, name: str, state: ConnectionState) -> None:
         if name not in {"private", "business"}:
             return
+        if state is ConnectionState.CONNECTING:
+            self._generations[name] += 1
         self.journal.record_event(
             "ws_state_changed",
             severity="warning" if state in {

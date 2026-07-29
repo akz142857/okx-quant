@@ -1,0 +1,27 @@
+[Unit]
+Description=Close and attest prior UTC OKX Quant Demo evidence day (%i)
+After=okx-quant-demo-backup@%i.service
+OnFailure=okx-quant-demo-monitor-failure@%i.service
+
+[Service]
+Type=oneshot
+User=okxquant-monitor-%i
+Group=okxquant-data-%i
+EnvironmentFile=/etc/okx-quant/demo-%i-monitor.env
+ExecStart=/opt/okx-quant/demo-%i/current/.venv/bin/python /opt/okx-quant/demo-%i/current/scripts/close_demo_evidence.py --config /etc/okx-quant/demo-%i.yaml --epoch ${OKX_QUANT_SOAK_EPOCH} --epoch-monitor-public-key ${OKX_QUANT_EPOCH_MONITOR_PUBLIC_KEY} --epoch-risk-public-key ${OKX_QUANT_EPOCH_RISK_PUBLIC_KEY} --monitor-public-key ${OKX_QUANT_MONITOR_PUBLIC_KEY} --phase ${OKX_QUANT_SOAK_PHASE} --policy /etc/okx-quant/demo-slo-policy-v2.json --output-dir ${OKX_QUANT_EVIDENCE_OUTPUT_DIR} --monitor-private-key ${OKX_QUANT_MONITOR_PRIVATE_KEY} --monitor-key-id ${OKX_QUANT_MONITOR_KEY_ID} --offsite-uri ${OKX_QUANT_EVIDENCE_OFFSITE_URI} --kms-key-id ${OKX_QUANT_EVIDENCE_KMS_KEY_ID} --retention-days 400 --max-slippage ${OKX_QUANT_MAX_SLIPPAGE_RATIO}
+TimeoutStartSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/var/lib/okx-quant/demo-%i /etc/okx-quant
+ReadWritePaths=/var/lib/okx-quant-evidence/demo-%i
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

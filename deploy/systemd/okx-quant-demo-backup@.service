@@ -1,0 +1,29 @@
+[Unit]
+Description=Isolated encrypted OKX Quant Demo backup (%i)
+After=okx-quant-demo-%i.service
+OnFailure=okx-quant-demo-monitor-failure@%i.service
+
+[Service]
+Type=oneshot
+User=okxquant-backup-%i
+Group=okxquant-data-%i
+EnvironmentFile=/etc/okx-quant/demo-%i-backup.env
+ExecStart=/opt/okx-quant/demo-%i/current/.venv/bin/python /opt/okx-quant/demo-%i/current/scripts/daily_archive.py --database ${OKX_QUANT_DATABASE_PATH} --output-dir ${OKX_QUANT_BACKUP_OUTPUT_DIR} --offsite-uri ${OKX_QUANT_OFFSITE_BACKUP_URI} --kms-key-id ${OKX_QUANT_BACKUP_KMS_KEY_ID} --object-lock-retention-days 35 --expected-account-id ${OKX_QUANT_ACCOUNT_ID} --manifest-private-key ${OKX_QUANT_BACKUP_MANIFEST_PRIVATE_KEY} --manifest-public-key ${OKX_QUANT_BACKUP_MANIFEST_PUBLIC_KEY} --signing-key-id ${OKX_QUANT_BACKUP_SIGNING_KEY_ID} --encryption-key-id ${OKX_QUANT_BACKUP_ENCRYPTION_KEY_ID} --min-free-bytes 5368709120
+TimeoutStartSec=120
+UMask=0027
+StateDirectory=okx-quant-backup/demo-%i
+StateDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/var/lib/okx-quant/demo-%i /etc/okx-quant/keys
+ReadWritePaths=/var/lib/okx-quant-backup/demo-%i
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

@@ -1,0 +1,59 @@
+[Unit]
+Description=OKX Quant Stage-C TEST-ONLY PARSER_READY SIGKILL scaffold %i
+After=okx-quant-stage-c-test-only-attestor@%i.service
+ConditionPathExists=/var/lib/okx-quant-stage-c-test-only/attestor/%i/reached-attestation.json
+ConditionPathExists=/opt/okx-quant-stage-c-test-only/instrumented.pyz
+ConditionFileIsExecutable=/opt/okx-quant-stage-c-test-only/venv/bin/python
+
+[Service]
+Type=oneshot
+User=root
+Group=okxq-stagec-evidence
+UMask=0027
+StateDirectory=okx-quant-stage-c-test-only/kill/%i
+StateDirectoryMode=0750
+LoadCredential=scenario:/etc/okx-quant-stage-c-test-only/%i/scenario
+LoadCredential=challenge:/etc/okx-quant-stage-c-test-only/%i/challenge.json
+LoadCredential=registrar-public-key:/etc/okx-quant-stage-c-test-only/%i/registrar-public.pem
+LoadCredential=reached-public-key:/etc/okx-quant-stage-c-test-only/%i/attestor-public.pem
+LoadCredential=reached-consumption:/var/lib/okx-quant-stage-c-test-only/consumer/%i/reached-consumption.json
+LoadCredential=reached-consumer-public-key:/etc/okx-quant-stage-c-test-only/%i/reached-consumer-public.pem
+LoadCredential=kill-consumption:/var/lib/okx-quant-stage-c-test-only/consumer/%i/kill-consumption.json
+LoadCredential=kill-consumer-public-key:/etc/okx-quant-stage-c-test-only/%i/kill-consumer-public.pem
+LoadCredential=kill-private-key:/etc/okx-quant-stage-c-test-only/%i/kill-private.pem
+ExecStart=/opt/okx-quant-stage-c-test-only/venv/bin/python /opt/okx-quant-stage-c-test-only/instrumented.pyz kill \
+  --scenario-file %d/scenario \
+  --challenge %d/challenge \
+  --registrar-public-key %d/registrar-public-key \
+  --reached-artifact /var/lib/okx-quant-stage-c-test-only/attestor/%i/reached-attestation.json \
+  --reached-public-key %d/reached-public-key \
+  --reached-consumption %d/reached-consumption \
+  --reached-consumer-public-key %d/reached-consumer-public-key \
+  --kill-consumption %d/kill-consumption \
+  --kill-consumer-public-key %d/kill-consumer-public-key \
+  --kill-private-key %d/kill-private-key \
+  --unit okx-quant-stage-c-test-only-driver@%i.service \
+  --output /var/lib/okx-quant-stage-c-test-only/kill/%i/kill-attestation.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=no
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+InaccessiblePaths=/etc/okx-quant-stage-c-test-only/%i
+ReadOnlyPaths=/opt/okx-quant-stage-c-test-only /var/lib/okx-quant-stage-c-test-only/attestor/%i /var/lib/okx-quant-stage-c-test-only/consumer/%i
+ReadWritePaths=/var/lib/okx-quant-stage-c-test-only/kill/%i

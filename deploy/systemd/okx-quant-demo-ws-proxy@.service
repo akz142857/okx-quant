@@ -1,0 +1,30 @@
+[Unit]
+Description=OKX Quant Demo Chaos channel fault proxy (%i)
+After=network-online.target
+Before=okx-quant-demo-chaos.service
+
+[Service]
+Type=simple
+User=okxquant-fault-chaos
+Group=okxquant-fault-chaos
+EnvironmentFile=/etc/okx-quant/demo-chaos-ws-proxy-%i.env
+NetworkNamespacePath=/run/netns/okx-quant-demo-chaos
+ExecStart=/opt/okx-quant/demo-chaos/current/.venv/bin/python /opt/okx-quant/demo-chaos/current/scripts/ws_channel_fault_proxy.py --channel %i --listen-host 127.0.0.1 --listen-port ${OKX_QUANT_PROXY_LISTEN_PORT} --upstream-host wspap.okx.com --upstream-port 8443 --control /run/okx-quant-chaos-fault/%i.state
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/run/okx-quant-chaos-fault
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

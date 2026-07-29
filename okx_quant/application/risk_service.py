@@ -221,12 +221,18 @@ class ProductionRiskService:
         payload: dict[str, str],
     ) -> tuple[bool, str]:
         """锁存已经发生的账户预算越界；候选 BUY 越界只拒单。"""
-        if self.journal.get_mode() not in {
-            SystemMode.HALTED,
+        current = self.journal.get_mode()
+        if current not in {
             SystemMode.EMERGENCY_EXIT,
             SystemMode.MAINTENANCE,
-        }:
-            self.journal.set_mode(SystemMode.HALTED)
+        } and (
+            current is not SystemMode.HALTED
+            or self.journal.get_mode_reason() != event_name
+        ):
+            # A new account-limit incident must supersede a Canary startup
+            # hold and advance its hard epoch. Repeated sampling of the same
+            # incident remains idempotent.
+            self.journal.set_mode(SystemMode.HALTED, reason=event_name)
         mode, hard_epoch = self.journal.get_mode_state()
         self.journal.enqueue_outbox_once(
             f"hard-risk:{event_name}:{hard_epoch}",

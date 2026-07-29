@@ -13,4 +13,7 @@ PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -1,0 +1,32 @@
+/var/log/okx-quant/demo-shadow/*.log {
+    daily
+    rotate 35
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su okxquant-demo-shadow okxquant-data-shadow
+    create 0640 okxquant-demo-shadow okxquant-data-shadow
+}
+
+/var/log/okx-quant/demo-active/*.log {
+    daily
+    rotate 35
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su okxquant-demo-active okxquant-data-active
+    create 0640 okxquant-demo-active okxquant-data-active
+}
+
+/var/log/okx-quant/demo-chaos/*.log {
+    daily
+    rotate 35
+    compress
+    delaycompress
+    missingok
+    notifempty
+    su okxquant-demo-chaos okxquant-data-chaos
+    create 0640 okxquant-demo-chaos okxquant-data-chaos
+}

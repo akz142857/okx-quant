@@ -1,0 +1,37 @@
+# Copy once per role and replace every REPLACE token. The corresponding
+# systemd instance joins that role's network namespace, so 127.0.0.1 remains
+# private and refers to the trader inside that namespace.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 5s
+  external_labels:
+    environment: demo
+    role: REPLACE_WITH_ROLE
+    host_id: REPLACE_WITH_NON_SECRET_HOST_ID
+
+scrape_configs:
+  - job_name: okx-quant-demo-REPLACE_WITH_ROLE
+    static_configs:
+      - targets:
+          - 127.0.0.1:REPLACE_WITH_ROLE_METRICS_PORT
+        labels:
+          deployment_unit: okx-quant-demo-REPLACE_WITH_ROLE.service
+
+remote_write:
+  - url: https://REPLACE_WITH_REMOTE_WRITE_HOST/api/v1/write
+    remote_timeout: 10s
+    queue_config:
+      capacity: 10000
+      min_shards: 1
+      max_shards: 4
+      max_samples_per_send: 1000
+      batch_send_deadline: 5s
+      min_backoff: 100ms
+      max_backoff: 10s
+      retry_on_http_429: true
+    tls_config:
+      ca_file: /etc/okx-quant/metrics-agent/REPLACE_WITH_ROLE/ca.pem
+      cert_file: /etc/okx-quant/metrics-agent/REPLACE_WITH_ROLE/client.pem
+      key_file: /etc/okx-quant/metrics-agent/REPLACE_WITH_ROLE/client-key.pem
+      server_name: REPLACE_WITH_REMOTE_WRITE_HOST
+      insecure_skip_verify: false

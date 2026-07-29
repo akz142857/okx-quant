@@ -53,6 +53,7 @@ SUITES: tuple[dict[str, Any], ...] = (
             "tests/test_rest_client_config.py",
             "tests/test_rest_retry_safety.py",
             "tests/test_demo_contract.py",
+            "tests/test_demo_contract_evidence.py",
             "tests/test_account_snapshot.py",
         ),
     },
@@ -67,6 +68,8 @@ SUITES: tuple[dict[str, Any], ...] = (
             "tests/test_private_streams.py",
             "tests/test_position_restore.py",
             "tests/test_state_store.py",
+            "tests/test_demo_probe.py",
+            "tests/test_demo_soak_v2.py",
         ),
     },
     {
@@ -82,6 +85,17 @@ SUITES: tuple[dict[str, Any], ...] = (
             "tests/test_failure_injection.py",
             "tests/test_slo_report.py",
             "tests/test_production_config.py",
+            "tests/test_demo_preflight.py",
+            "tests/test_account_lease.py",
+            "tests/test_alert_control.py",
+            "tests/test_external_demo_monitor.py",
+            "tests/test_monitoring_deploy.py",
+            "tests/test_empty_host_restore.py",
+            "tests/test_immutable_bundle.py",
+            "tests/test_demo_chaos_evidence.py",
+            "tests/test_external_deployment_attestation.py",
+            "tests/test_linux_deployment_preflight.py",
+            "tests/test_stage_c_legacy_protocols.py",
         ),
     },
     {
@@ -97,6 +111,24 @@ SUITES: tuple[dict[str, Any], ...] = (
             "tests/test_review_fixes.py",
             "tests/test_research_gate.py",
             "tests/test_research_producers.py",
+            "tests/test_canary_transition.py",
+            "tests/test_canary_capability_security.py",
+        ),
+    },
+    {
+        "id": "stage-c-adversarial-protocol",
+        "description": (
+            "Stage-C 原始证据解析、显式实现清单、外部 actor、"
+            "业务屏障与构建隔离"
+        ),
+        "tests": (
+            "tests/test_stage_c_exact_release_drivers.py",
+            "tests/test_stage_c_external_executors.py",
+            "tests/test_stage_c_implementation_inventory.py",
+            "tests/test_stage_c_barrier_harness.py",
+            "tests/test_stage_c_native_recovery.py",
+            "tests/test_stage_c_pipeline_barriers.py",
+            "tests/test_stage_c_external_bridge.py",
         ),
     },
     {

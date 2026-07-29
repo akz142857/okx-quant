@@ -222,13 +222,46 @@ def test_demo_contract_main_creates_output_directories(
 ):
     output = tmp_path / "nested" / "demo-contract.json"
     fixture = tmp_path / "fixtures" / "demo-contract.v1.json"
-    evidence = {"ok": True}
+    evidence = {
+        "ok": True,
+        "started_at": 1,
+        "completed_at": 2,
+    }
     monkeypatch.setattr(
         demo_contract,
         "load_yaml",
         lambda _path: {"okx": {"simulated": True}},
     )
-    monkeypatch.setattr(demo_contract, "make_client", lambda _config: object())
+    monkeypatch.setattr(
+        demo_contract,
+        "make_client",
+        lambda _config: type(
+            "IdentityClient",
+            (),
+            {"get_account_config": lambda self: {"uid": "demo-account"}},
+        )(),
+    )
+    monkeypatch.setattr(
+        demo_contract,
+        "build_release_identity",
+        lambda _root: {
+            "git_commit": "1" * 40,
+            "git_tree_hash": "2" * 40,
+            "workspace_clean": True,
+            "source_manifest_sha256": "3" * 64,
+        },
+    )
+    monkeypatch.setattr(
+        demo_contract,
+        "build_deployment_identity",
+        lambda **_kwargs: {
+            "account_uid": "demo-account",
+            "api_domain": "https://www.okx.com",
+            "simulated": True,
+            "config_sha256": "4" * 64,
+            "key_fingerprint": "5" * 64,
+        },
+    )
     monkeypatch.setattr(
         demo_contract,
         "run_contract",
@@ -254,10 +287,20 @@ def test_demo_contract_main_creates_output_directories(
     )
 
     assert demo_contract.main() == 0
-    assert json.loads(output.read_text(encoding="utf-8")) == evidence
+    written = json.loads(output.read_text(encoding="utf-8"))
+    assert written["version"] == 2
+    assert written["contract"] == evidence
+    assert written["release_identity"]["workspace_clean"] is True
     assert json.loads(fixture.read_text(encoding="utf-8")) == {
         "fixture": True,
     }
+    manifest = json.loads(
+        output.with_suffix(
+            output.suffix + ".manifest-request.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert manifest["action"] == "attest-demo-contract-v2"
+    assert manifest["components"]["evidence"]["bytes"] > 0
 
 
 class AckOnlyAlgoClient(DemoClient):

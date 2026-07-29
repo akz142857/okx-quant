@@ -1,0 +1,39 @@
+[Unit]
+Description=OKX Quant Stage-C independent clock raw acquirer %i
+Before=okx-quant-stage-c-external-cleanup@%i.service
+OnFailure=okx-quant-stage-c-external-cleanup@%i.service
+
+[Service]
+Type=oneshot
+User=okxquant-stagec-clock-source
+Group=okxquant-stagec-raw-readers
+UMask=0027
+StateDirectory=okx-quant-stage-c/external/raw-clock/%i
+StateDirectoryMode=0750
+WorkingDirectory=/opt/okx-quant/demo-chaos/current
+LoadCredential=acquirer-private-key.pem:/etc/okx-quant/stage-c/keys/clock-acquirer-private.pem
+ExecStart=/opt/okx-quant/demo-chaos/current/.venv/bin/python /opt/okx-quant/demo-chaos/current/scripts/stage_c_external_control_source.py --role clock_collector --challenge /var/lib/okx-quant-stage-c/challenges/%i.json --registrar-public-key /etc/okx-quant/stage-c/keys/registrar-public.pem --acquirer-private-key %d/acquirer-private-key.pem --start-after /var/lib/okx-quant-stage-c/external/raw-systemd/%i/driver-ready.json --start-after /var/lib/okx-quant-stage-c/external/actor/%i/actor-report.json --wait-seconds 360 --output /var/lib/okx-quant-stage-c/external/raw-clock/%i/clock-source-raw.json
+ExecStartPost=/usr/bin/chmod 0640 /var/lib/okx-quant-stage-c/external/raw-clock/%i/clock-source-raw.json
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+ReadOnlyPaths=/etc/okx-quant /opt/okx-quant/demo-chaos/current /var/lib/okx-quant-stage-c/challenges /var/lib/okx-quant-stage-c/external/actor /var/lib/okx-quant-stage-c/external/raw-systemd
+ReadWritePaths=/var/lib/okx-quant-stage-c/external/raw-clock/%i
+CapabilityBoundingSet=
+AmbientCapabilities=
+TimeoutStartSec=420
+
+[Install]
+WantedBy=multi-user.target

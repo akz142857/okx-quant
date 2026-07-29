@@ -29,6 +29,7 @@ import pwd
 import sys
 import tempfile
 import time
+from decimal import Decimal
 from pathlib import Path
 
 from okx_quant.config import load_yaml
@@ -98,18 +99,10 @@ def load_env_file(path: str) -> None:
                 raise ValueError(f"环境文件第 {line_number} 行缺少 '='")
             key, value = line.split("=", 1)
             key = key.strip()
-            if (
-                not key
-                or not key.replace("_", "").isalnum()
-                or not key[0].isalpha()
-            ):
+            if not key or not key.replace("_", "").isalnum() or not key[0].isalpha():
                 raise ValueError(f"环境文件第 {line_number} 行变量名非法")
             value = value.strip()
-            if (
-                len(value) >= 2
-                and value[0] == value[-1]
-                and value[0] in {"'", '"'}
-            ):
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
                 value = value[1:-1]
             os.environ.setdefault(key, value)
 
@@ -125,6 +118,7 @@ def make_client(cfg: dict):
         simulated=okx_cfg.get("simulated", True),
         proxy=okx_cfg.get("proxy", ""),
         base_url=okx_cfg.get("base_url", ""),
+        ca_bundle=okx_cfg.get("ca_bundle", ""),
         timeout=int(okx_cfg.get("timeout", 15)),
         max_retries=int(okx_cfg.get("max_retries", 3)),
     )
@@ -211,6 +205,7 @@ def _validate_inst(inst: str):
 # 子命令：行情查询
 # -------------------------------------------------------------------------
 
+
 def cmd_ticker(args, cfg):
     from tabulate import tabulate
 
@@ -240,6 +235,7 @@ def cmd_ticker(args, cfg):
 # -------------------------------------------------------------------------
 # 子命令：回测
 # -------------------------------------------------------------------------
+
 
 def cmd_backtest(args, cfg):
     from okx_quant.backtest import BacktestEngine, BacktestReport
@@ -294,6 +290,7 @@ def cmd_backtest(args, cfg):
 # 子命令：实盘
 # -------------------------------------------------------------------------
 
+
 def cmd_screen(args, cfg):
     from okx_quant.data.screener import Screener, ScreenerConfig
 
@@ -313,6 +310,7 @@ def cmd_screen(args, cfg):
     screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
     try:
         from okx_quant.exchange import OKXExchange
+
         snap = OKXExchange(client).get_balance()
         screener_cfg.available_usdt = snap.available_quote
     except Exception as e:
@@ -341,6 +339,7 @@ def _run_screen(cfg, top_n: int, bar: str, max_price: float = 0) -> list[str]:
     screener_cfg.min_order_usdt = risk_cfg_raw.get("min_order_usdt", 5.0)
     try:
         from okx_quant.exchange import OKXExchange
+
         snap = OKXExchange(client).get_balance()
         screener_cfg.available_usdt = snap.available_quote
     except Exception as e:
@@ -352,7 +351,11 @@ def _run_screen(cfg, top_n: int, bar: str, max_price: float = 0) -> list[str]:
     return selected
 
 
-def _validate_production_deployment(args, cfg, settings) -> None:
+def _validate_production_deployment(
+    args,
+    cfg,
+    settings,
+) -> dict | None:
     """Ultimate in-process guard; direct console invocation cannot bypass it."""
     release_root = Path(settings.release_root)
     if not release_root.is_dir():
@@ -365,9 +368,7 @@ def _validate_production_deployment(args, cfg, settings) -> None:
     from scripts.production_gate import _actual_runtime_identity
 
     launch = load_launch_manifest(Path(settings.launch_manifest_path))
-    requested_instruments = [
-        item.strip() for item in args.inst.split(",") if item.strip()
-    ]
+    requested_instruments = [item.strip() for item in args.inst.split(",") if item.strip()]
     if (
         getattr(args, "screen", 0)
         or args.strategy != launch["strategy"]
@@ -375,9 +376,7 @@ def _validate_production_deployment(args, cfg, settings) -> None:
         or requested_instruments != launch["instruments"]
         or args.interval != launch["interval_seconds"]
     ):
-        raise ValueError(
-            "实际 live argv 未精确匹配 root-owned launch manifest"
-        )
+        raise ValueError("实际 live argv 未精确匹配 root-owned launch manifest")
     identity = _actual_runtime_identity(
         config_path=Path(args.config),
         release_commit_file=release_root / "REVISION",
@@ -386,14 +385,74 @@ def _validate_production_deployment(args, cfg, settings) -> None:
         instruments=launch["instruments"],
         interval=float(launch["interval_seconds"]),
     )
-    validate_deployment_receipt(
+    receipt = validate_deployment_receipt(
         Path(settings.deployment_receipt_path),
         identity=identity,
         approval_path=Path(settings.admission_approval_path),
-        approval_public_key=Path(
-            settings.admission_approval_public_key
-        ),
+        approval_public_key=Path(settings.admission_approval_public_key),
         evidence_path=Path(settings.admission_evidence_path),
+    )
+    if getattr(settings, "deployment_tier", "production") == "canary":
+        from okx_quant.research.canary import (
+            identity_sha256,
+            validate_canary_runtime,
+        )
+
+        transition, policy = validate_canary_runtime(
+            settings=settings,
+            config=cfg,
+            actual_runtime_identity=identity,
+            deployment_receipt=receipt,
+        )
+        return {
+            "expires_at": policy["expires_at"],
+            "backup_rpo_seconds": policy["auto_halt"]["backup_rpo_seconds"],
+            "transition_sha256": identity_sha256(transition),
+            "policy_sha256": identity_sha256(policy),
+            "target_sha256": identity_sha256(transition["target_deployment_identity"]),
+            "demo_soak_epoch_id": transition["demo_soak_epoch_id"],
+            "source_key_fingerprints": transition["post_start_source_key_fingerprints"],
+            "source_producer_inventory": transition[
+                "source_producer_inventory"
+            ],
+            "target_key_fingerprint": transition[
+                "target_deployment_identity"
+            ]["key_fingerprint"],
+        }
+    return None
+
+
+def _validate_demo_deployment(
+    args,
+    cfg,
+    settings,
+    *,
+    process_argv: list[str] | None = None,
+    proc_root: Path = Path("/proc"),
+    current_uid: int | None = None,
+    now: int | None = None,
+) -> dict:
+    """Fail closed inside the trader before constructing an OKX client."""
+    from okx_quant.ops.demo_preflight import (
+        DemoDeploymentProfile,
+        validate_demo_process_receipt,
+        validate_runtime_profile_binding,
+    )
+
+    profile = DemoDeploymentProfile.from_config(cfg)
+    validate_runtime_profile_binding(profile, settings, cfg)
+    if tuple(
+        item.strip() for item in str(args.inst).split(",") if item.strip()
+    ) != (profile.instrument,):
+        raise RuntimeError("Demo runtime/config/profile identity 不一致")
+    return validate_demo_process_receipt(
+        cfg=cfg,
+        profile=profile,
+        config_path=Path(args.config),
+        process_argv=list(sys.argv if process_argv is None else process_argv),
+        proc_root=proc_root,
+        current_uid=current_uid,
+        now=now,
     )
 
 
@@ -450,9 +509,20 @@ def cmd_live(args, cfg):
     production_cfg = ProductionSettings.from_config(cfg)
     launch_authorized = True
     launch_error = ""
+    entry_authorization_expires_at = 0.0
+    entry_backup_rpo_seconds = 0.0
+    canary_runtime_binding: dict = {}
     if production_cfg.environment == "production":
         try:
-            _validate_production_deployment(args, cfg, production_cfg)
+            entry_authorization = _validate_production_deployment(
+                args,
+                cfg,
+                production_cfg,
+            )
+            if entry_authorization is not None:
+                canary_runtime_binding = entry_authorization
+                entry_authorization_expires_at = float(entry_authorization["expires_at"])
+                entry_backup_rpo_seconds = float(entry_authorization["backup_rpo_seconds"])
         except Exception as exc:  # safety kernel must still start fail-closed
             launch_authorized = False
             launch_error = f"{type(exc).__name__}: {exc}"
@@ -460,6 +530,16 @@ def cmd_live(args, cfg):
                 "生产部署准入无效；仅启动 HALTED safety kernel: %s",
                 launch_error,
             )
+    elif production_cfg.environment == "demo":
+        try:
+            _validate_demo_deployment(args, cfg, production_cfg)
+        except Exception as exc:
+            logger.critical(
+                "Demo 进程内部署准入无效；在创建 OKX client 前拒绝启动: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
+            raise SystemExit(1) from exc
     if getattr(args, "safety_only", False):
         launch_authorized = False
         launch_error = launch_error or "wrapper requested safety-only mode"
@@ -480,27 +560,31 @@ def cmd_live(args, cfg):
 
         journal = SQLiteJournal(
             production_cfg.journal_path,
-            must_exist=production_cfg.environment == "production",
+            must_exist=(
+                production_cfg.environment == "production" or bool(production_cfg.account_id)
+            ),
         )
+        revision_path = Path(production_cfg.release_root) / "REVISION"
+        if (
+            launch_authorized
+            and production_cfg.account_id
+            and revision_path.is_file()
+            and not revision_path.is_symlink()
+        ):
+            strategy_revision = revision_path.read_text(encoding="ascii").strip().lower()
+        if production_cfg.account_id:
+            journal.assert_identity(production_cfg.account_id)
         if (
             production_cfg.environment == "production"
-            and launch_authorized
+            and not launch_authorized
+            and journal.get_mode()
+            not in {
+                SystemMode.HALTED,
+                SystemMode.EMERGENCY_EXIT,
+                SystemMode.MAINTENANCE,
+            }
         ):
-            strategy_revision = (
-                Path(production_cfg.release_root) / "REVISION"
-            ).read_text(encoding="ascii").strip().lower()
-        if production_cfg.environment == "production":
-            journal.assert_identity(production_cfg.account_id)
-            if (
-                not launch_authorized
-                and journal.get_mode()
-                not in {
-                    SystemMode.HALTED,
-                    SystemMode.EMERGENCY_EXIT,
-                    SystemMode.MAINTENANCE,
-                }
-            ):
-                journal.set_mode(SystemMode.HALTED)
+            journal.set_mode(SystemMode.HALTED)
         runtime_config_hash = production_config_hash(production_cfg, cfg)
         risk_limits = ProductionRiskLimits(
             max_order_loss_usdt=production_cfg.max_order_loss_usdt,
@@ -512,23 +596,37 @@ def cmd_live(args, cfg):
             max_order_intents_per_hour=production_cfg.max_order_intents_per_hour,
             max_spread_ratio=production_cfg.max_spread_ratio,
             max_slippage_ratio=production_cfg.max_slippage_ratio,
-            max_candle_range_ratio=(
-                production_cfg.max_candle_range_ratio
-            ),
-            min_24h_quote_volume_usdt=(
-                production_cfg.min_24h_quote_volume_usdt
-            ),
+            max_candle_range_ratio=(production_cfg.max_candle_range_ratio),
+            min_24h_quote_volume_usdt=(production_cfg.min_24h_quote_volume_usdt),
             max_market_data_age_s=production_cfg.max_market_data_age_s,
             max_account_snapshot_age_s=production_cfg.max_account_snapshot_age_s,
-            allowed_instruments=frozenset(
-                production_cfg.allowed_instruments
-            ),
+            allowed_instruments=frozenset(production_cfg.allowed_instruments),
         )
+        connection_targets = None
+        demo_profile = None
+        if production_cfg.environment == "demo" and "demo_validation" in cfg:
+            from okx_quant.ops.demo_preflight import DemoDeploymentProfile
+
+            demo_profile = DemoDeploymentProfile.from_config(cfg)
+            connection_targets = demo_profile.websocket_targets()
+        account_lease = None
+        if demo_profile is not None and demo_profile.external_lease_public_key is not None:
+            from okx_quant.ops.account_lease import SignedAccountLeaseClient
+
+            account_lease = SignedAccountLeaseClient(
+                base_url=demo_profile.external_lease_url,
+                public_key=demo_profile.external_lease_public_key,
+                token_env=demo_profile.external_lease_token_env,
+                account_uid=demo_profile.account_uid,
+                broker_id=demo_profile.external_lease_broker_id,
+                ttl_s=demo_profile.external_lease_ttl_s,
+            )
         ws = OKXWebSocketClient(
             api_key=okx_cfg.get("api_key", ""),
             secret_key=okx_cfg.get("secret_key", ""),
             passphrase=okx_cfg.get("passphrase", ""),
             simulated=simulated,
+            connection_targets=connection_targets,
         )
         production_runtime = ProductionRuntime(
             exchange,
@@ -539,35 +637,146 @@ def cmd_live(args, cfg):
             reconciliation_interval_s=production_cfg.reconciliation_interval_s,
             max_clock_skew_s=production_cfg.max_clock_skew_s,
             ws_ready_timeout_s=production_cfg.ws_ready_timeout_s,
-            max_unprotected_position_s=(
-                production_cfg.max_unprotected_position_s
-            ),
+            max_unprotected_position_s=(production_cfg.max_unprotected_position_s),
             max_consecutive_infrastructure_errors=(
                 production_cfg.max_consecutive_infrastructure_errors
             ),
             shadow_mode=production_cfg.shadow_mode,
             safety_only=not launch_authorized,
             heartbeat_path=production_cfg.heartbeat_path,
-            backup_dir=production_cfg.backup_dir,
+            backup_dir=(
+                "" if production_cfg.external_backup_managed else production_cfg.backup_dir
+            ),
             backup_interval_s=production_cfg.backup_interval_s,
             backup_retention_days=production_cfg.backup_retention_days,
             offsite_backup_uri=production_cfg.offsite_backup_uri,
-            alert_webhook_url=os.environ.get(
-                production_cfg.alert_webhook_env, ""
-            ),
+            alert_webhook_url=os.environ.get(production_cfg.alert_webhook_env, ""),
             metrics_host=production_cfg.metrics_host,
             metrics_port=production_cfg.metrics_port,
             expected_account_id=production_cfg.account_id,
+            deployment_unit=(
+                demo_profile.unit_name
+                if demo_profile is not None
+                else production_cfg.deployment_unit
+            ),
+            soak_epoch_id=(
+                demo_profile.soak_epoch_id
+                if demo_profile is not None
+                else canary_runtime_binding.get("demo_soak_epoch_id", "")
+            ),
             approval_public_key=production_cfg.resume_approval_public_key,
             production_config_hash=runtime_config_hash,
+            environment=production_cfg.environment,
+            allowed_instruments=production_cfg.allowed_instruments,
+            resource_sample_interval_s=(production_cfg.resource_sample_interval_s),
+            memory_high_bytes=production_cfg.memory_high_bytes,
+            memory_max_bytes=production_cfg.memory_max_bytes,
+            limit_nofile=production_cfg.limit_nofile,
+            tasks_max=production_cfg.tasks_max,
+            max_database_bytes=production_cfg.max_database_bytes,
+            max_wal_bytes=production_cfg.max_wal_bytes,
+            max_wal_checkpoint_age_s=(
+                production_cfg.max_wal_checkpoint_age_s
+            ),
+            max_database_growth_bytes_per_day=(production_cfg.max_database_growth_bytes_per_day),
+            resource_min_free_bytes=production_cfg.resource_min_free_bytes,
+            resource_min_free_inodes=(production_cfg.resource_min_free_inodes),
+            release_identity=strategy_revision,
+            entry_authorization_expires_at=(entry_authorization_expires_at),
+            max_entry_backup_rpo_s=entry_backup_rpo_seconds,
+            expected_model_slippage_ratio=float(cfg.get("backtest", {}).get("slippage", 0)),
+            cost_model_manifest=(
+                demo_profile.cost_model_manifest if demo_profile is not None else None
+            ),
+            demo_probe_schedule_path=(
+                demo_profile.probe_schedule_path
+                if demo_profile is not None and demo_profile.probe_schedule_path is not None
+                else ""
+            ),
+            require_formal_demo_probe_schedule=(
+                demo_profile is not None and demo_profile.role == "active"
+            ),
+            demo_probe_only=(demo_profile is not None and demo_profile.role == "active"),
+            backup_receipt_path=(
+                demo_profile.backup_receipt_path
+                if demo_profile is not None
+                else (
+                    production_cfg.backup_receipt_path
+                    if production_cfg.environment == "production"
+                    else ""
+                )
+            ),
+            backup_receipt_public_key=(
+                demo_profile.backup_receipt_public_key
+                if demo_profile is not None
+                else (
+                    production_cfg.backup_receipt_public_key
+                    if production_cfg.environment == "production"
+                    else ""
+                )
+            ),
+            backup_receipt_key_id=(
+                demo_profile.backup_receipt_key_id
+                if demo_profile is not None
+                else (
+                    production_cfg.backup_receipt_key_id
+                    if production_cfg.environment == "production"
+                    else ""
+                )
+            ),
+            external_control_inbox_dir=(
+                demo_profile.operator_inbox_dir if demo_profile is not None else ""
+            ),
+            alert_provider_receipt_public_key=(
+                demo_profile.alert_provider_receipt_public_key if demo_profile is not None else ""
+            ),
+            alert_human_ack_public_key=(
+                demo_profile.alert_human_ack_public_key if demo_profile is not None else ""
+            ),
+            alert_escalation_public_key=(
+                demo_profile.alert_escalation_public_key if demo_profile is not None else ""
+            ),
+            canary_activation_path=(
+                production_cfg.canary_activation_path if canary_runtime_binding else ""
+            ),
+            canary_operator_public_key=(
+                production_cfg.canary_operator_public_key if canary_runtime_binding else ""
+            ),
+            canary_risk_public_key=(
+                production_cfg.canary_risk_public_key if canary_runtime_binding else ""
+            ),
+            canary_check_verifier_public_key=(
+                production_cfg.canary_check_verifier_public_key if canary_runtime_binding else ""
+            ),
+            canary_source_key_fingerprints=canary_runtime_binding.get(
+                "source_key_fingerprints",
+                {},
+            ),
+            canary_source_producer_inventory=canary_runtime_binding.get(
+                "source_producer_inventory",
+                {},
+            ),
+            canary_target_key_fingerprint=canary_runtime_binding.get(
+                "target_key_fingerprint",
+                "",
+            ),
+            canary_transition_sha256=canary_runtime_binding.get(
+                "transition_sha256",
+                "",
+            ),
+            canary_policy_sha256=canary_runtime_binding.get(
+                "policy_sha256",
+                "",
+            ),
+            canary_target_sha256=canary_runtime_binding.get(
+                "target_sha256",
+                "",
+            ),
+            account_lease=account_lease,
         )
         public_instruments = list(production_cfg.allowed_instruments)
         if not public_instruments and args.inst:
-            public_instruments = [
-                item.strip()
-                for item in args.inst.split(",")
-                if item.strip()
-            ]
+            public_instruments = [item.strip() for item in args.inst.split(",") if item.strip()]
         if public_instruments:
             production_runtime.register_public_market_data(
                 public_instruments,
@@ -587,10 +796,7 @@ def cmd_live(args, cfg):
             logger.critical("生产恢复门禁失败，拒绝启动策略: %s", exc)
             raise SystemExit(1) from exc
         atexit.register(production_runtime.stop)
-        if (
-            production_cfg.environment == "production"
-            and not launch_authorized
-        ):
+        if production_cfg.environment == "production" and not launch_authorized:
             journal.record_event(
                 "production_safety_only_started",
                 severity="critical",
@@ -659,9 +865,7 @@ def cmd_live(args, cfg):
         _validate_inst(args.inst)
 
     # 构建最终交易对列表，确保已有持仓始终包含在内
-    requested_instruments = (
-        [s.strip() for s in args.inst.split(",")] if args.inst else []
-    )
+    requested_instruments = [s.strip() for s in args.inst.split(",")] if args.inst else []
     for pos_inst in existing_positions:
         if pos_inst not in requested_instruments:
             if production_cfg.environment == "production":
@@ -681,13 +885,10 @@ def cmd_live(args, cfg):
         print("错误: 无交易对可监控")
         sys.exit(1)
     if production_cfg.allowed_instruments:
-        unauthorized = sorted(
-            set(instruments) - set(production_cfg.allowed_instruments)
-        )
+        unauthorized = sorted(set(instruments) - set(production_cfg.allowed_instruments))
         if unauthorized:
             raise SystemExit(
-                "交易对不在 production.allowed_instruments: "
-                + ", ".join(unauthorized)
+                "交易对不在 production.allowed_instruments: " + ", ".join(unauthorized)
             )
 
     risk_cfg_raw = cfg.get("risk", {})
@@ -714,7 +915,9 @@ def cmd_live(args, cfg):
             mode = "【模拟盘】" if simulated else "【实盘】"
             print(f"\n启动 {mode} 多币种实盘交易")
             print(f"交易对: {', '.join(instruments)}  策略: {args.strategy}  K 线周期: {args.bar}")
-            print(f"风控: 最大仓位={risk_config.max_position_pct*100:.0f}%  止损={risk_config.stop_loss_pct*100:.1f}%")
+            print(
+                f"风控: 最大仓位={risk_config.max_position_pct * 100:.0f}%  止损={risk_config.stop_loss_pct * 100:.1f}%"
+            )
             print("按 Ctrl+C 停止\n")
 
         supervisor = Supervisor(
@@ -744,7 +947,9 @@ def cmd_live(args, cfg):
         mode = "【模拟盘】" if simulated else "【实盘】"
         print(f"\n启动 {mode} 实盘交易")
         print(f"交易对: {args.inst}  策略: {args.strategy}  K 线周期: {args.bar}")
-        print(f"风控: 最大仓位={risk_config.max_position_pct*100:.0f}%  止损={risk_config.stop_loss_pct*100:.1f}%")
+        print(
+            f"风控: 最大仓位={risk_config.max_position_pct * 100:.0f}%  止损={risk_config.stop_loss_pct * 100:.1f}%"
+        )
         print("按 Ctrl+C 停止\n")
 
     trader = LiveTrader(
@@ -752,7 +957,8 @@ def cmd_live(args, cfg):
         strategy=strategy,
         inst_id=instruments[0],
         risk_config=risk_config,
-        dashboard=use_dashboard, simulated=simulated,
+        dashboard=use_dashboard,
+        simulated=simulated,
         signal_timeout_s=signal_timeout_s,
         state_store=state_store,
         production_runtime=production_runtime,
@@ -766,6 +972,7 @@ def cmd_live(args, cfg):
 # -------------------------------------------------------------------------
 # 子命令：查看可用交易对
 # -------------------------------------------------------------------------
+
 
 def cmd_list_pairs(args, cfg):
     from tabulate import tabulate
@@ -799,6 +1006,7 @@ def cmd_list_pairs(args, cfg):
 # -------------------------------------------------------------------------
 # 子命令：查看可用策略
 # -------------------------------------------------------------------------
+
 
 def cmd_list_strategies(args, cfg):
     from okx_quant.cli.colors import bold, cyan, dim, yellow
@@ -868,9 +1076,7 @@ def cmd_init_journal(args, cfg):
         owner_uid = pwd.getpwnam(owner_user).pw_uid
         owner_gid = grp.getgrnam(owner_group).gr_gid
         if os.geteuid() not in {0, owner_uid}:
-            raise PermissionError(
-                "生产交易日志只能由 root 或目标 trader 身份初始化"
-            )
+            raise PermissionError("生产交易日志只能由 root 或目标 trader 身份初始化")
         os.chown(path.parent, owner_uid, owner_gid)
         path.parent.chmod(0o2750)
     with tempfile.NamedTemporaryFile(
@@ -902,9 +1108,7 @@ def cmd_init_journal(args, cfg):
         try:
             os.link(temporary_path, path)
         except FileExistsError as exc:
-            raise SystemExit(
-                f"拒绝覆盖并发创建的交易日志: {path}"
-            ) from exc
+            raise SystemExit(f"拒绝覆盖并发创建的交易日志: {path}") from exc
         if settings.environment == "production":
             path.parent.chmod(0o2750)
         directory_fd = os.open(path.parent, os.O_RDONLY)
@@ -1141,8 +1345,39 @@ def cmd_reconcile_now(args, cfg):
 
     _, journal = _open_production_journal(cfg)
     try:
+        result = enqueue_and_wait(journal, "reconcile-now", {}, timeout_s=args.wait)
+        print(render_json(result))
+        if result["status"] != "completed":
+            raise SystemExit(2)
+    finally:
+        journal.close()
+
+
+def cmd_demo_probe(args, cfg):
+    from okx_quant.cli.operations import enqueue_and_wait, render_json
+
+    settings, journal = _open_production_journal(cfg)
+    try:
+        if settings.environment != "demo" or settings.shadow_mode:
+            raise SystemExit("demo-probe 只允许 production.environment=demo 且 shadow_mode=false")
+        if args.confirm != "I_UNDERSTAND_DEMO_PROBE":
+            raise SystemExit("--confirm 必须精确等于 I_UNDERSTAND_DEMO_PROBE")
+        payload = {"probe_id": args.probe_id}
+        if not args.probe_id:
+            if not args.inst:
+                raise SystemExit("新 probe 必须提供 --inst")
+            payload.update(
+                {
+                    "inst_id": args.inst,
+                    "nominal_usdt": str(args.nominal_usdt),
+                    "slot": args.slot,
+                }
+            )
         result = enqueue_and_wait(
-            journal, "reconcile-now", {}, timeout_s=args.wait
+            journal,
+            "demo-probe",
+            payload,
+            timeout_s=args.wait,
         )
         print(render_json(result))
         if result["status"] != "completed":
@@ -1193,7 +1428,7 @@ def _confirm_llm_backtest(strategy, num_bars: int):
     is_ensemble = isinstance(strategy, EnsembleStrategy)
     is_multi_agent = isinstance(strategy, MultiAgentStrategy)
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print("  LLM 回测费用预估")
     print(f"  模型: {model}")
 
@@ -1210,8 +1445,9 @@ def _confirm_llm_backtest(strategy, num_bars: int):
         models = [m.strip() for m in model.split("+")]
         cheap_model = models[0] if models else "deepseek-chat"
         deep_model = models[1] if len(models) > 1 else cheap_model
-        est_cost = (_estimate_cost(cheap_model, cheap_in, cheap_out)
-                    + _estimate_cost(deep_model, deep_in, deep_out))
+        est_cost = _estimate_cost(cheap_model, cheap_in, cheap_out) + _estimate_cost(
+            deep_model, deep_in, deep_out
+        )
         total_tokens = cheap_in + cheap_out + deep_in + deep_out
 
         print(f"  最大调用次数: ~{num_bars * calls_per_bar} 次 ({calls_per_bar}/bar)")
@@ -1226,12 +1462,14 @@ def _confirm_llm_backtest(strategy, num_bars: int):
         est_cost = _estimate_cost(model, est_input_tokens, est_output_tokens)
 
         print(f"  最大调用次数: ~{num_bars} 次")
-        print(f"  预估 Token 上限: ~{est_input_tokens + est_output_tokens:,} ({est_input_tokens:,} in + {est_output_tokens:,} out)")
+        print(
+            f"  预估 Token 上限: ~{est_input_tokens + est_output_tokens:,} ({est_input_tokens:,} in + {est_output_tokens:,} out)"
+        )
         print(f"  预估费用上限: ~${est_cost:.4f} USD")
 
     if is_ensemble:
         print("  注: 集成策略仅在传统策略达成共识时调用 LLM，实际费用通常远低于预估")
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
 
     confirm = input("\n  确认运行 LLM 回测? (y/N): ").strip().lower()
     if confirm != "y":
@@ -1246,11 +1484,13 @@ def _print_llm_usage(strategy):
     usage = strategy.get_usage_summary()
     model = strategy.llm_model
 
-    print(f"\n{'='*50}")
+    print(f"\n{'=' * 50}")
     print("  LLM 用量统计")
     print(f"  模型: {model}")
     print(f"  总调用次数: {usage['total_calls']}")
-    print(f"  总 Token: {usage['total_tokens']:,} ({usage['total_input_tokens']:,} in + {usage['total_output_tokens']:,} out)")
+    print(
+        f"  总 Token: {usage['total_tokens']:,} ({usage['total_input_tokens']:,} in + {usage['total_output_tokens']:,} out)"
+    )
 
     # 多 Agent 策略：按 agent 分拆费用估算
     if isinstance(strategy, MultiAgentStrategy) and "per_agent" in usage:
@@ -1266,21 +1506,33 @@ def _print_llm_usage(strategy):
             total_cost += cost
         print(f"  预估实际费用: ~${total_cost:.4f} USD")
     else:
-        actual_cost = _estimate_cost(model, usage["total_input_tokens"], usage["total_output_tokens"])
+        actual_cost = _estimate_cost(
+            model, usage["total_input_tokens"], usage["total_output_tokens"]
+        )
         print(f"  预估实际费用: ~${actual_cost:.4f} USD")
 
-    print(f"{'='*50}")
+    print(f"{'=' * 50}")
 
 
 # -------------------------------------------------------------------------
 # 工具函数
 # -------------------------------------------------------------------------
 
+
 def _bar_to_minutes(bar: str) -> int:
     mapping = {
-        "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
-        "1H": 60, "2H": 120, "4H": 240, "6H": 360, "12H": 720,
-        "1D": 1440, "1W": 10080,
+        "1m": 1,
+        "3m": 3,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1H": 60,
+        "2H": 120,
+        "4H": 240,
+        "6H": 360,
+        "12H": 720,
+        "1D": 1440,
+        "1W": 10080,
     }
     return mapping.get(bar, 60)
 
@@ -1288,6 +1540,7 @@ def _bar_to_minutes(bar: str) -> int:
 # -------------------------------------------------------------------------
 # CLI 入口
 # -------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1329,8 +1582,12 @@ def main():
     p_live.add_argument("--interval", type=int, default=60, help="轮询间隔（秒）")
     p_live.add_argument("--no-dashboard", action="store_true", help="禁用面板，使用日志输出")
     p_live.add_argument("--screen", type=int, default=0, help="自动选币数量，如 --screen 5")
-    p_live.add_argument("--max-price", type=float, default=0, help="选币最大单价过滤 (USDT，0=不过滤)")
-    p_live.add_argument("-y", "--yes", action="store_true", help="跳过交易对确认 prompt（自动化必用）")
+    p_live.add_argument(
+        "--max-price", type=float, default=0, help="选币最大单价过滤 (USDT，0=不过滤)"
+    )
+    p_live.add_argument(
+        "-y", "--yes", action="store_true", help="跳过交易对确认 prompt（自动化必用）"
+    )
     p_live.add_argument(
         "--safety-only",
         action="store_true",
@@ -1342,7 +1599,9 @@ def main():
     p_screen.add_argument("--top", type=int, default=5, help="选出 top N 交易对")
     p_screen.add_argument("--bar", default="4H", help="K 线周期")
     p_screen.add_argument("--min-vol", type=float, default=None, help="最小 24H 成交额 (USDT)")
-    p_screen.add_argument("--max-price", type=float, default=0, help="最大单价过滤 (USDT，0=不过滤)")
+    p_screen.add_argument(
+        "--max-price", type=float, default=0, help="最大单价过滤 (USDT，0=不过滤)"
+    )
 
     # list-pairs
     subparsers.add_parser("list-pairs", help="查看可用交易对")
@@ -1352,9 +1611,7 @@ def main():
 
     subparsers.add_parser("production-status", help="查看生产内核安全状态")
 
-    p_init = subparsers.add_parser(
-        "init-journal", help="一次性初始化全新交易日志并锁存 HALTED"
-    )
+    p_init = subparsers.add_parser("init-journal", help="一次性初始化全新交易日志并锁存 HALTED")
     p_init.add_argument("--confirm", default="")
     p_init.add_argument("--actor", default=os.environ.get("USER", "unknown"))
     p_init.add_argument("--owner-user", default="okxquant-trader")
@@ -1370,9 +1627,7 @@ def main():
     p_resume_request = subparsers.add_parser(
         "resume-request", help="生成待独立风险审批人签名的短效恢复请求"
     )
-    p_resume_request.add_argument(
-        "--actor", default=os.environ.get("USER", "unknown")
-    )
+    p_resume_request.add_argument("--actor", default=os.environ.get("USER", "unknown"))
     p_resume_request.add_argument("--expires-in", type=int, default=300)
     p_resume_request.add_argument("--output", required=True)
 
@@ -1388,9 +1643,7 @@ def main():
         "flatten-request", help="生成待独立风险审批人签名的短效 flatten 请求"
     )
     p_flatten_request.add_argument("--inst", action="append", default=[])
-    p_flatten_request.add_argument(
-        "--actor", default=os.environ.get("USER", "unknown")
-    )
+    p_flatten_request.add_argument("--actor", default=os.environ.get("USER", "unknown"))
     p_flatten_request.add_argument("--expires-in", type=int, default=300)
     p_flatten_request.add_argument("--output", required=True)
 
@@ -1405,6 +1658,17 @@ def main():
     p_reconcile = subparsers.add_parser("reconcile-now", help="请求立即对账")
     p_reconcile.add_argument("--wait", type=float, default=60)
 
+    p_probe = subparsers.add_parser(
+        "demo-probe",
+        help="通过长期运行的 production path 执行或恢复受限 Demo probe",
+    )
+    p_probe.add_argument("--probe-id", default="")
+    p_probe.add_argument("--inst", default="")
+    p_probe.add_argument("--nominal-usdt", type=Decimal, default=Decimal("5"))
+    p_probe.add_argument("--slot", type=int, choices=(1, 2), default=1)
+    p_probe.add_argument("--confirm", required=True)
+    p_probe.add_argument("--wait", type=float, default=60)
+
     p_backup = subparsers.add_parser("backup-now", help="创建并校验 SQLite 在线备份")
     p_backup.add_argument("--destination", default="")
 
@@ -1413,6 +1677,7 @@ def main():
     # 无子命令时进入交互向导
     if args.command is None:
         from okx_quant.cli.wizard import run_wizard
+
         command, params = run_wizard()
         args.command = command
         for k, v in params.items():
@@ -1477,6 +1742,8 @@ def main():
         cmd_flatten(args, cfg)
     elif args.command == "reconcile-now":
         cmd_reconcile_now(args, cfg)
+    elif args.command == "demo-probe":
+        cmd_demo_probe(args, cfg)
     elif args.command == "backup-now":
         cmd_backup_now(args, cfg)
 

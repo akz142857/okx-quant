@@ -1,0 +1,31 @@
+[Unit]
+Description=Exact-version offsite restore and signed evidence (%i)
+Requires=okx-quant-demo-backup@%i.service
+After=okx-quant-demo-backup@%i.service
+OnFailure=okx-quant-demo-monitor-failure@%i.service
+
+[Service]
+Type=oneshot
+User=okxquant-restore-%i
+Group=okxquant-data-%i
+WorkingDirectory=/opt/okx-quant/demo-%i/current
+EnvironmentFile=/etc/okx-quant/demo-%i-restore.env
+ExecStart=/opt/okx-quant/demo-%i/current/.venv/bin/python /opt/okx-quant/demo-%i/current/scripts/offsite_restore_check.py --backup-env /etc/okx-quant/demo-%i-restore.env --local-backup-dir ${OKX_QUANT_BACKUP_OUTPUT_DIR} --manifest-public-key ${OKX_QUANT_BACKUP_MANIFEST_PUBLIC_KEY} --evidence-private-key ${OKX_QUANT_RESTORE_EVIDENCE_PRIVATE_KEY} --evidence-public-key ${OKX_QUANT_RESTORE_EVIDENCE_PUBLIC_KEY} --evidence-key-id ${OKX_QUANT_RESTORE_EVIDENCE_KEY_ID} --minimum-remaining-retention-days 30 --output /var/lib/okx-quant-restore-evidence/demo-%i/last-offsite-roundtrip.json
+TimeoutStartSec=360
+UMask=0027
+StateDirectory=okx-quant-restore-evidence/demo-%i
+StateDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ReadOnlyPaths=/etc/okx-quant/keys /var/lib/okx-quant-backup/demo-%i
+ReadWritePaths=/var/lib/okx-quant-restore-evidence/demo-%i
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native

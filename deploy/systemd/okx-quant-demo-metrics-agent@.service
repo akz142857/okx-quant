@@ -1,0 +1,47 @@
+[Unit]
+Description=OKX Quant Demo local metrics agent (%i)
+After=network-online.target
+Wants=network-online.target
+OnFailure=okx-quant-demo-monitor-failure@%i.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=okxquant-monitor-%i
+Group=okxquant-data-%i
+NetworkNamespacePath=/run/netns/okx-quant-demo-%i
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=okx-quant-demo-metrics-agent-%i
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=10000
+ExecStart=/usr/bin/prometheus --config.file=/etc/okx-quant/metrics-agent/%i/prometheus-agent.yaml --enable-feature=agent --storage.agent.path=/var/lib/okx-quant-metrics-agent/demo-%i --storage.agent.retention.min-time=2h --storage.agent.retention.max-time=24h --web.listen-address=127.0.0.1:0
+Restart=always
+RestartSec=5
+StateDirectory=okx-quant-metrics-agent/demo-%i
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadOnlyPaths=/etc/okx-quant/metrics-agent/%i
+ReadWritePaths=/var/lib/okx-quant-metrics-agent/demo-%i
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

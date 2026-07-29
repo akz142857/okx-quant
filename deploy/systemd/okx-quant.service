@@ -2,8 +2,10 @@
 Description=OKX Quant production trader
 After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
-Requires=okx-quant-watchdog.service okx-quant-daily-backup.timer
-After=okx-quant-watchdog.service okx-quant-daily-backup.timer
+StartLimitIntervalSec=300
+StartLimitBurst=5
+Requires=okx-quant-watchdog.service okx-quant-daily-backup.timer okx-quant-offsite-restore.timer
+After=okx-quant-watchdog.service okx-quant-daily-backup.timer okx-quant-offsite-restore.timer
 RequiresMountsFor=/var/lib/okx-quant-backup
 
 [Service]
@@ -13,7 +15,7 @@ User=okxquant-trader
 Group=okxquant-data
 WorkingDirectory=/opt/okx-quant/current
 EnvironmentFile=/etc/okx-quant/production.env
-ExecStartPre=-+/opt/okx-quant/venv/bin/python /opt/okx-quant/current/scripts/activate_release.py --config /etc/okx-quant/config.yaml --release-commit-file /opt/okx-quant/current/REVISION --launch-manifest /etc/okx-quant/launch.json --receipt /var/lib/okx-quant/admission/deployment-receipt.json --ledger /var/lib/okx-quant/admission/demo-observations.json --evidence /etc/okx-quant/admission/evidence.json --max-slippage ${OKX_QUANT_APPROVED_MAX_SLIPPAGE} --approved-max-stress-loss ${OKX_QUANT_APPROVED_MAX_STRESS_LOSS} --observation-public-key /etc/okx-quant/keys/demo-monitor-public.pem --research-public-key /etc/okx-quant/keys/research-policy-public.pem --approval /etc/okx-quant/admission/approval.json --approval-public-key /etc/okx-quant/keys/risk-approval-public.pem
+ExecStartPre=-+/opt/okx-quant/venv/bin/python /opt/okx-quant/current/scripts/activate_release.py --config /etc/okx-quant/config.yaml --release-commit-file /opt/okx-quant/current/REVISION --launch-manifest /etc/okx-quant/launch.json --receipt /var/lib/okx-quant/admission/deployment-receipt.json --ledger /var/lib/okx-quant/admission/soak-ledger-v2.json --evidence /etc/okx-quant/admission/evidence.json --max-slippage ${OKX_QUANT_APPROVED_MAX_SLIPPAGE} --approved-max-stress-loss ${OKX_QUANT_APPROVED_MAX_STRESS_LOSS} --observation-public-key /etc/okx-quant/keys/demo-monitor-public.pem --soak-epoch /etc/okx-quant/admission/soak-epoch.json --epoch-monitor-public-key /etc/okx-quant/keys/epoch-monitor-public.pem --epoch-risk-public-key /etc/okx-quant/keys/epoch-risk-public.pem --research-public-key /etc/okx-quant/keys/research-policy-public.pem --bundle-signing-public-key /etc/okx-quant/keys/demo-monitor-public.pem --stage-c-raw-observer-public-key /etc/okx-quant/keys/stage-c-raw-observer-public.pem --stage-c-trust-manifest /etc/okx-quant/admission/stage-c/trust-manifest.json --independent-verifier-public-key /etc/okx-quant/keys/evidence-verifier-public.pem --independent-verifier-attestations-dir /etc/okx-quant/admission/daily-verifier-attestations --stage-c-drill-receipts-dir /etc/okx-quant/admission/stage-c/drill-results --stage-c-drill-manifests-dir /etc/okx-quant/admission/stage-c/manifests --stage-c-drill-bundle-receipts-dir /etc/okx-quant/admission/stage-c/bundle-receipts --stage-c-drill-independent-attestations-dir /etc/okx-quant/admission/stage-c/independent-readbacks --stage-c-release-frozen-at ${OKX_QUANT_STAGE_C_RELEASE_FROZEN_AT} --empty-host-restore-evidence /etc/okx-quant/admission/empty-host-restore.json --empty-host-restore-public-key /etc/okx-quant/keys/empty-host-restore-public.pem --empty-host-restore-key-id ${OKX_QUANT_EMPTY_HOST_RESTORE_KEY_ID} --approval /etc/okx-quant/admission/approval.json --approval-public-key /etc/okx-quant/keys/risk-approval-public.pem
 ExecStart=/opt/okx-quant/venv/bin/python /opt/okx-quant/current/scripts/production_launch.py --config /etc/okx-quant/config.yaml --release-commit-file /opt/okx-quant/current/REVISION --launch-manifest /etc/okx-quant/launch.json --receipt /var/lib/okx-quant/admission/deployment-receipt.json --evidence /etc/okx-quant/admission/evidence.json --approval /etc/okx-quant/admission/approval.json --approval-public-key /etc/okx-quant/keys/risk-approval-public.pem
 Restart=on-failure
 RestartSec=5
@@ -28,6 +30,12 @@ LogsDirectoryMode=0750
 MemoryHigh=500M
 MemoryMax=600M
 CPUQuota=80%
+CPUAccounting=true
+MemoryAccounting=true
+TasksAccounting=true
+LimitNOFILE=4096
+TasksMax=128
+OOMPolicy=stop
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -43,7 +51,7 @@ SystemCallArchitectures=native
 LockPersonality=true
 MemoryDenyWriteExecute=true
 ReadWritePaths=/var/lib/okx-quant /var/log/okx-quant
-ReadOnlyPaths=/etc/okx-quant/admission /etc/okx-quant/keys
+ReadOnlyPaths=/etc/okx-quant/admission /etc/okx-quant/keys /var/lib/okx-quant-restore-evidence
 CapabilityBoundingSet=
 AmbientCapabilities=
 

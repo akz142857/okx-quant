@@ -1,0 +1,30 @@
+route:
+  receiver: p1-primary
+  group_by: [alertname, instance, channel]
+  group_wait: 5s
+  group_interval: 30s
+  repeat_interval: 4h
+  routes:
+    - matchers:
+        - priority="P0"
+      receiver: p0-primary
+      continue: true
+      repeat_interval: 5m
+    - matchers:
+        - priority="P0"
+      receiver: p0-independent
+      repeat_interval: 5m
+
+receivers:
+  - name: p0-primary
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/p0-primary-url
+        send_resolved: true
+  - name: p0-independent
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/p0-independent-url
+        send_resolved: true
+  - name: p1-primary
+    webhook_configs:
+      - url_file: /etc/alertmanager/secrets/p1-primary-url
+        send_resolved: true

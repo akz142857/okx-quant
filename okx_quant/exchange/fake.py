@@ -93,6 +93,7 @@ class FakeExchange(Exchange):
         self._algo_cancel_outcomes: list[_AlgoOutcome] = []
         self._algo_orders: dict[str, ExchangeAlgoOrder] = {}
         self._algo_by_client_id: dict[str, str] = {}
+        self._write_guard: Callable[[str, str], None] | None = None
 
     # ---------- 测试桩点 ----------
 
@@ -222,6 +223,22 @@ class FakeExchange(Exchange):
     def quote_ccy(self) -> str:
         return self._quote
 
+    def set_write_guard(
+        self,
+        guard: Callable[[str, str], None] | None,
+    ) -> None:
+        self._write_guard = guard
+
+    def _assert_write_allowed(
+        self,
+        endpoint: str,
+        pre_send_guard: Callable[[], None] | None = None,
+    ) -> None:
+        if self._write_guard is not None:
+            self._write_guard("POST", endpoint)
+        if pre_send_guard is not None:
+            pre_send_guard()
+
     # ---------- Exchange 接口 ----------
 
     def get_candles(self, inst_id: str, bar: str, limit: int) -> pd.DataFrame:
@@ -273,6 +290,7 @@ class FakeExchange(Exchange):
         tgt_ccy: str = "base_ccy",
         cl_ord_id: str = "",
         max_slippage: Decimal | None = None,
+        pre_send_guard: Callable[[], None] | None = None,
     ) -> OrderResult:
         size = parse_decimal_fact(size, "fake.order_size", positive=True)
         if max_slippage is not None:
@@ -281,6 +299,7 @@ class FakeExchange(Exchange):
                 "fake.max_slippage",
                 nonnegative=True,
             )
+        self._assert_write_allowed("place_market_order", pre_send_guard)
         self._order_counter += 1
         order = _PlacedOrder(
             inst_id=inst_id,
@@ -447,6 +466,7 @@ class FakeExchange(Exchange):
             ord_id=ord_id,
             cl_ord_id=cl_ord_id,
         )
+        self._assert_write_allowed("cancel_order")
         updated = ExchangeOrder(
             **{
                 **previous.__dict__,
@@ -486,6 +506,7 @@ class FakeExchange(Exchange):
                 "fake.amend.new_price",
                 positive=True,
             )
+        self._assert_write_allowed("amend_order")
         updated = ExchangeOrder(
             **{
                 **previous.__dict__,
@@ -505,6 +526,7 @@ class FakeExchange(Exchange):
         take_profit: Decimal = Decimal("0"),
         algo_cl_ord_id: str = "",
     ) -> ExchangeAlgoOrder:
+        self._assert_write_allowed("place_protection_order")
         outcome = self._algo_outcomes.pop(0) if self._algo_outcomes else _AlgoOutcome()
         if outcome.reject:
             raise RuntimeError("simulated algo rejection")
@@ -562,6 +584,7 @@ class FakeExchange(Exchange):
         ]
 
     def cancel_algo_order(self, inst_id: str, algo_id: str) -> ExchangeAlgoOrder:
+        self._assert_write_allowed("cancel_algo_order")
         outcome = (
             self._algo_cancel_outcomes.pop(0)
             if self._algo_cancel_outcomes
@@ -594,6 +617,7 @@ class FakeExchange(Exchange):
         take_profit: Decimal = Decimal("0"),
         req_id: str = "",
     ) -> ExchangeAlgoOrder:
+        self._assert_write_allowed("amend_algo_order")
         outcome = (
             self._algo_amend_outcomes.pop(0)
             if self._algo_amend_outcomes

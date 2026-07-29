@@ -9,6 +9,7 @@ from okx_quant.research.walk_forward import WalkForwardResult, WalkForwardRunner
 __all__ = [
     "AdmissionGate",
     "DemoObservationLedger",
+    "DemoObservationLedgerV2",
     "DynamicCostModel",
     "PortfolioBacktester",
     "PortfolioResult",
@@ -16,3 +17,11 @@ __all__ = [
     "WalkForwardRunner",
     "WalkForwardResult",
 ]
+
+
+def __getattr__(name: str):
+    if name == "DemoObservationLedgerV2":
+        from okx_quant.research.demo_soak import DemoObservationLedgerV2
+
+        return DemoObservationLedgerV2
+    raise AttributeError(name)
