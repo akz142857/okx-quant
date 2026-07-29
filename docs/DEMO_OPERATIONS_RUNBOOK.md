@@ -7,9 +7,19 @@
 基础设施、独立签名、完整 UTC 日或真实 OKX Demo 事实时，状态必须保持
 **NOT ADMITTED**。
 
+当前执行 profile 是 Gate A：单台 Linux 主机上的 `demo-shadow` + `demo-active` 两个
+账户/子账户；`demo-chaos` 可选但推荐。三主机、第二故障域、跨账号职责分离和完整
+18 项生产 Chaos 属于 Gate B；Gate A 后的小资金操作还必须经过 Gate C 双人签署、
+额度/日亏/HALT/回滚限制。
+
+本手册后续未显式标注 Gate A 的三主机、第二故障域、完整 18 项或 30 日条款，均是
+Gate B 生产扩展路径；Gate A 只执行单机 Shadow/Active、72h/7d、6 项核心故障和
+Gate C 双签小资金策略。
+
 ## 1. 固定角色和故障域
 
-准备三个不同的 OKX Demo 子账户及 API key：
+准备两个不同的 OKX Demo 子账户及 API key（Gate A）；若执行 Gate B，再增加第三个
+Chaos 子账户：
 
 | 角色 | 权限 | 允许行为 | 独立边界 |
 |---|---|---|---|

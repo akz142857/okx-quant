@@ -4,6 +4,17 @@
 
 状态：**多角色评审后的仓库实现已完成本轮安全收敛；真实部署、72 小时/7 日/30 日准入时钟均未开始**
 
+> 当前用户验证采用 `DEMO_SHADOW_REMAINING_TASKS.md` 定义的 Gate A：单台 Linux
+> 主机、Shadow + Active 多账户（Chaos 可选）、同机 UID/unit/目录/netns/cgroup
+> 隔离。本文后续涉及三主机、第二故障域、18 项完整生产 executor、跨账号 WORM
+> 和 30 日 production soak 的内容属于 Gate B 生产扩展，不是 Gate A 小资金验证的
+> 前置条件。Gate A 通过后仍需 Gate C 双人签署、严格限额和自动 HALT 才能做小资金
+> Canary；不能将 Gate A 直接称为生产准入。
+>
+> 阅读规则：本文未显式标注 Gate A 的“生产/正式/最终 Gate”条款，均属于 Gate B
+> 生产扩展；不得把 Gate B 的三账户、第二故障域、18 项或 30 日条件倒灌为当前
+> 单机 Demo 的前置条件。
+
 未完成、部分完成与需重新检查的任务统一记录在
 [`DEMO_SHADOW_REMAINING_TASKS.md`](./DEMO_SHADOW_REMAINING_TASKS.md)。该清单的当前测试状态
 优先于本方案中的历史绿灯数字。
@@ -72,10 +83,11 @@ systemd 主机证据。
 contract 或明确的已有仓位保护/恢复演练，不能直接作为正式零持仓 Shadow、Active
 或通用 Chaos 账户。
 
-## 3. 环境与账户隔离
+## 3. 环境与账户隔离（Gate A / Gate B）
 
-必须建立三个互不共享 key、账户、Unix 身份、数据库、状态目录、release 路径和
-metrics 端口的 Demo 环境：
+Gate A 只要求在一台 Linux 主机上建立 Shadow + Active 两个互不共享 key、账户、
+Unix 身份、数据库、状态目录、release 路径和 metrics 端口的 Demo 环境。Chaos
+环境可选但推荐；以下第三行和“第二故障域”条款仅在 Gate B 启用：
 
 | 环境 | 用途 | API 权限 | Shadow | 是否计入 30 日 |
 |---|---|---|---:|---:|
@@ -83,7 +95,7 @@ metrics 端口的 Demo 环境：
 | `demo-active` | 受限 probe、保护、滑点、正式 soak | Read + Trade | false | 是 |
 | `demo-chaos` | 外部订单、断网、SIGKILL、恢复演练 | Read + Trade | false | 否 |
 
-硬要求：
+Gate A 硬要求：
 
 - 每个环境使用独立 OKX Demo 子账户和 Key，全部禁止 Withdraw；
 - `demo-shadow` 必须使用不具备 Trade 权限的 Read-only Key；除了应用层
@@ -91,14 +103,14 @@ metrics 端口的 Demo 环境：
 - `demo-active` 和 `demo-chaos` 的 Trade Key 不能被 Shadow 进程、用户或环境文件读取；
 - `demo-shadow` 必须只有 USDT，或所有非 USDT 余额同时低于 dust 和 `lotSz`；
 - `demo-active` 在开始正式 30 日观察前必须清空旧订单、旧 algo 和不可解释持仓；
-- `demo-chaos` 必须使用独立 VM/主机；最低可接受降级方案是独立 network namespace、
+- `demo-chaos` 若启用，使用独立子账户和同机 network namespace、
   Unix UID/group、cgroup、release symlink 和精确出站故障代理，不能用主机级
   `iptables`、网络重启或共享 release 切换影响 Active；
-- 三个环境分别使用：
+- 启用的环境分别使用：
   - `/var/lib/okx-quant/demo-shadow/`
   - `/var/lib/okx-quant/demo-active/`
   - `/var/lib/okx-quant/demo-chaos/`
-- 三套服务使用不同 trader/watchdog/backup Unix 身份和不同环境文件；环境文件必须为
+- 每套启用的服务使用不同 trader/watchdog/backup Unix 身份和不同环境文件；环境文件必须为
   `root:<environment-trader> 0640`，目录链不可组写、不可使用不受控符号链接；
 - systemd `ReadWritePaths` 精确限制到单环境目录，并启用 `ProtectProc=invisible`、
   `ProcSubset=pid`；备份加密/签名私钥不能进入 trader 进程；
@@ -198,7 +210,8 @@ contract 或明确的“已有仓位保护/恢复”演练，且必须签名固�
 
 以下项目不能靠代码评审关闭，当前统一为 **NOT_ADMITTED / EXTERNAL OPEN**：
 
-- 三个真实独立 Demo 子账户/key、Linux/systemd/netns/cgroup 和第二故障域 monitor；
+- Gate A：两个真实 Demo 子账户/key、单机 Linux/systemd/netns/cgroup；Gate B 才要求
+  第三个 Chaos 子账户和第二故障域 monitor；
 - account writer 的 exchange-side fencing/STONITH、旧凭据或旧 egress 隔离，以及
   接管前全账户 reconciliation；完成前禁止跨主机自动接管；
 - 真实 Object Lock COMPLIANCE、跨账号 exact-version GET、KMS/IAM deny-delete；
@@ -846,15 +859,18 @@ signed ledger。期间不在 Active 账户或故障域做 chaos。
 
 仓库能力就绪后，按优先级执行：
 
-1. 建立 `demo-shadow`、`demo-active`、`demo-chaos` 三个隔离子账户和 key；
-   Shadow 必须 Read-only；Chaos 必须处于独立故障域；
+1. Gate A 建立 `demo-shadow`、`demo-active` 两个隔离子账户和 key；Shadow 必须
+   Read-only；按需增加 `demo-chaos`，但 Gate B 才要求完整独立故障域；
 2. 在干净候选 release 上重新生成并独立签署 WP0 contract evidence v2；
-3. 在隔离 Linux 主机安装三套 systemd/config/preflight/watchdog/backup/evidence-close；
+3. 在单台 Linux 主机安装 Shadow/Active 两套 systemd/config/preflight/watchdog/
+   backup/evidence-close；Gate B 再增加 Chaos 和第二故障域组件；
 4. 完成 72 小时 Shadow 后，再开始 7 天 Active burn-in；
 5. 修复 burn-in 发现的问题并冻结 release/config；
-6. 用最终冻结候选在独立 Chaos 环境重跑完整 black-box matrix；
-7. 创建新的双签 soak epoch，开始连续 30 个完整 UTC clean day；
-8. 30 日与其它准入门槛通过后，才允许签发短效 Canary transition/policy。
+6. Gate A 在停止 Active writer 后执行 6 项核心故障；Gate B 再用最终候选重跑完整
+   18 项 black-box matrix；
+7. Gate A 通过后由双人签署 Gate C 短效小资金 Canary policy；Gate B 才创建正式
+   soak epoch 并开始连续 30 个完整 UTC clean day；
+8. 30 日与其它生产准入门槛只用于 full production，不是 Gate A 的前置条件。
 
 当前最先需要解决的外部前置条件是：准备一个没有约 1 BTC 基线资产的独立
 `demo-shadow` 子账户和一个可用于 flat/partial-fill 场景的干净 `demo-chaos`

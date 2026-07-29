@@ -18,6 +18,50 @@
 不得用 fixture、手工 JSON、本机签名回执或代码评审替代真实
 systemd/IAM/WORM/OKX Demo 运行证据。
 
+## 0. 当前验证拓扑（单机多账户 profile）
+
+本轮实际目标是“单台 Linux 主机上的小资金 Demo 验证”，不是多主机高可用部署：
+
+- 使用一台 Linux 主机运行 systemd 服务；不要求三台机器或三个独立故障域；
+- 建议使用三个 OKX Demo 子账户/API key：`demo-shadow`（Read-only）、
+  `demo-active`（Read + Trade）、`demo-chaos`（Read + Trade）；也可在同一账户
+  上按阶段停机后复用，但不能同时运行或混用 key；
+- 单机内仍必须隔离 Unix UID/group、systemd unit、数据/备份目录、凭据、端口和
+  network namespace；Chaos 演练必须停止 Active writer；
+- 第二主机、跨账号 IAM/WORM、第二故障域和高可用切换属于生产扩展项，不是本轮
+  单机验证的前置条件；
+- Shadow 72h、Active 7d、Chaos matrix 和小资金审批仍保留，因为它们验证的是
+  功能、恢复和运行稳定性，而非主机冗余。
+
+### 单机验证的继续任务顺序
+
+1. 在同一 Linux 主机创建/绑定 Shadow、Active 两个账户和两套 systemd 配置；按需再
+   增加 Chaos 账户/配置；
+2. 运行单机 preflight、真实 Demo contract 和清理/余额核对；
+3. Shadow 连续 72 小时只读运行；
+4. 停止 Shadow 后运行 Active 7 日小额 probe；
+5. 停止 Active，在隔离 unit/netns/cgroup 上完成 6 项核心故障；18 项矩阵留给 Gate B；
+6. 完成单机备份、恢复、监控和证据 exact-version 回读；
+7. Gate A 通过后，由双人签署 Gate C 小资金 Canary；Gate B 才是生产准入。
+
+以下 P1-05 的第二故障域/跨账号内容标为生产扩展，不阻塞上述单机验证；但在
+宣称生产级高可用前仍必须完成。
+
+### Gate A / Gate B 边界
+
+`Gate A` 是本轮单机小资金 Demo 验证：要求 P0-03 的 Linux/systemd 证据、WP0
+contract v2、至少 Shadow + Active 两个隔离账户（Chaos 账户可选但推荐）、真实
+contract cleanup、Shadow 72h、Active 7d、最小重启/对账演练、单机 WORM
+exact-version 回读和 daily ledger。
+
+Gate A 的最小 Chaos 集合为 6 项：SIGTERM、SIGKILL、WS down/reconnect、REST
+5xx/429/unknown、external fill、protection cancel。每项必须有独立 receipt，故障
+作用域限制在对应 unit/netns/cgroup；禁止用 host reboot 或全机 iptables 破坏来替代。
+
+`Gate B` 是未来生产准入：才要求 18/18 production executor/live bridge、三账户
+完整 Chaos、第二故障域、30 日 clean day 和双人 Canary。Gate B 未完成时，Gate A
+也只能说明“Demo 可验证”，不能宣称生产可用。
+
 ## 1. 当前权威状态（2026-07-29 最新复核）
 
 - 当前冻结候选提交以 `git rev-parse HEAD` 为准，工作树已 clean；新增能力均归属于
@@ -35,18 +79,18 @@ systemd/IAM/WORM/OKX Demo 运行证据。
 
 | ID | 状态 | 下一交付物 | 前置依赖 |
 |---|---|---|---|
-| `P0-03` | `PARTIAL` | 冻结提交、干净 Linux CI、systemd 安全验证、重算 provenance | `P1-01..03` 完成后冻结 |
-| `P1-01` | `PARTIAL` | 18/18 独立 production executor inventory record | Linux/IAM/WORM 设计 |
-| `P1-02` | `PARTIAL` | 18/18 native raw → signed envelope → final loader live bridge | `P1-01` source roles |
-| `P1-03` | `PARTIAL` | 4 个 external actor 的 signer、Linux 实测、WORM/deployment attestation | `P1-02`, `P1-05` |
-| `P1-04` | `EXTERNAL` | 三账户与三故障域部署回执 | OKX/Linux 运维权限 |
-| `P1-05` | `EXTERNAL` | IAM/STS、Object Lock、跨账号回读、第二故障域证据 | 云基础设施权限 |
-| `P1-06` | `EXTERNAL` | 最终候选 WP0 contract evidence v2 | `P0-03`, `P1-04..05` |
-| `P2-01` | `EXTERNAL 0/72h` | Shadow 连续 72 小时证据 | `P1-04..06` |
-| `P2-02` | `EXTERNAL 0/7d` | Active Demo 7 日 burn-in | `P2-01` |
-| `P2-03` | `EXTERNAL 0/18` | 最终候选 18 项 Chaos matrix | `P2-02`, release freeze |
-| `P2-04` | `EXTERNAL 0/30d` | 30 个完整 UTC clean day | `P2-03`, epoch start |
-| `P2-05` | `EXTERNAL` | 双人签署的小资金 Canary transition/policy | `P2-04`, final Gate |
+| `P0-03` | `PARTIAL` | 冻结提交、干净 Linux CI、systemd 安全验证、重算 provenance | 干净候选 + 单台 Linux 主机 |
+| `P1-01` | `PARTIAL / Gate B` | 18/18 独立 production executor inventory record | Linux/IAM/WORM 设计 |
+| `P1-02` | `PARTIAL / Gate B` | 18/18 native raw → signed envelope → final loader live bridge | `P1-01` source roles |
+| `P1-03` | `PARTIAL / Gate B` | 4 个 external actor 的 signer、Linux 实测、WORM/deployment attestation | `P1-02`, `P1-05` |
+| `P1-04` | `EXTERNAL Gate A` | 单 Linux 主机 Shadow + Active 隔离回执（Chaos 账户可选） | OKX/Linux 运维权限 |
+| `P1-05` | `EXTERNAL Gate A/B` | Gate A 最小 IAM/STS + 单机不可变 exact-version；Gate B COMPLIANCE/跨账号/第二故障域 | 云基础设施权限 |
+| `P1-06` | `EXTERNAL Gate A` | 最终候选 WP0 contract evidence v2 | `P0-03`, `P1-04..05` |
+| `P2-01` | `EXTERNAL Gate A 0/72h` | Shadow 连续 72 小时证据 | `P1-04..06` |
+| `P2-02` | `EXTERNAL Gate A 0/7d` | Active Demo 7 日 burn-in | `P2-01` |
+| `P2-03` | `EXTERNAL Gate A 0/6；Gate B 0/18` | Gate A 核心 Chaos；Gate B 最终 18 项 Chaos matrix | `P2-02`, release freeze |
+| `P2-04` | `EXTERNAL Gate B 0/30d` | 30 个完整 UTC clean day | `P2-03`, epoch start |
+| `P2-05` | `EXTERNAL Gate C` | Gate A 后双人签署、严格限额的小资金 Canary；Gate B 后才可生产准入 | `P2-01..03`, final Gate |
 
 ### 状态定义
 
@@ -294,25 +338,36 @@ challenge、全局 consumption receipt 和 live PID/UID/cgroup/invocation/interp
 
 ## 5. 剩余真实部署与证据基础设施（3 项）
 
-### TASK-P1-04：三套隔离 Demo 账户和 Linux 故障域
+### TASK-P1-04：单台 Linux 主机上的多账户隔离
 
 状态：`EXTERNAL`
 
-- `demo-shadow`：干净零持仓子账户，Read-only key；
-- `demo-active`：干净子账户，只允许 validation probe 的 Trade key；
-- `demo-chaos`：独立子账户、host/netns/cgroup/credential/egress 故障域；
+- `demo-shadow`：干净零持仓子账户，Read-only key（Gate A 必需）；
+- `demo-active`：干净子账户，只允许 validation probe 的 Trade key（Gate A 必需）；
+- `demo-chaos`：独立子账户，在同一主机使用独立 netns/cgroup/credential/egress（Gate A
+  可选，Gate B 必需）；
 - 旧账户约 1 BTC 基线资产不得作为正式 Shadow/Chaos 账户。
 
-### TASK-P1-05：真实 IAM/STS、WORM 和第二故障域
+本轮不要求三台主机；必须证明同机 UID、目录、凭据、端口和 namespace 不串线，
+并在 Chaos 演练前停止 Active writer。第二主机和跨主机切换属于生产扩展。
+
+若资源不足而分阶段复用账户，必须更换独立 key/profile，并确认 flat、无挂单/算法单，
+导出 pre/post balance/order baseline；复用账户的证据不计作独立角色或故障域证明。
+
+### TASK-P1-05：单机最小 IAM/STS、不可变存储与生产扩展
 
 状态：`EXTERNAL`
 
-- Object Lock COMPLIANCE、retention、deny-delete 和 KMS policy；
-- bundle publisher、raw observer、deployment verifier、fleet admission gate、
-  WORM readback verifier 五职责分离；
+- Gate A：最小 IAM/STS、单机不可变 evidence store、exact-version 回读和签名校验；
+  至少拆分 publisher 与 verifier 的进程/签名 key，不得同一 root/key 自写自验；
+- Gate B：Object Lock COMPLIANCE、retention、deny-delete 和 KMS policy；
+- Gate B：bundle publisher、raw observer、deployment verifier、fleet admission gate、
+  WORM readback verifier 五职责和 IAM principal 分离；
 - 跨账号 exact-version GET，重算 bytes/hash/signature；
 - 真实 IAM principal/STS session receipt；
-- 第二故障域 monitor/Page/ACK/restore verifier；
+- 单机验证至少完成 Gate A 的 IAM/STS 最小权限和 exact-version 回读；Object Lock
+  COMPLIANCE、跨账号职责分离和第二故障域 monitor/Page/ACK/restore verifier 标记为
+  Gate B 生产扩展；
 - 不得把同机 root、不同文件路径或复制的同一私钥视为独立身份。
 
 ### TASK-P1-06：正式候选上重新生成 WP0 contract evidence v2
@@ -320,7 +375,8 @@ challenge、全局 consumption receipt 和 live PID/UID/cgroup/invocation/interp
 状态：`EXTERNAL`
 
 需要绑定干净 git commit/tree/source manifest、config hash、account UID、key
-fingerprint、exact OKX Demo 契约结果、WORM object/version/retention 和独立回读签名。
+fingerprint、exact OKX Demo 契约结果。Gate A 使用单机不可变 receipt + detached
+signature/exact readback；Gate B 再绑定 WORM object/version/retention 和跨域独立回读签名。
 
 ## 6. 不可压缩的持续运行阶段（5 项）
 
@@ -346,36 +402,45 @@ UNKNOWN 三分支、backup/Page/SLO 连续通过。
 绑定 TASK-P0-08 的同一 candidate deployment identity，且在正式 soak epoch
 开始前完成。
 
-### TASK-P2-04：正式 30 个完整 UTC clean day
+### TASK-P2-04：Gate B 正式 30 个完整 UTC clean day
 
 状态：`EXTERNAL`，进度 `0/30d`
 
 每天必须有 journal/monitor/alert/backup 四类 exact-version 原始证据和独立签名；
 任一硬门槛失败、证据日缺失或 release/config 变化都使 streak 重新计数。
 
-### TASK-P2-05：Demo 到小资金 Canary 审批
+### TASK-P2-05：Gate C 小资金 Canary 审批
 
 状态：`EXTERNAL`
 
-只有上述任务全部通过后，才可由独立 operator/risk 签署最长 6 小时的
-transition/policy。Demo 证据不能自动授权 full production。
+Gate A 通过后，可由独立 operator/risk 签署最长 6 小时、严格限额/日亏/自动 HALT
+和回滚条件的小资金 transition policy；这不自动授权 full production。Gate B 完成
+后才可申请生产级准入。
 
 ## 7. 执行顺序
 
-1. 完成 `TASK-P1-01/P1-02/P1-03`，逐场景交付并验证 18/18 production
-   executor/live bridge；不得批量升级能力状态。
+1. Gate B 的 `TASK-P1-01/P1-02/P1-03` 继续作为生产扩展，逐场景交付并验证 18/18
+   production executor/live bridge；不得批量升级能力状态。
 2. 完成 `TASK-P0-03`：冻结提交，在干净 Linux CI 重跑并生成新的 manifest、
    inventory 与 build provenance。
-3. 完成 `TASK-P1-04/P1-05/P1-06`：真实账户、故障域、IAM/WORM、第二故障域和
-   WP0 v2 evidence。
-4. 在同一冻结候选上依次执行 `72h -> 7d -> final 18-item matrix -> 30d`。
-5. 所有证据经独立 exact-version 回读和 Gate 验证后，才可申请小资金 Canary。
+3. 完成 Gate A 的 `P1-04/P1-05/P1-06`：单机账户隔离、最小 IAM/exact-version
+   回读和 WP0 v2 evidence。
+4. 在同一冻结候选上依次执行 `72h -> 7d -> 6-item core chaos`，通过后进入 Gate C
+   小资金审批。
+5. 若目标是生产准入，再继续 Gate B 的 `18-item matrix -> 30d -> 第二故障域`。
 
-## 8. 最终完成定义
+## 8. Gate A / Gate B 完成定义
 
-只有同时满足以下条件才能关闭本文件：
+Gate A（单机 Demo 验证）完成条件：
 
-- 当前冻结提交在 macOS 和干净 Linux CI 上全量绿灯；
+- 当前冻结提交在 macOS 和目标单台 Linux CI 上全量绿灯；
+- Shadow/Active 账户、systemd UID/目录/凭据/netns 隔离和 live preflight 有真实回执；
+- Demo contract v2、Shadow 72h、Active 7d、6 项核心 Chaos 和单机 exact-version
+  evidence 全部绑定同一候选；
+- 最终 Gate C 双签小资金策略包含限额、日亏、自动 HALT、人工回滚和最长 6 小时；
+
+Gate B（生产扩展）完成条件：
+
 - 18/18 场景均有不可变 inventory、场景语义 verifier、真实 executor、
   native live bridge 和 deployment attestation；
 - Demo contract v2、Shadow 72h、Active 7d、final Chaos matrix、30 clean days
