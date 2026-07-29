@@ -16,6 +16,7 @@ import argparse
 import os
 import sys
 import time
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 
 import requests
 
@@ -204,6 +205,27 @@ def _test_trade_live(client: OKXRestClient, inst_id: str) -> bool:
     )
 
 
+def _decimal(value: object, default: str = "0") -> Decimal:
+    try:
+        return Decimal(str(value or default))
+    except Exception:
+        return Decimal(default)
+
+
+def _net_base_size(order: dict, base_ccy: str, lot_size: Decimal) -> Decimal:
+    """Return the sellable base quantity after base-currency fees."""
+    filled = _decimal(order.get("accFillSz") or order.get("fillSz"))
+    fee = _decimal(order.get("fee"))
+    if str(order.get("feeCcy", "")).upper() == base_ccy.upper():
+        filled += fee
+    net = max(filled, Decimal("0"))
+    return (net / lot_size).to_integral_value(rounding=ROUND_DOWN) * lot_size
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value.normalize(), "f")
+
+
 def _test_trade_simulated(client: OKXRestClient, inst_id: str, available: float) -> bool:
     """模拟盘测试: 市价买入 → 查询 → 卖出"""
     _info("模拟盘模式 — 执行市价买入 + 卖出测试")
@@ -220,13 +242,31 @@ def _test_trade_simulated(client: OKXRestClient, inst_id: str, available: float)
         _fail("价格异常，无法测试")
         return False
 
-    # 计算最小下单量（约 1 USDT）
-    min_usdt = 1.0
-    size = min_usdt / price
-    size_str = f"{size:.4f}" if price < 1 else f"{size:.8f}".rstrip("0").rstrip(".")
+    try:
+        instrument = client.get_instrument(inst_id)
+        base_ccy = str(instrument.get("baseCcy") or inst_id.split("-", 1)[0])
+        lot_size = _decimal(instrument.get("lotSz"), "0.00000001")
+        min_size = _decimal(instrument.get("minSz"), "0")
+        if lot_size <= 0:
+            raise ValueError("lotSz 必须大于 0")
+    except Exception as e:
+        _fail(f"读取交易品种规则失败: {e}")
+        return False
 
-    if available < min_usdt:
-        _warn(f"可用余额 {available:.2f} USDT 不足 {min_usdt} USDT，跳过下单测试")
+    # 计算符合交易品种 lotSz/minSz 的最小下单量（约 1 USDT）
+    min_usdt = Decimal("1")
+    required_size = max(min_usdt / Decimal(str(price)), min_size)
+    size = (
+        required_size / lot_size
+    ).to_integral_value(rounding=ROUND_UP) * lot_size
+    size_str = _decimal_text(size)
+    estimated_notional = size * Decimal(str(price))
+
+    if Decimal(str(available)) < estimated_notional:
+        _warn(
+            f"可用余额 {available:.2f} USDT 不足 "
+            f"{_decimal_text(estimated_notional)} USDT，跳过下单测试"
+        )
         _info("模拟盘请到 OKX 官网领取测试资金")
         return False
 
@@ -250,34 +290,76 @@ def _test_trade_simulated(client: OKXRestClient, inst_id: str, available: float)
         return False
 
     # 3b. 查询订单状态
-    time.sleep(1)
     order = None
-    try:
-        order = client.get_order(inst_id, ord_id)
-        state = order.get("state", "unknown")
-        fill_sz = order.get("fillSz", "0")
-        avg_px = order.get("avgPx", "0")
-        _ok(f"订单查询成功  状态={state}  成交量={fill_sz}  均价={avg_px}")
-    except Exception as e:
-        _warn(f"订单查询失败: {e}")
+    for _ in range(5):
+        time.sleep(1)
+        try:
+            order = client.get_order(inst_id, ord_id)
+        except Exception as e:
+            _warn(f"订单查询失败: {e}")
+            continue
+        if order.get("state") in {"filled", "canceled"}:
+            break
+
+    if not order:
+        _fail("无法确认买入订单状态，不能安全计算平仓数量")
+        _info("请手动检查模拟盘持仓")
+        return False
+
+    state = str(order.get("state", "unknown"))
+    fill_sz = order.get("accFillSz") or order.get("fillSz", "0")
+    avg_px = order.get("avgPx", "0")
+    if state != "filled":
+        _fail(f"买入订单未完整成交  状态={state}  成交量={fill_sz}")
+        _info("请手动检查模拟盘持仓和挂单")
+        return False
+    _ok(f"订单查询成功  状态={state}  成交量={fill_sz}  均价={avg_px}")
 
     # 3c. 市价卖出（平仓）
-    try:
-        actual_size = order.get("fillSz", size_str) if order else size_str
-        if float(actual_size) > 0:
-            sell_result = client.place_order(
-                inst_id=inst_id,
-                side="sell",
-                ord_type="market",
-                sz=actual_size,
-            )
-            sell_id = sell_result.get("ordId", "")
-            _ok(f"卖出下单成功  ordId={sell_id}")
-        else:
-            _warn("买入未成交，跳过卖出")
-    except Exception as e:
-        _warn(f"卖出失败: {e}")
+    actual_size = _net_base_size(order, base_ccy, lot_size)
+    if actual_size < min_size or actual_size <= 0:
+        _fail(
+            "扣除基础币手续费后的可卖数量低于最小下单量 "
+            f"(可卖={_decimal_text(actual_size)}, minSz={_decimal_text(min_size)})"
+        )
         _info("请手动检查模拟盘持仓")
+        return False
+
+    try:
+        sell_result = client.place_order(
+            inst_id=inst_id,
+            side="sell",
+            ord_type="market",
+            sz=_decimal_text(actual_size),
+        )
+        sell_id = str(sell_result.get("ordId", ""))
+        if not sell_id:
+            raise RuntimeError("卖出响应缺少 ordId")
+        _ok(
+            f"卖出下单成功  ordId={sell_id} "
+            f"净数量={_decimal_text(actual_size)}"
+        )
+    except Exception as e:
+        _fail(f"卖出失败: {e}")
+        _info("请手动检查模拟盘持仓")
+        return False
+
+    sell_order = None
+    for _ in range(5):
+        time.sleep(1)
+        try:
+            sell_order = client.get_order(inst_id, sell_id)
+        except Exception as e:
+            _warn(f"卖出订单查询失败: {e}")
+            continue
+        if sell_order.get("state") in {"filled", "canceled"}:
+            break
+    sell_state = str((sell_order or {}).get("state", "unknown"))
+    if sell_state != "filled":
+        _fail(f"无法确认卖出订单完整成交  状态={sell_state}")
+        _info("请手动检查模拟盘持仓和挂单")
+        return False
+    _ok(f"卖出订单确认成交  状态={sell_state}")
 
     return True
 

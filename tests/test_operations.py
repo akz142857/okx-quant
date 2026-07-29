@@ -697,6 +697,86 @@ def test_api_diagnostic_rejects_incomplete_demo_credentials(capsys):
 
 
 @pytest.mark.unit
+def test_api_diagnostic_sells_net_fill_after_base_fee(monkeypatch):
+    class DemoClient:
+        def __init__(self):
+            self.placements = []
+
+        def get_ticker(self, _inst_id):
+            return {"last": "0.07065"}
+
+        def get_instrument(self, _inst_id):
+            return {
+                "baseCcy": "DOGE",
+                "lotSz": "0.01",
+                "minSz": "1",
+            }
+
+        def place_order(self, **kwargs):
+            self.placements.append(kwargs)
+            return {"ordId": str(len(self.placements))}
+
+        def get_order(self, _inst_id, ord_id):
+            if ord_id == "2":
+                return {
+                    "state": "filled",
+                    "accFillSz": "14.14",
+                    "fee": "-0.001",
+                    "feeCcy": "USDT",
+                }
+            assert ord_id == "1"
+            return {
+                "state": "filled",
+                "accFillSz": "14.16",
+                "avgPx": "0.0707",
+                "fee": "-0.01416",
+                "feeCcy": "DOGE",
+            }
+
+    monkeypatch.setattr(api_diagnostic.time, "sleep", lambda _seconds: None)
+    client = DemoClient()
+
+    assert api_diagnostic._test_trade_simulated(
+        client,
+        "DOGE-USDT",
+        100,
+    )
+    assert client.placements[1]["side"] == "sell"
+    assert client.placements[1]["sz"] == "14.14"
+
+
+@pytest.mark.unit
+def test_api_diagnostic_reports_cleanup_failure(monkeypatch):
+    class DemoClient:
+        def get_ticker(self, _inst_id):
+            return {"last": "1"}
+
+        def get_instrument(self, _inst_id):
+            return {"baseCcy": "TEST", "lotSz": "0.01", "minSz": "1"}
+
+        def place_order(self, *, side, **_kwargs):
+            if side == "sell":
+                raise RuntimeError("insufficient balance")
+            return {"ordId": "buy-1"}
+
+        def get_order(self, _inst_id, _ord_id):
+            return {
+                "state": "filled",
+                "accFillSz": "1",
+                "fee": "0",
+                "feeCcy": "USDT",
+            }
+
+    monkeypatch.setattr(api_diagnostic.time, "sleep", lambda _seconds: None)
+
+    assert not api_diagnostic._test_trade_simulated(
+        DemoClient(),
+        "TEST-USDT",
+        100,
+    )
+
+
+@pytest.mark.unit
 def test_external_watchdog_pages_on_stale_heartbeat_with_position(tmp_path):
     journal = SQLiteJournal(tmp_path / "trading.db")
     journal.reconcile_position(
