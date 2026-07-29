@@ -21,6 +21,7 @@ evidence/
 htmlcov/
 fault-injection.json
 non-live-validation.json
+stage-c-freeze-report.json
 demo-contract-evidence.json
 restore-drill.json
 
