@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """Recompute the local Stage-C freeze identities.
 
 This command is deliberately an evidence *builder*, not an admission switch.
@@ -18,6 +19,13 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
+
+# When invoked as ``python scripts/recompute_stage_c_evidence.py``, Python
+# puts only ``scripts/`` on sys.path.  Add the repository root before loading
+# package modules so the documented CLI works without requiring PYTHONPATH.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from okx_quant.application.approval import canonical_bytes
 from okx_quant.ops import stage_c_chaos_protocol as protocol
