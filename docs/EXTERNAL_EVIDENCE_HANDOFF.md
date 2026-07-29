@@ -9,11 +9,17 @@ Linux/systemd、IAM/STS、Object Lock 和独立故障域。
 ```bash
 RELEASE_SHA="$(git rev-parse HEAD)"
 git status --short                         # 必须无输出
-python scripts/recompute_stage_c_evidence.py --output evidence/stage-c-freeze.json
+uv run python scripts/recompute_stage_c_evidence.py --output evidence/stage-c-freeze.json
 ```
 
 `stage-c-freeze.json` 的 `candidate` 必须为 `true`；将其中 revision、source
 manifest、inventory、uv.lock 和 systemd unit 摘要作为所有外部证据的绑定输入。
+
+后续命令中的 `CANDIDATE_SHA256` 不是上述 freeze report 的任意字段，也不是
+revision 的 SHA-1；它必须替换为正式候选的
+`stage_c_chaos_deployment_identity_sha256`（由签名的 deployment identity
+manifest 计算并随 external attestation 绑定）。不得自行对 freeze JSON、latest
+对象或手写字符串取哈希来代替该值。
 
 ## 交接矩阵
 
@@ -26,8 +32,8 @@ manifest、inventory、uv.lock 和 systemd unit 摘要作为所有外部证据�
 | P1-04 | 三 Demo 子账户、独立 key/UID/host/netns/cgroup 回执 | external attestation verifier | shadow/active/chaos 精确三角色且身份不复用 |
 | P1-05 | IAM/STS、Object Lock COMPLIANCE、跨账号 exact-version GET、第二故障域 | `scripts/verify_external_deployment_attestation.py` | 五职责、四类 evidence、retention/KMS/readback 全匹配 |
 | P1-06 | WP0 v2 contract manifest、OKX contract、WORM object/version、独立回读签名 | `scripts/verify_demo_contract.py` 及 manifest verifier | candidate/config/account/key/version 全绑定 |
-| P2-01 | Shadow 72h ledger、WS/SLO/reconciliation、零写证明 | `scripts/demo_soak_status.py` | 72h 连续、0 write、0 unexplained mismatch |
-| P2-02 | 7 个完整 probe saga、保护生命周期、14 executions、Page/backup/SLO | `scripts/demo_soak_status.py` | 连续 7 日且 UNKNOWN 三分支均有证据 |
+| P2-01 | Shadow 72h ledger、WS/SLO/reconciliation、零写证明 | `scripts/demo_soak_status.py`（逐日/逐 ledger）+ final Gate | 由 epoch/ledger 聚合验证 72h 连续、0 write、0 unexplained mismatch；单次 status 输出不足以证明时长 |
+| P2-02 | 7 个完整 probe saga、保护生命周期、14 executions、Page/backup/SLO | `scripts/demo_soak_status.py`（逐日/逐 ledger）+ final Gate | 由 epoch/ledger 聚合验证连续 7 日且 UNKNOWN 三分支均有证据；单次 status 输出不足以证明时长 |
 | P2-03 | 同一 deployment identity 的 18 张 Chaos receipt | `scripts/verify_demo_chaos_coverage.py` | 18/18 在 epoch 开始前完成，identity 精确匹配 |
 | P2-04 | 每日 journal/monitor/alert/backup exact-version 原始证据 | daily evidence close / SLO verifier | 30 个完整 UTC clean day，无缺日、变更或硬门槛失败 |
 | P2-05 | operator/risk 双签 transition policy | final production gate | 仅在 P2-04 通过后签署，最长 6 小时、含回滚条件 |
@@ -37,9 +43,11 @@ manifest、inventory、uv.lock 和 systemd unit 摘要作为所有外部证据�
 在目标主机执行（不得在 macOS 上伪造 live 结果）：
 
 ```bash
-sudo .venv/bin/python scripts/linux_deployment_preflight.py \
+RELEASE_ROOT=/opt/okx-quant/current
+sudo env PYTHONPATH="$RELEASE_ROOT" \
+  "$RELEASE_ROOT/.venv/bin/python" scripts/linux_deployment_preflight.py \
   --mode live \
-  --root /opt/okx-quant \
+  --root "$RELEASE_ROOT" \
   --require-attestation \
   --attestation /secure-transfer/external-deployment-attestation.json \
   --public-key /etc/okx-quant/keys/deployment-verifier-public.pem \
@@ -60,7 +68,7 @@ Stage-C capability receipt。任何失败、缺 unit、netns inode 复用、atte
 获取并重算 bytes/hash/signature。完成后仅运行验证器：
 
 ```bash
-python scripts/verify_external_deployment_attestation.py \
+uv run python scripts/verify_external_deployment_attestation.py \
   --attestation /secure-transfer/external-deployment-attestation.json \
   --public-key /etc/okx-quant/keys/deployment-verifier-public.pem \
   --expected-candidate-sha256 CANDIDATE_SHA256

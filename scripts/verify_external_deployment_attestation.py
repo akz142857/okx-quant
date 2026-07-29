@@ -5,14 +5,23 @@ This command is intentionally verification-only.  It never upgrades the
 Stage-C inventory and never creates an attestation from local files.
 """
 
+# ruff: noqa: E402
+
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from okx_quant.ops.external_deployment_attestation import (
+# Keep ``python scripts/<command>.py`` working from a clean checkout.  Python
+# otherwise puts only ``scripts/`` on sys.path for a direct script invocation.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from okx_quant.ops.external_deployment_attestation import (  # noqa: E402
     verify_signed_external_deployment_attestation,
 )
 
