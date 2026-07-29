@@ -6,6 +6,8 @@
 
 外部执行交接：[`EXTERNAL_EVIDENCE_HANDOFF.md`](./EXTERNAL_EVIDENCE_HANDOFF.md)
 
+Gate A 执行清单：[`GATE_A_EXECUTION_CHECKLIST.md`](./GATE_A_EXECUTION_CHECKLIST.md)
+
 当前准入结论：**NOT_ADMITTED / EXTERNAL OPEN**
 
 本文件以未完成任务为主体，并保留已关闭 P0 的简要审计记录。剩余任务属于以下

@@ -12,6 +12,8 @@
 18 项生产 Chaos 属于 Gate B；Gate A 后的小资金操作还必须经过 Gate C 双人签署、
 额度/日亏/HALT/回滚限制。
 
+Gate A 的逐项执行顺序和当前状态见 [`GATE_A_EXECUTION_CHECKLIST.md`](./GATE_A_EXECUTION_CHECKLIST.md)。
+
 本手册后续未显式标注 Gate A 的三主机、第二故障域、完整 18 项或 30 日条款，均是
 Gate B 生产扩展路径；Gate A 只执行单机 Shadow/Active、72h/7d、6 项核心故障和
 Gate C 双签小资金策略。

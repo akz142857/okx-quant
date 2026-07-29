@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# ruff: noqa: E402
 """验证生产采用的独立 OCO 路线，并探测 attached TP/SL 路线。"""
 
 from __future__ import annotations
@@ -6,6 +7,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 import time
 import uuid
 from datetime import UTC, datetime
@@ -13,6 +15,13 @@ from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from pathlib import Path
 
 import requests
+
+# Running ``python scripts/demo_contract.py`` puts only ``scripts/`` on
+# ``sys.path``.  Keep the documented direct-script invocation equivalent to
+# ``python -m``/``uv run`` from the repository root.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from main import make_client
 from okx_quant.client.rest import OKXAPIError
