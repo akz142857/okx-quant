@@ -18,9 +18,9 @@ systemd/IAM/WORM/OKX Demo 运行证据。
 
 ## 1. 当前权威状态（2026-07-29 最新复核）
 
-- 工作树仍是 dirty/unreleased，新能力不得归属于基线提交
-  `5a85fc0`。
-- 当前冻结前工作树全量验证：`778 passed, 3 skipped`。
+- 当前冻结候选提交为 `fbc16a0`，工作树已 clean；新增能力均归属于该提交。
+- 当前冻结候选全量验证：`794 passed, 3 skipped`；新增部署/协议定向测试另有
+  `128 passed`。
 - `ruff check .`、`compileall` 和 `git diff --check` 均通过。
 - 18 个 Stage-C 场景当前在生产视角全部是 `EXTERNAL OPEN`；
   `implemented_stage_c_scenarios()` 和
