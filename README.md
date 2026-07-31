@@ -57,6 +57,29 @@ uv run python main.py list-pairs
 uv run python main.py list-strategies
 ```
 
+### 本机只读 Web Dashboard
+
+Dashboard 只读 SQLite 事实账本，不加载 OKX API Key、不写交易库，也不提供下单按钮。
+服务强制绑定本机回环地址：
+
+```bash
+uv run okx-quant-dashboard \
+  --database state/demo/trading.db \
+  --host 127.0.0.1 \
+  --port 9180
+```
+
+浏览器访问 `http://127.0.0.1:9180`。页面包含运行模式、账户权益趋势、持仓保护、
+订单事实和系统事件，并每 5 秒自动刷新。远程查看时应通过带身份认证的反向代理或
+SSH 端口转发访问，不要将 Dashboard 直接绑定公网地址。
+
+没有真实 `trading.db` 时，可以使用持续更新的合成数据查看所有页面。预览只在
+`/tmp` 创建临时账本，不读取 OKX 密钥、不连接交易所，退出后自动删除：
+
+```bash
+uv run python scripts/dashboard_preview.py --port 9180
+```
+
 ### 实盘参数
 
 | 参数 | 说明 | 默认值 |

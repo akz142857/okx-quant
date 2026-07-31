@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="OKX Quant 本机只读运行与风险仪表盘">
+    <title>OKX Quant · Mission Control</title>
+    <link rel="stylesheet" href="/assets/app.css">
+    <script src="/assets/app.js" defer></script>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="#overview" aria-label="返回总览">
+          <span class="brand-mark" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+          </span>
+          <span>
+            <b>OKX QUANT</b>
+            <small>MISSION CONTROL</small>
+          </span>
+        </a>
+
+        <nav class="nav" aria-label="页面导航">
+          <a class="active" href="#overview"><span>01</span>运行总览</a>
+          <a href="#positions"><span>02</span>持仓保护</a>
+          <a href="#orders"><span>03</span>订单账本</a>
+          <a href="#events"><span>04</span>事件时间线</a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="security-note">
+            <span class="lock-dot"></span>
+            <div>
+              <b>READ-ONLY CHANNEL</b>
+              <p>本页面无交易写权限</p>
+            </div>
+          </div>
+          <div class="source-meta">
+            <span>SCHEMA</span><b id="schemaVersion">—</b>
+            <span>SOURCE</span><b id="databaseName">—</b>
+          </div>
+        </div>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">TRADING OPERATIONS / LIVE JOURNAL</p>
+            <h1>运行态势</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="freshness">
+              <span id="livePulse" class="live-pulse"></span>
+              <div>
+                <small>数据新鲜度</small>
+                <b id="sourceAge">连接中</b>
+              </div>
+            </div>
+            <button id="refreshButton" class="refresh-button" type="button">
+              <span aria-hidden="true">↻</span>
+              <span>刷新</span>
+            </button>
+          </div>
+        </header>
+
+        <div id="errorBanner" class="error-banner" role="alert" hidden>
+          <b>数据源暂时不可用</b>
+          <span id="errorMessage">正在等待下一次自动刷新。</span>
+        </div>
+
+        <section id="overview" class="hero-grid section-anchor">
+          <article class="status-card panel">
+            <div class="status-card-head">
+              <span class="panel-label">SYSTEM POSTURE</span>
+              <div class="badge-group">
+                <span id="dataClassBadge" class="badge preview" hidden>SYNTHETIC PREVIEW</span>
+                <span id="healthBadge" class="badge neutral">CHECKING</span>
+              </div>
+            </div>
+            <div class="mode-line">
+              <span id="modeIndicator" class="mode-indicator"></span>
+              <div>
+                <small>CURRENT MODE</small>
+                <strong id="systemMode">—</strong>
+              </div>
+            </div>
+            <p id="modeReason" class="mode-reason">正在读取交易事实账本…</p>
+            <div class="identity-grid">
+              <div><span>MODE EPOCH</span><b id="modeEpoch">—</b></div>
+              <div><span>ACCOUNT FP</span><b id="accountFingerprint">—</b></div>
+              <div><span>LAST UPDATE</span><b id="lastUpdated">—</b></div>
+            </div>
+          </article>
+
+          <article class="equity-card panel">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-label">ACCOUNT EQUITY</span>
+                <div class="money-line">
+                  <strong id="equityValue">—</strong>
+                  <span>USDT</span>
+                </div>
+              </div>
+              <div class="metric-corner">
+                <span>AVAILABLE</span>
+                <b id="availableValue">—</b>
+              </div>
+            </div>
+            <div class="chart-wrap">
+              <canvas id="equityChart" aria-label="账户权益趋势"></canvas>
+              <div id="chartEmpty" class="chart-empty">等待权益快照</div>
+            </div>
+            <div class="chart-foot">
+              <span><i class="legend equity"></i>权益</span>
+              <span><i class="legend available"></i>可用</span>
+              <span id="equityRange">—</span>
+            </div>
+          </article>
+        </section>
+
+        <section class="metrics-grid" aria-label="核心指标">
+          <article class="metric-card">
+            <span class="metric-index">A1</span>
+            <small>OPEN POSITIONS</small>
+            <strong id="openPositions">—</strong>
+            <p><span id="unprotectedPositions">—</span> 未保护</p>
+          </article>
+          <article class="metric-card">
+            <span class="metric-index">A2</span>
+            <small>OPEN ORDERS</small>
+            <strong id="openOrders">—</strong>
+            <p><span id="unsafeOrders">—</span> 待人工确认</p>
+          </article>
+          <article class="metric-card">
+            <span class="metric-index">A3</span>
+            <small>REALIZED PNL</small>
+            <strong id="realizedPnl">—</strong>
+            <p>累计已实现 / USDT</p>
+          </article>
+          <article class="metric-card">
+            <span class="metric-index">A4</span>
+            <small>ACTIVE ALERTS</small>
+            <strong id="activeAlerts">—</strong>
+            <p><span id="p0Alerts">—</span> P0 · <span id="p1Alerts">—</span> P1</p>
+          </article>
+        </section>
+
+        <section id="positions" class="panel data-section section-anchor">
+          <div class="section-heading">
+            <div>
+              <span class="panel-label">POSITION PROTECTION</span>
+              <h2>持仓与保护</h2>
+            </div>
+            <div id="positionSummary" class="section-summary">0 ACTIVE</div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>交易对</th>
+                  <th>数量 / 可用</th>
+                  <th>平均入场价</th>
+                  <th>已实现盈亏</th>
+                  <th>止损 / 止盈</th>
+                  <th>保护状态</th>
+                  <th>更新时间</th>
+                </tr>
+              </thead>
+              <tbody id="positionsBody">
+                <tr><td class="empty-row" colspan="7">正在读取持仓投影…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="orders" class="panel data-section section-anchor">
+          <div class="section-heading">
+            <div>
+              <span class="panel-label">ORDER JOURNAL</span>
+              <h2>订单事实账本</h2>
+            </div>
+            <div class="table-tools">
+              <label>
+                状态
+                <select id="orderFilter">
+                  <option value="all">全部</option>
+                  <option value="open">进行中</option>
+                  <option value="unsafe">异常待确认</option>
+                  <option value="filled">已成交</option>
+                  <option value="rejected">已拒绝</option>
+                </select>
+              </label>
+              <span id="orderSummary" class="section-summary">0 RECORDS</span>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>更新时间</th>
+                  <th>交易对</th>
+                  <th>方向</th>
+                  <th>数量 / 成交</th>
+                  <th>状态</th>
+                  <th>均价</th>
+                  <th>来源</th>
+                  <th>订单标识</th>
+                </tr>
+              </thead>
+              <tbody id="ordersBody">
+                <tr><td class="empty-row" colspan="8">正在读取订单事实…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="events" class="panel data-section section-anchor">
+          <div class="section-heading">
+            <div>
+              <span class="panel-label">SYSTEM TIMELINE</span>
+              <h2>最近事件</h2>
+            </div>
+            <span id="eventSummary" class="section-summary">0 EVENTS</span>
+          </div>
+          <div id="eventsList" class="event-list">
+            <div class="empty-state">正在读取系统事件…</div>
+          </div>
+        </section>
+
+        <footer>
+          <span>OKX QUANT / LOCAL OPERATIONS SURFACE</span>
+          <span>交易写操作、API 密钥与审批能力均未加载</span>
+        </footer>
+      </main>
+    </div>
+  </body>
+</html>

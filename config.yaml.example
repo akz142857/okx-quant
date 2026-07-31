@@ -29,7 +29,7 @@ production:
   reconciliation_interval_s: 30
   max_clock_skew_s: 1
   ws_ready_timeout_s: 30
-  backup_interval_s: 300
+  backup_interval_s: 60
   backup_retention_days: 30
   alert_webhook_env: "OKX_QUANT_ALERT_WEBHOOK"
   offsite_backup_uri: ""         # 实盘必填，例如 s3://bucket/okx-quant/

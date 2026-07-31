@@ -3,6 +3,7 @@
 import os
 import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,7 +15,7 @@ from main import (
     cmd_init_journal,
     load_env_file,
 )
-from okx_quant.config import ProductionSettings
+from okx_quant.config import ProductionSettings, load_yaml
 from okx_quant.domain.orders import SystemMode
 from okx_quant.infrastructure.db import SQLiteJournal
 
@@ -54,6 +55,22 @@ def test_backup_cadence_cannot_be_relaxed_past_one_minute():
     cfg["production"]["backup_interval_s"] = 61
     with pytest.raises(ValueError, match=r"\(0, 60\]"):
         ProductionSettings.from_config(cfg)
+
+
+@pytest.mark.unit
+def test_root_example_config_is_valid_for_demo_journal_initialization():
+    cfg = load_yaml(
+        str(Path(__file__).resolve().parents[1] / "config.yaml.example")
+    )
+
+    settings = ProductionSettings.from_config(
+        cfg,
+        require_credentials=False,
+    )
+
+    assert settings.environment == "demo"
+    assert settings.journal_path == "state/demo/trading.db"
+    assert settings.backup_interval_s == 60
 
 
 @pytest.mark.unit

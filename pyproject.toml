@@ -18,6 +18,7 @@ dependencies = [
 [project.scripts]
 okx-quant = "main:main"
 okx-quant-watchdog = "okx_quant.ops.watchdog:main"
+okx-quant-dashboard = "okx_quant.web_dashboard.server:main"
 
 [build-system]
 requires = ["setuptools>=77"]
@@ -28,6 +29,9 @@ py-modules = ["main"]
 
 [tool.setuptools.packages.find]
 include = ["okx_quant*"]
+
+[tool.setuptools.package-data]
+"okx_quant.web_dashboard" = ["static/*"]
 
 [dependency-groups]
 dev = [
