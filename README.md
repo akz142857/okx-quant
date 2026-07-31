@@ -3,7 +3,9 @@
 项目当前的实盘安全、回测可信度和后续建设路线，见
 [项目综合评估](docs/PROJECT_EVALUATION.md)；生产升级的具体架构和实施阶段见
 [生产级升级方案](docs/PRODUCTION_PLAN.md)。持续 Demo 验证的实际部署与计时流程见
-[Demo / Shadow 长期验证运行手册](docs/DEMO_OPERATIONS_RUNBOOK.md)。
+[Demo / Shadow 长期验证运行手册](docs/DEMO_OPERATIONS_RUNBOOK.md)。从本机安装、
+账号验证、回测到 Dashboard 的完整操作入口见
+[系统使用手册](docs/SYSTEM_USAGE_GUIDE.md)。
 
 > 当前仓库具备生产候选内核和 Demo/Canary 准入工具，但尚未取得 72 小时 Shadow、
 > 7 日 burn-in、连续 30 个完整 UTC clean day、第二故障域告警和空主机恢复等真实
