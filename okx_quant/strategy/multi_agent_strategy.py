@@ -38,6 +38,9 @@ class MultiAgentStrategy(BaseStrategy):
             "debate_rounds": 2,
             # 单次会话 (run) 的 token 预算上限，<=0 表示不限
             "max_total_tokens": 0,
+            # BUY 时落盘完整决策论点（分析师报告+辩论+理由），供平仓复盘回放
+            "thesis_enabled": True,
+            "thesis_dir": "logs/thesis",
         }
         merged = {**defaults, **(params or {})}
 
@@ -46,6 +49,7 @@ class MultiAgentStrategy(BaseStrategy):
         self._deep_llm_client: LLMClient | None = None
         self._news_fetcher: CryptoNewsFetcher | None = None
         self._pipeline = None
+        self._thesis_store = None
         self._budget_exceeded_logged: bool = False
 
         super().__init__(merged, context)
@@ -158,6 +162,10 @@ class MultiAgentStrategy(BaseStrategy):
         indicators = self._build_indicators(df, inst_id)
         recent_candles = self._format_candles(df)
 
+        # 数据充分度评级（薄数据 → 压低置信度天花板，对标 AI Berkshire A/B/C 评级）
+        from okx_quant.agentic.data_quality import assess_data_sufficiency
+        data_quality = assess_data_sufficiency(df).to_dict()
+
         # 获取新闻
         news_text = self._get_news_text(inst_id)
 
@@ -168,6 +176,7 @@ class MultiAgentStrategy(BaseStrategy):
                 recent_candles=recent_candles,
                 inst_id=inst_id,
                 news_text=news_text,
+                data_quality=data_quality,
             )
         except Exception as e:
             logger.error("[MultiAgent] Pipeline 异常: %s", e)
@@ -176,6 +185,10 @@ class MultiAgentStrategy(BaseStrategy):
                 reason=f"多Agent管线异常: {e}",
             )
 
+        # 把体积较大的决策证据从 result 中取出，避免灌入决策日志 CSV；改写入论点快照
+        evidence = result.pop("evidence", None)
+        dq_grade = (result.get("data_quality") or {}).get("grade")
+
         # 置信度检查
         confidence = result.get("confidence", 0)
         threshold = self.get_param("confidence_threshold")
@@ -183,7 +196,7 @@ class MultiAgentStrategy(BaseStrategy):
             return Signal(
                 SignalType.HOLD, inst_id, price=curr_price,
                 reason=f"置信度不足 ({confidence:.2f} < {threshold})",
-                extra={"pipeline_result": result},
+                extra={"pipeline_result": result, "data_quality": dq_grade},
             )
 
         # 构建 Signal
@@ -204,7 +217,7 @@ class MultiAgentStrategy(BaseStrategy):
             stop_loss = 0
             take_profit = 0
 
-        return Signal(
+        sig = Signal(
             signal=signal_type,
             inst_id=inst_id,
             price=curr_price,
@@ -215,13 +228,34 @@ class MultiAgentStrategy(BaseStrategy):
             extra={
                 "confidence": confidence,
                 "llm_model": self.llm_model,
+                "data_quality": dq_grade,
                 "pipeline_result": result,
             },
         )
 
+        # 建仓（BUY）时落盘完整论点，供平仓复盘（对标 AI Berkshire thesis-tracker）
+        if signal_type == SignalType.BUY and self.get_param("thesis_enabled"):
+            self._save_thesis(inst_id, curr_price, result, evidence)
+
+        return sig
+
     # ------------------------------------------------------------------
     # 辅助方法
     # ------------------------------------------------------------------
+
+    def _save_thesis(self, inst_id: str, price: float, result: dict, evidence: dict | None) -> None:
+        """建仓时落盘论点快照；任何失败都不得影响交易主流程。"""
+        try:
+            from okx_quant.agentic.thesis import ThesisStore, build_thesis
+
+            if self._thesis_store is None:
+                self._thesis_store = ThesisStore(self.get_param("thesis_dir"))
+            thesis = build_thesis(inst_id, price, result, evidence)
+            path = self._thesis_store.save(thesis)
+            if path:
+                logger.info("[MultiAgent] 已落盘 %s 建仓论点: %s", inst_id, path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[MultiAgent] 论点快照写入失败（不影响交易）: %s", e)
 
     def _build_indicators(self, df: pd.DataFrame, inst_id: str) -> dict:
         """从 DataFrame 构建技术指标字典"""

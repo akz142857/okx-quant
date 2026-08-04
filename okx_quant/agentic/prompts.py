@@ -4,6 +4,29 @@
 方便统一维护和迭代。
 """
 
+import math
+
+# 缺失/无法计算的指标一律渲染为 N/A（而非 0）——对标 AI Berkshire 的"留白原则"：
+# 数据不足时诚实标注，绝不用默认值伪装确定性。0 会被模型误读为"极端超卖"等真实信号。
+_MISSING_DATA_NOTE = (
+    "\n\nDATA NOTE: Any field shown as \"N/A\" means that indicator is missing or "
+    "could not be computed. Do NOT treat N/A as zero or infer any signal from it — "
+    "explicitly lower your confidence when key inputs are N/A."
+)
+
+
+def _fmt(value, spec: str = "") -> str:
+    """格式化指标值；None / NaN → \"N/A\"，避免把缺失数据伪装成真实的 0。"""
+    if value is None:
+        return "N/A"
+    if isinstance(value, float) and math.isnan(value):
+        return "N/A"
+    try:
+        return format(value, spec) if spec else str(value)
+    except (ValueError, TypeError):
+        return "N/A"
+
+
 # =====================================================================
 # 分析师 System Prompts
 # =====================================================================
@@ -25,7 +48,7 @@ Output a structured analysis with:
 - Risk factors
 - Confidence level (0.0-1.0)
 
-Be concise but thorough. Use data to support every claim."""
+Be concise but thorough. Use data to support every claim.""" + _MISSING_DATA_NOTE
 
 SENTIMENT_ANALYST_SYSTEM = """\
 You are a cryptocurrency market sentiment analyst.
@@ -44,7 +67,7 @@ Output a structured sentiment assessment with:
 - Key observations
 - Confidence level (0.0-1.0)
 
-Be data-driven. Avoid speculation without evidence."""
+Be data-driven. Avoid speculation without evidence.""" + _MISSING_DATA_NOTE
 
 NEWS_ANALYST_SYSTEM = """\
 You are a cryptocurrency news and event analyst.
@@ -87,7 +110,7 @@ Output a structured assessment with:
 - Risk factors from market conditions
 - Confidence level (0.0-1.0)
 
-Distinguish between favorable and unfavorable trading conditions."""
+Distinguish between favorable and unfavorable trading conditions.""" + _MISSING_DATA_NOTE
 
 # =====================================================================
 # 辩论者 System Prompts
@@ -162,21 +185,21 @@ You MUST return ONLY valid JSON in this exact format:
 def build_technical_prompt(indicators: dict, recent_candles: str) -> str:
     """构建技术分析师的 user prompt"""
     lines = [f"## Technical Indicators for {indicators.get('inst_id', 'UNKNOWN')}"]
-    lines.append(f"Current Price: {indicators.get('price', 0)}")
-    lines.append(f"24H Change: {indicators.get('change_pct', 0):+.2f}%")
-    lines.append(f"EMA9: {indicators.get('ema9', 0):.6f}  |  EMA21: {indicators.get('ema21', 0):.6f}")
+    lines.append(f"Current Price: {_fmt(indicators.get('price'))}")
+    lines.append(f"24H Change: {_fmt(indicators.get('change_pct'), '+.2f')}%")
+    lines.append(f"EMA9: {_fmt(indicators.get('ema9'), '.6f')}  |  EMA21: {_fmt(indicators.get('ema21'), '.6f')}")
     lines.append(
-        f"MACD: {indicators.get('macd', 0):.6f}  |  "
-        f"Signal: {indicators.get('macd_signal', 0):.6f}  |  "
-        f"Hist: {indicators.get('macd_hist', 0):.6f}"
+        f"MACD: {_fmt(indicators.get('macd'), '.6f')}  |  "
+        f"Signal: {_fmt(indicators.get('macd_signal'), '.6f')}  |  "
+        f"Hist: {_fmt(indicators.get('macd_hist'), '.6f')}"
     )
-    lines.append(f"RSI(14): {indicators.get('rsi', 0):.2f}")
+    lines.append(f"RSI(14): {_fmt(indicators.get('rsi'), '.2f')}")
     lines.append(
-        f"Bollinger: Upper={indicators.get('bb_upper', 0):.6f}  "
-        f"Mid={indicators.get('bb_mid', 0):.6f}  "
-        f"Lower={indicators.get('bb_lower', 0):.6f}"
+        f"Bollinger: Upper={_fmt(indicators.get('bb_upper'), '.6f')}  "
+        f"Mid={_fmt(indicators.get('bb_mid'), '.6f')}  "
+        f"Lower={_fmt(indicators.get('bb_lower'), '.6f')}"
     )
-    lines.append(f"ATR(14): {indicators.get('atr', 0):.6f}")
+    lines.append(f"ATR(14): {_fmt(indicators.get('atr'), '.6f')}")
 
     lines.append("")
     lines.append("## Recent Candles (OHLCV)")
@@ -187,11 +210,11 @@ def build_technical_prompt(indicators: dict, recent_candles: str) -> str:
 def build_sentiment_prompt(indicators: dict, recent_candles: str) -> str:
     """构建情绪分析师的 user prompt"""
     lines = [f"## Price Action Data for {indicators.get('inst_id', 'UNKNOWN')}"]
-    lines.append(f"Current Price: {indicators.get('price', 0)}")
-    lines.append(f"24H Change: {indicators.get('change_pct', 0):+.2f}%")
-    lines.append(f"24H High: {indicators.get('high_24h', 0)}  |  24H Low: {indicators.get('low_24h', 0)}")
-    lines.append(f"ATR(14): {indicators.get('atr', 0):.6f} (volatility measure)")
-    lines.append(f"RSI(14): {indicators.get('rsi', 0):.2f}")
+    lines.append(f"Current Price: {_fmt(indicators.get('price'))}")
+    lines.append(f"24H Change: {_fmt(indicators.get('change_pct'), '+.2f')}%")
+    lines.append(f"24H High: {_fmt(indicators.get('high_24h'))}  |  24H Low: {_fmt(indicators.get('low_24h'))}")
+    lines.append(f"ATR(14): {_fmt(indicators.get('atr'), '.6f')} (volatility measure)")
+    lines.append(f"RSI(14): {_fmt(indicators.get('rsi'), '.2f')}")
     lines.append("")
     lines.append("## Recent Candles (OHLCV) — analyze volume patterns and candle shapes")
     lines.append(recent_candles)
@@ -208,12 +231,12 @@ def build_news_prompt(news_text: str, inst_id: str) -> str:
 def build_fundamentals_prompt(indicators: dict) -> str:
     """构建基本面分析师的 user prompt"""
     lines = [f"## Market Metrics for {indicators.get('inst_id', 'UNKNOWN')}"]
-    lines.append(f"Current Price: {indicators.get('price', 0)}")
-    lines.append(f"24H Change: {indicators.get('change_pct', 0):+.2f}%")
-    lines.append(f"24H High: {indicators.get('high_24h', 0)}  |  24H Low: {indicators.get('low_24h', 0)}")
-    lines.append(f"ATR(14): {indicators.get('atr', 0):.6f}")
-    lines.append(f"Bollinger Band Width: {indicators.get('bb_width', 0):.6f}")
-    lines.append(f"RSI(14): {indicators.get('rsi', 0):.2f}")
+    lines.append(f"Current Price: {_fmt(indicators.get('price'))}")
+    lines.append(f"24H Change: {_fmt(indicators.get('change_pct'), '+.2f')}%")
+    lines.append(f"24H High: {_fmt(indicators.get('high_24h'))}  |  24H Low: {_fmt(indicators.get('low_24h'))}")
+    lines.append(f"ATR(14): {_fmt(indicators.get('atr'), '.6f')}")
+    lines.append(f"Bollinger Band Width: {_fmt(indicators.get('bb_width'), '.6f')}")
+    lines.append(f"RSI(14): {_fmt(indicators.get('rsi'), '.2f')}")
 
     vol_summary = indicators.get("vol_summary", "")
     if vol_summary:

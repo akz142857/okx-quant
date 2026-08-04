@@ -25,6 +25,22 @@ from .token_tracker import TokenTracker
 logger = logging.getLogger(__name__)
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    """把 LLM 返回的数值字段稳健地转成 float，无法解析时用 default。"""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return default
+    if f != f:  # NaN
+        return default
+    return f
+
+
+def _clamp01(value: float) -> float:
+    """约束到 [0, 1]。"""
+    return max(0.0, min(1.0, value))
+
+
 class AgenticPipeline:
     """多 Agent 交易管线
 
@@ -62,6 +78,7 @@ class AgenticPipeline:
         inst_id: str,
         news_text: str = "",
         portfolio_state: dict | None = None,
+        data_quality: dict | None = None,
     ) -> dict:
         """执行完整 pipeline
 
@@ -71,10 +88,12 @@ class AgenticPipeline:
             inst_id: 交易对 ID
             news_text: 格式化后的新闻文本
             portfolio_state: 当前组合状态（equity, drawdown_pct 等）
+            data_quality: 数据充分度评级（含 confidence_ceiling），薄数据会压低
+                置信度天花板，见 data_quality.assess_data_sufficiency
 
         Returns:
-            决策字典: {signal, confidence, size_pct, stop_loss_pct, take_profit_pct, reason}
-            失败时返回 HOLD 决策
+            决策字典: {signal, confidence, size_pct, stop_loss_pct, take_profit_pct,
+            reason, data_quality, evidence}。失败时返回 HOLD 决策。
         """
         portfolio_state = portfolio_state or {
             "equity": 10000, "drawdown_pct": 0, "open_positions": 0,
@@ -126,19 +145,66 @@ class AgenticPipeline:
             logger.warning("[Pipeline] 风控审核返回空结果，保守降级为 HOLD")
             return self._hold("风控审核失败，保守降级")
 
-        # 确保返回结构完整
+        evidence = {
+            "analyst_reports": analyst_reports,
+            "debate": debate_transcript,
+            "trader": decision,
+            "risk": final,
+            "data_quality": data_quality,
+        }
+
+        sig = str(final.get("signal", "HOLD")).upper()
+        if sig not in ("BUY", "SELL", "HOLD"):
+            sig = "HOLD"
+        confidence = _as_float(final.get("confidence"), 0.0)
+
+        # ------------------------------------------------------------------
+        # 硬约束（代码强制，不依赖 prompt 自觉）
+        # ------------------------------------------------------------------
+        # (1) 数据质量置信度天花板：薄数据不允许高信心
+        if data_quality:
+            ceiling = _as_float(data_quality.get("confidence_ceiling"), 1.0)
+            if confidence > ceiling:
+                logger.info(
+                    "[Pipeline] 置信度 %.2f 被数据质量(%s级)限制到 %.2f",
+                    confidence, data_quality.get("grade", "?"), ceiling,
+                )
+                confidence = ceiling
+
+        # (2) 置信度阈值：BUY 必须过线，否则降级 HOLD（pipeline 自包含，不只靠 wrapper）
+        #     SELL 是离场，出于保命偏向不因低置信度被拦。
+        if sig == "BUY" and confidence < self.config.confidence_threshold:
+            hold = self._hold(
+                f"置信度 {confidence:.2f} < 阈值 {self.config.confidence_threshold}"
+            )
+            hold["confidence"] = confidence
+            hold["data_quality"] = data_quality
+            hold["evidence"] = evidence
+            return hold
+
+        # (3) 风控只能收紧、不能放大：仓位取更小、止损取更紧（更小的 pct = 更近的止损）
+        proposed_size = _clamp01(_as_float(decision.get("size_pct"), 0.0))
+        reviewed_size = _clamp01(_as_float(final.get("size_pct"), proposed_size))
+        final_size = min(proposed_size, reviewed_size) if sig == "BUY" else 0.0
+
+        proposed_sl = _as_float(decision.get("stop_loss_pct"), 0.02)
+        reviewed_sl = _as_float(final.get("stop_loss_pct"), proposed_sl)
+        final_sl = min(proposed_sl, reviewed_sl)  # 风控不得把止损放宽
+
         result = {
-            "signal": final.get("signal", "HOLD"),
-            "confidence": final.get("confidence", 0),
-            "size_pct": final.get("size_pct", 0.5),
-            "stop_loss_pct": final.get("stop_loss_pct", 0.02),
-            "take_profit_pct": final.get("take_profit_pct", 0.04),
+            "signal": sig,
+            "confidence": confidence,
+            "size_pct": final_size,
+            "stop_loss_pct": final_sl,
+            "take_profit_pct": _as_float(final.get("take_profit_pct"), 0.04),
             "reason": final.get("reason", "多Agent决策"),
+            "data_quality": data_quality,
+            "evidence": evidence,
         }
 
         logger.info(
-            "[Pipeline] 最终决策: %s (置信度=%.2f)",
-            result["signal"], result["confidence"],
+            "[Pipeline] 最终决策: %s (置信度=%.2f, 仓位=%.2f)",
+            result["signal"], result["confidence"], result["size_pct"],
         )
         return result
 
@@ -258,4 +324,6 @@ class AgenticPipeline:
             "stop_loss_pct": 0.0,
             "take_profit_pct": 0.0,
             "reason": reason,
+            "data_quality": None,
+            "evidence": None,
         }
