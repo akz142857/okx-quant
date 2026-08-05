@@ -94,17 +94,25 @@ Production deployment (systemd on a DigitalOcean droplet, `verify_deploy.sh` / `
 
 **`risk/`** — `RiskManager`: pre-trade checks (max position %, min order size, max open positions), SL/TP calc, max-drawdown halt. `RiskConfig` dataclass.
 
-**`llm/`** — `LLMClient` for OpenAI/DeepSeek (chat/completions) and Claude (Messages API); provider auto-detected. `LLMConfig.from_dict()`. Note: Claude path needs an API key, not OAuth.
+**`llm/`** — `LLMClient` for OpenAI/DeepSeek (chat/completions) and Claude (Messages API); provider auto-detected. `LLMConfig.from_dict()`. Note: Claude path needs an API key, not OAuth. `cache.py` `LLMCache` is a disk record/replay cache (`LLMCache.wrap(client, cache)`); key covers provider/model/base_url/**temperature**/**max_tokens**/system/user — never `api_key`, and failed responses are not persisted. `scripts/backtest_grid.py --llm-cache DIR` wires it in so an evaluation set can be re-run for free. Caveat: it only cuts cost, it does not remove sampling noise, and any prompt change misses the whole cache.
 
 **`cli/`** — `dashboard.py` (ANSI box-drawing dashboard, CJK-aware width), `colors.py`, `wizard.py` (interactive menu).
 
-**`utils/`** — `timeout.py` (wraps strategy calls so a slow LLM can't block the loop).
+**`utils/`** — `timeout.py` (wraps strategy calls so a slow LLM can't block the loop; note the worker thread **cannot be killed** — a timeout only unblocks the caller, the call still completes and still bills). `untrusted.py` — sentinel wrappers for prompt-injection defence: `wrap_untrusted()` for non-first-party raw text (news), `wrap_derived()` for text written by agents that read untrusted sources (analyst reports, debate transcript). Both NFKC-normalise, strip zero-width/bidi chars, neutralise forged sentinels, and hard-truncate.
 
 ## Adding a New Strategy
 
 1. Create `okx_quant/strategy/my_strategy.py` extending `BaseStrategy`, implement `generate_signal(df, inst_id) -> Signal`. Use `cached_*` from `indicators/cache.py` for indicators (free backtest speedup).
 2. Register in `STRATEGY_REGISTRY` (`okx_quant/strategy/__init__.py`) as `key: (Class, 中文名, 描述)`.
 3. If LLM-based, add the class to `_LLM_STRATEGY_CLASSES` and implement `set_llm_client()` / `set_news_fetcher()` injection.
+
+## Adding a New Agentic Analyst
+
+Add one `(display_name, callable)` entry to `AgenticPipeline._build_analyst_tasks()` — that is the single place. `display_name` is the only key source (success / exception / timeout paths all use it), and both the worker-pool size and the shared wall-clock budget follow the task count automatically. Do **not** reintroduce a hand-written name map or a hardcoded `max_workers`.
+
+Any non-first-party text must pass through `wrap_untrusted()` before entering a prompt; any agent-written text re-entering a downstream prompt must pass through `wrap_derived()`.
+
+Before adding analysts, read [`docs/agentic-brain-roadmap-review.md`](docs/agentic-brain-roadmap-review.md): the input-enrichment roadmap is **deferred**, and the minimum falsification experiment in [`docs/agentic-min-experiment.md`](docs/agentic-min-experiment.md) is the gate for unfreezing it.
 
 ## Key Conventions
 
@@ -114,3 +122,7 @@ Production deployment (systemd on a DigitalOcean droplet, `verify_deploy.sh` / `
 - OKX API responses: check `code != "0"` and raise `RuntimeError`.
 - New trading/data code should target the `Exchange` protocol, not `client/rest.py`.
 - `config.yaml` holds secrets — never commit it; `config.yaml.example` is the template.
+- Constraints on LLM output are enforced **in code, not in the prompt**: confidence threshold, data-quality ceiling, `size_pct` clamp, `stop_loss_pct` / `take_profit_pct` clamp (`AgenticConfig` bounds), risk-manager `min()`. Never let an LLM value reach an order without a code-side bound.
+- `executor.signal_timeout_s` left unset auto-derives per strategy type (20s traditional, LLM-aware otherwise) — see `_resolve_signal_timeout()` in `main.py`. Setting it too low does not save money: `run_with_timeout` cannot kill the worker, so the calls still complete and still bill.
+- Token budgets are two distinct things: `max_total_tokens` is session-lifetime (checked *before* any call), `max_decision_tokens` is per-decision (run-scoped, so it never latches into permanent HOLD).
+- Operational reference for all of the above: [`docs/LLM_STRATEGY_CONTROLS.md`](docs/LLM_STRATEGY_CONTROLS.md).

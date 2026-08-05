@@ -186,6 +186,42 @@ def make_strategy(name: str, params: dict | None = None, cfg: dict | None = None
     return cls(params, context=context) if context is not None else cls(params)
 
 
+DEFAULT_SIGNAL_TIMEOUT_S = 20.0
+
+
+def _resolve_signal_timeout(cfg: dict, executor_cfg: dict, strategy_name: str) -> float:
+    """解析 generate_signal 的硬超时预算
+
+    默认 20s 对传统策略（纯 pandas 计算）是合适的保护，但对 LLM 策略低了一个
+    数量级：multi_agent 一次决策要串起 4 个分析师 + N 轮辩论 + 交易员 + 风控，
+    典型 35–70s。而 ``utils.run_with_timeout`` 的守护线程**无法被杀死**——超时
+    只是主循环先返回 HOLD，后台仍会把全部 LLM 调用跑完并计费。也就是说超时值
+    配小了不省钱，只是让每一次决策都变成"付了全款拿 HOLD"。
+
+    因此：LLM 类策略在**未显式配置** ``executor.signal_timeout_s`` 时，按各阶段
+    超时上限推导一个匹配的预算；显式配置则一律尊重用户设置。
+    """
+    explicit = executor_cfg.get("signal_timeout_s")
+    if explicit is not None:
+        return float(explicit)
+    if not is_llm_strategy(strategy_name):
+        return DEFAULT_SIGNAL_TIMEOUT_S
+
+    llm_timeout = float(cfg.get("llm", {}).get("timeout", 30))
+    deep_timeout = float(cfg.get("llm_deep", {}).get("timeout", 60) or llm_timeout)
+    debate_rounds = int(cfg.get("multi_agent", {}).get("debate_rounds", 2))
+    # 分析师阶段（并行，取单个上限）+ 每轮辩论（轮内并行）+ 交易员 + 风控
+    derived = llm_timeout + (debate_rounds + 2) * deep_timeout
+    timeout = max(DEFAULT_SIGNAL_TIMEOUT_S, derived)
+    print(
+        f"  [signal_timeout] 策略 {strategy_name} 为 LLM 类，未显式配置 "
+        f"executor.signal_timeout_s，按各阶段超时上限推导为 {timeout:.0f}s"
+        f"（默认 {DEFAULT_SIGNAL_TIMEOUT_S:.0f}s 会让每次决策都超时降级为 HOLD，"
+        f"但后台调用仍会跑完并计费）"
+    )
+    return timeout
+
+
 def _validate_bar(bar: str):
     if bar not in VALID_BARS:
         print(f"无效的 K 线周期: {bar}，可选: {', '.join(VALID_BARS)}")
@@ -817,7 +853,7 @@ def cmd_live(args, cfg):
                 production_runtime.stop()
                 return
     executor_cfg = cfg.get("executor", {})
-    signal_timeout_s = float(executor_cfg.get("signal_timeout_s", 20))
+    signal_timeout_s = _resolve_signal_timeout(cfg, executor_cfg, args.strategy)
     state_store = StateStore(state_dir=executor_cfg.get("state_dir", "state"))
 
     # 优先检测已有持仓（无论选币结果如何，已有持仓必须纳入监控）

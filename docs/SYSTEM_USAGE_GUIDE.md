@@ -176,6 +176,33 @@ http://127.0.0.1:9181
 
 可用 `--max-price` 增加单价过滤；`0` 表示不过滤。
 
+### 4.6 运行 LLM 策略（`llm` / `ensemble` / `multi_agent`）
+
+LLM 策略与传统策略在运维上是两类东西：一次 `multi_agent` 决策要 10 次 LLM 调用、
+典型 35–70 秒、约 $0.09，而它的三个失效模式（超时、预算耗尽、提示注入）**都不会
+报错，只会静默返回 HOLD**。跑之前先读
+[LLM 策略的成本、超时与安全控制](./LLM_STRATEGY_CONTROLS.md)。
+
+最容易踩的两个坑：
+
+1. **`executor.signal_timeout_s` 默认的 20 秒对 LLM 策略低一个数量级。**
+   `config.yaml.example` 已把该键注释掉，留空时系统会按各阶段超时上限自动推导
+   （默认参数下 270s）并在启动时打印。如果你的 `config.yaml` 显式写了 `20`，
+   `multi_agent` 会**每次都超时降级为 HOLD，而后台调用仍会跑完并计费**。
+2. **回测 LLM 策略请开缓存**，否则每次重跑都是全价：
+
+   ```bash
+   uv run python scripts/backtest_grid.py \
+     --strategies multi_agent,ensemble,adaptive,bollinger,ma_cross \
+     --instruments BTC-USDT,ETH-USDT,SOL-USDT \
+     --bars 1D --days 365 \
+     --llm-cache state/llm_cache
+   ```
+
+   注意缓存只降本、不消除采样噪声，且任何 prompt 改动都会全部 miss。
+
+`main.py backtest` 跑 LLM 策略时会先给出费用预估并要求确认，跑完打印 token 用量。
+
 ## 5. 验证 Demo 测试账号
 
 先只验证网络和鉴权，不下单：
@@ -492,3 +519,5 @@ uv run python scripts/non_live_validation.py \
 - [生产运行手册](./RUNBOOK.md)
 - [发布检查清单](./RELEASE_CHECKLIST.md)
 - [项目综合评估](./PROJECT_EVALUATION.md)
+- [LLM 策略的成本、超时与安全控制](./LLM_STRATEGY_CONTROLS.md)
+- [多 Agent 方案评审报告](./agentic-brain-roadmap-review.md)

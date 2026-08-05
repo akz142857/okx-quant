@@ -27,7 +27,7 @@ from .prompts import (
     build_technical_prompt,
     build_trader_prompt,
 )
-from .token_tracker import TokenTracker
+from .token_tracker import TIER_DEEP, TIER_QUICK, TokenTracker
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,15 @@ def _parse_json(content: str) -> dict | None:
 
 
 class BaseAgent:
-    """Agent 基类 — 封装 LLM 调用与 token 追踪"""
+    """Agent 基类 — 封装 LLM 调用与 token 追踪
+
+    Args:
+        tier: 模型档位（``quick`` / ``deep``）。只用于用量归类——strong 模型占
+            token 的少数却占费用的绝大多数，分开计数才看得见这个差距。
+    """
+
+    #: 子类可覆盖；辩论/决策类 Agent 走 deep
+    tier: str = TIER_QUICK
 
     def __init__(self, name: str, llm: LLMClient, tracker: TokenTracker):
         self.name = name
@@ -88,7 +96,7 @@ class BaseAgent:
             logger.warning("[%s] LLM 调用异常: %s", self.name, e)
             return ""
 
-        self.tracker.record(self.name, resp.input_tokens, resp.output_tokens)
+        self.tracker.record(self.name, resp.input_tokens, resp.output_tokens, self.tier)
 
         if not resp.ok:
             logger.warning("[%s] LLM 调用失败: %s", self.name, resp.error)
@@ -139,6 +147,8 @@ class FundamentalsAnalyst(BaseAgent):
 class BullResearcher(BaseAgent):
     """多头研究员 — 构建看涨论点"""
 
+    tier = TIER_DEEP
+
     def argue(self, analyst_reports: dict[str, str],
               opponent_argument: str = "", round_num: int = 1) -> str:
         user_prompt = build_debate_prompt(analyst_reports, opponent_argument, round_num)
@@ -147,6 +157,8 @@ class BullResearcher(BaseAgent):
 
 class BearResearcher(BaseAgent):
     """空头研究员 — 构建看跌/谨慎论点"""
+
+    tier = TIER_DEEP
 
     def argue(self, analyst_reports: dict[str, str],
               opponent_argument: str = "", round_num: int = 1) -> str:
@@ -161,6 +173,8 @@ class BearResearcher(BaseAgent):
 class TraderAgent(BaseAgent):
     """交易员 — 综合所有分析做出交易决策"""
 
+    tier = TIER_DEEP
+
     def decide(self, analyst_reports: dict[str, str], debate_transcript: str,
                inst_id: str) -> dict | None:
         user_prompt = build_trader_prompt(analyst_reports, debate_transcript, inst_id)
@@ -172,6 +186,8 @@ class TraderAgent(BaseAgent):
 
 class RiskManagerAgent(BaseAgent):
     """风控经理 — 审核交易信号，可否决或调整"""
+
+    tier = TIER_DEEP
 
     def review(self, proposed_signal: dict, portfolio_state: dict) -> dict | None:
         user_prompt = build_risk_manager_prompt(proposed_signal, portfolio_state)

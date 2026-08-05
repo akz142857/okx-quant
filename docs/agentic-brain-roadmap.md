@@ -1,8 +1,27 @@
 # Agentic 大脑升级方案 — 让多 Agent 决策深度追上 AI Berkshire
 
-> 状态：提案 / 草案
+> 状态：**已评审 / 暂缓执行（2026-08-05）**
 > 日期：2026-08-04
-> 背景：见 [`docs/ai-berkshire.md`](ai-berkshire.md) §11–§11.5。本方案是"如何让 `okx_quant/agentic/` 的分析深度追上 AI Berkshire"的落地设计。
+> 背景：见 [`docs/ai-berkshire.md`](ai-berkshire.md) 十一 / 十一·五。本方案是"如何让 `okx_quant/agentic/` 的分析深度追上 AI Berkshire"的落地设计。
+
+---
+
+## ⚠️ 评审结论（2026-08-05）
+
+多 Agent 评审报告见 [`docs/agentic-brain-roadmap-review.md`](agentic-brain-roadmap-review.md)。**结论：推迟，本方案四步整体不执行。**
+
+核心原因（证据见评审报告 §1）：本系统**从未产生过一笔决策**——`state/demo/trading.db` 的 `decisions` / `fills` / `positions` / `realized_pnl_events` 全部 0 行，`mode=halted`；Gate A 的 Shadow 0/72h、Active 0/7d、Chaos 0/6 全部未开始，准入结论 NOT_ADMITTED。在这样的系统上论证"决策深度不够"，缺少任何运行数据支撑。另有两条硬阻塞：**步骤 4 物理上不可能**（记忆闭环要平仓结果打标签，而 `fills`=0）；**改 `agentic/` 会重置 Gate A 的日历时钟**（换冻结候选 → provenance 重算、Linux CI 重跑、contract v2 重采）。
+
+下一步不是本方案，而是 [`docs/agentic-min-experiment.md`](agentic-min-experiment.md) 的 **3 天最小证伪实验**：用**现成的** `scripts/backtest_grid.py`（`LLM_STRATEGIES` 已含 `multi_agent`）跑 multi_agent vs 传统策略的 `alpha_sharpe` 对照，判定标准事前冻结。
+
+本文以下内容保持原样存档。阅读时请注意评审查出的事实性错误：
+
+- §1 表格「`backtest/` 未覆盖 LLM 策略」**不实**——`scripts/backtest_grid.py:92` 早有 `LLM_STRATEGIES`。
+- 步骤 2 的 `financial_rigor.benford` / `report_audit.py` / `tests/test_financial_rigor.py` / `tools/` 目录**本仓库均不存在**，只在**未纳入版本控制**的 `project_examples/` 里；且真名是 `benford_check`，是 argparse 子命令、不可 import。
+- 步骤 1「衍生品 🟢 好接」不成立——funding/OI 是 `-SWAP` 数据而全链路是现货，`client/rest.py` 无任何封装。
+- L117「对标 AI Berkshire 决策终章'赔率思维收尾'」在被引文档中**查无此文**。
+- 排期表与依赖图**成环**（序 4 前置=步骤2，序 5「步骤2」前置=步骤1）。
+- 步骤 3「只改 `prompts.py`、不加 token 成本」与其正文「新增逆向 Agent、放在辩论层（strong model）」**自相矛盾**。
 
 ---
 
@@ -146,14 +165,14 @@ class DerivativesAnalyst(BaseAgent):
               └─→ 步骤3 框架化(可与步骤1并行)
 ```
 
-| 顺序 | 工作项 | 工作量 | 前置 | 一句话价值 |
-|---|---|---|---|---|
-| 1 | 阶段0 评估台 + LLM 缓存 | M | — | 让后续每一步可度量、防自我欺骗 |
-| 2 | 步骤1 衍生品分析师（端到端一刀） | S | 阶段0 | 验证"加输入"整条路径最快 |
-| 3 | 步骤3 框架化 + 逆向 Agent | S | 阶段0 | 近零成本提升决策纪律 |
-| 4 | 步骤1 其余分析师（微观/链上/催化剂） | M×3 | 步骤2 | 深度主体 |
-| 5 | 步骤2 `market_rigor.py` | M | 步骤1 | 输入可信度标签 |
-| 6 | 步骤4 记忆闭环 | M–L | 步骤1 | 差异化，反超点 |
+| 顺序 | 工作项 | 工作量 | 前置 | 一句话价值 | **评审处置（2026-08-05）** |
+|---|---|---|---|---|---|
+| 1 | 阶段0 评估台 + LLM 缓存 | M | — | 让后续每一步可度量、防自我欺骗 | **拆开**：`llm/cache.py` 已实现；评估台缩到"给 grid 加 3 个决策级指标"，人工场景集**砍掉**（挑段本身是选择偏差） |
+| 2 | 步骤1 衍生品分析师（端到端一刀） | S | 阶段0 | 验证"加输入"整条路径最快 | **推迟**（解冻：最小实验 PASS + Shadow 72h）。且工作量实为 M；形态应改为**代码硬规则**而非 LLM 分析师 |
+| 3 | 步骤3 框架化 + 逆向 Agent | S | 阶段0 | 近零成本提升决策纪律 | **缩到最小**：只做纯 prompt，**不新增独立 Agent**（折进现有 bear prompt）；regime 与赔率**下沉到代码** |
+| 4 | 步骤1 其余分析师（微观/链上/催化剂） | M×3 | 步骤2 | 深度主体 | 链上**砍掉**；微观结构分析师**砍掉**（其价值应落在执行前置检查，且 `market.py:181/199` 已有 orderbook/spread）；催化剂**推迟** |
+| 5 | 步骤2 `market_rigor.py` | M | 步骤1 | 输入可信度标签 | **推迟**；`cross-exchange` **砍掉**（DigitalOcean 美区 IP 会被币安 HTTP 451 拒绝）；`benford` 无法"复用"须重写 |
+| 6 | 步骤4 记忆闭环 | M–L | 步骤1 | 差异化，反超点 | **硬阻塞推迟**：`fills`=0 → 无 outcome 标签；且 `recall()` 缺 `as_of` 会造成前视泄漏，thesis 与持仓无 ID 关联 |
 
 ---
 

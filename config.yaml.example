@@ -72,7 +72,13 @@ logging:
 
 # 实盘执行器参数
 executor:
-  signal_timeout_s: 20          # 策略 generate_signal 最大耗时（秒），超时视为 HOLD 避免阻塞主循环
+  # 策略 generate_signal 最大耗时（秒），超时视为 HOLD 避免阻塞主循环。
+  # 留空/注释掉 = 自动推导：传统策略 20s；LLM 类策略（llm / ensemble / multi_agent）
+  # 按 llm.timeout + (debate_rounds + 2) × llm_deep.timeout 推导。
+  # 注意：配小了并不省钱——超时只让主循环先返回 HOLD，后台守护线程仍会把全部
+  # LLM 调用跑完并计费（Python 无法杀死线程）。multi_agent 一次决策典型 35–70s，
+  # 用 20s 的话每次决策都会"付了全款拿 HOLD"。
+  # signal_timeout_s: 20
   state_dir: "state"            # 崩溃恢复状态文件目录
 
 # 回测默认参数
@@ -106,7 +112,19 @@ llm_deep:
 multi_agent:
   debate_rounds: 2              # 多空辩论轮数
   confidence_threshold: 0.6     # 低于此置信度 → HOLD
-  max_total_tokens: 0           # 单次会话 token 预算上限，0 表示不限
+  # 分析师并发度，0/留空 = 全部并行（默认）。钉成小于分析师数量的值会让它们分多波
+  # 跑，墙钟时间成倍增加，并挤占 as_completed 的共享超时预算。
+  # analyst_max_workers: 0
+  max_total_tokens: 0           # **会话级**（进程累计）token 上限，0 = 不限
+  # 单次决策 token 上限（0 = 不限）。与 max_total_tokens 不同，它每次决策重新计数，
+  # 因此不会"跑几次之后永久触发、此后每个 tick 都直接 HOLD"。
+  # 未配置时用代码内默认值 120000，这是防单次决策失控的最后一道确定性防线。
+  # max_decision_tokens: 120000
+  # LLM 输出的止损/止盈距离的代码级上下界（不是建议值，是硬边界）。
+  # min_stop_loss_pct: 0.005
+  # max_stop_loss_pct: 0.10
+  # min_take_profit_pct: 0.005
+  # max_take_profit_pct: 0.50
 
 # 策略自定义参数（覆盖各策略 __init__ 默认值）
 # Phase 1 backtest_grid / param_sweep 找到最优参数后在此配置

@@ -2,8 +2,6 @@
 
 import json
 import logging
-import re
-import unicodedata
 
 import pandas as pd
 
@@ -11,6 +9,7 @@ from okx_quant.data.news import CryptoNewsFetcher
 from okx_quant.indicators import atr, bollinger_bands, ema, macd, rsi
 from okx_quant.llm.client import LLMClient
 from okx_quant.strategy.base import BaseStrategy, Signal, SignalType, StrategyContext
+from okx_quant.utils.untrusted import UNTRUSTED_MAX_LEN, wrap_untrusted
 
 logger = logging.getLogger(__name__)
 
@@ -36,43 +35,10 @@ Required JSON format:
 """
 
 
-_ZERO_WIDTH = dict.fromkeys(map(ord, (
-    "\u200b", "\u200c", "\u200d", "\u200e", "\u200f",
-    "\u2028", "\u2029", "\u202a", "\u202b", "\u202c",
-    "\u202d", "\u202e", "\u2060", "\u2066", "\u2067",
-    "\u2068", "\u2069", "\ufeff",
-)))
-_UNTRUSTED_MAX_LEN = 4_096  # 单个 untrusted 块硬上限
-_SENTINEL_PATTERN = re.compile(
-    r"\[\s*/?\s*UNTRUSTED_?CONTENT\s*\]",
-    flags=re.IGNORECASE,
-)
-
-
-def _wrap_untrusted(text: str) -> str:
-    """用哨兵包裹来自不可信源的内容（新闻等）
-
-    加固：
-      1. NFKC 归一化 —— 全宽括号 ``［/UNTRUSTED_CONTENT］`` 等同形体等价化为 ASCII
-      2. 移除零宽字符 / 方向控制字符 —— 防止 ``[/UNTRUSTE\u200bD_CONTENT]`` 分词旁路
-      3. 正则宽松匹配并中和任何形如 ``[UNTRUSTED*CONTENT]`` 的伪哨兵
-      4. 长度硬截断 —— 防御 token 洪水
-
-    说明：LLM 无硬边界，此函数仅把最明显的 ASCII/Unicode 攻击面压平；
-    真正的纵深防御必须叠加 output 端（置信度门槛 + size_pct clamp + 风控校验）。
-    """
-    if not text:
-        return "[UNTRUSTED_CONTENT]\n(empty)\n[/UNTRUSTED_CONTENT]"
-    # 1) NFKC 归一化
-    safe = unicodedata.normalize("NFKC", text)
-    # 2) 移除零宽 / 方向控制字符
-    safe = safe.translate(_ZERO_WIDTH)
-    # 3) 中和任何伪哨兵变体
-    safe = _SENTINEL_PATTERN.sub("[UC]", safe)
-    # 4) 长度截断
-    if len(safe) > _UNTRUSTED_MAX_LEN:
-        safe = safe[:_UNTRUSTED_MAX_LEN] + "\n...[truncated]"
-    return f"[UNTRUSTED_CONTENT]\n{safe}\n[/UNTRUSTED_CONTENT]"
+# 哨兵实现已下沉到 okx_quant/utils/untrusted.py —— agentic/prompts.py 也要用它，
+# 原先由 prompts 反向 import strategy 层造成层次倒置。此处保留别名以兼容既有调用与测试。
+_UNTRUSTED_MAX_LEN = UNTRUSTED_MAX_LEN
+_wrap_untrusted = wrap_untrusted
 
 
 class LLMStrategy(BaseStrategy):

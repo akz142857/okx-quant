@@ -5,6 +5,8 @@ AgenticPipeline 协调 8 个 Agent 的完整流程：
 """
 
 import logging
+import math
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from okx_quant.llm.client import LLMClient
@@ -39,6 +41,11 @@ def _as_float(value, default: float = 0.0) -> float:
 def _clamp01(value: float) -> float:
     """约束到 [0, 1]。"""
     return max(0.0, min(1.0, value))
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    """约束到 [lo, hi]。"""
+    return max(lo, min(hi, value))
 
 
 class AgenticPipeline:
@@ -99,6 +106,12 @@ class AgenticPipeline:
             "equity": 10000, "drawdown_pct": 0, "open_positions": 0,
             "max_drawdown_pct": 15,
         }
+
+        # 会话级上限在**发起任何调用之前**检查，避免"已经超预算了还照跑一遍分析师
+        # 再返回 HOLD"。per-decision 上限则从这里重新计数。
+        if self._over_session_budget():
+            return self._hold("会话 Token 预算超限，未发起调用")
+        self.tracker.begin_run()
 
         # ------------------------------------------------------------------
         # Step 1: 并行运行 4 个分析师
@@ -187,16 +200,42 @@ class AgenticPipeline:
         reviewed_size = _clamp01(_as_float(final.get("size_pct"), proposed_size))
         final_size = min(proposed_size, reviewed_size) if sig == "BUY" else 0.0
 
+        # (4) 止损/止盈距离的代码级夹取：min() 只保证"风控不得放宽"，不构成边界。
+        #     LLM 给出 0.5 等于把止损挂在入场价 50% 之下（形同没有止损），给出
+        #     0.0005 则进场即被扫——两者都能被上游不可信文本影响。size_pct 早有
+        #     clamp，这里把同样的待遇补给 SL/TP。
         proposed_sl = _as_float(decision.get("stop_loss_pct"), 0.02)
         reviewed_sl = _as_float(final.get("stop_loss_pct"), proposed_sl)
         final_sl = min(proposed_sl, reviewed_sl)  # 风控不得把止损放宽
+        clamped_sl = _clamp(
+            final_sl, self.config.min_stop_loss_pct, self.config.max_stop_loss_pct
+        )
+        if clamped_sl != final_sl:
+            logger.warning(
+                "[Pipeline] stop_loss_pct %.4f 越界，夹取到 %.4f（允许区间 %.4f–%.4f）",
+                final_sl, clamped_sl,
+                self.config.min_stop_loss_pct, self.config.max_stop_loss_pct,
+            )
+        final_sl = clamped_sl
+
+        final_tp = _as_float(final.get("take_profit_pct"), 0.04)
+        clamped_tp = _clamp(
+            final_tp, self.config.min_take_profit_pct, self.config.max_take_profit_pct
+        )
+        if clamped_tp != final_tp:
+            logger.warning(
+                "[Pipeline] take_profit_pct %.4f 越界，夹取到 %.4f（允许区间 %.4f–%.4f）",
+                final_tp, clamped_tp,
+                self.config.min_take_profit_pct, self.config.max_take_profit_pct,
+            )
+        final_tp = clamped_tp
 
         result = {
             "signal": sig,
             "confidence": confidence,
             "size_pct": final_size,
             "stop_loss_pct": final_sl,
-            "take_profit_pct": _as_float(final.get("take_profit_pct"), 0.04),
+            "take_profit_pct": final_tp,
             "reason": final.get("reason", "多Agent决策"),
             "data_quality": data_quality,
             "evidence": evidence,
@@ -212,54 +251,73 @@ class AgenticPipeline:
     # 内部方法
     # ------------------------------------------------------------------
 
+    def _build_analyst_tasks(
+        self, indicators: dict, recent_candles: str, inst_id: str, news_text: str,
+    ) -> list[tuple[str, Callable[[], str]]]:
+        """构建 (display_name, callable) 任务表 —— 新增分析师只改这里
+
+        display_name 是**唯一**的 key 来源：成功、异常、超时三条路径都用它。
+        旧实现用 ``fn.__name__`` 反查一张手写的映射表，只加 task 不更新映射，
+        失败路径就会退化成 ``_derivatives`` 这类内部函数名，与成功路径返回的
+        ``"Derivatives Analysis"`` 形成两套 key，污染下游 prompt 的小节标题
+        和 thesis evidence 的键。
+        """
+        return [
+            ("Technical Analysis",
+             lambda: self.technical.analyze(indicators, recent_candles)),
+            ("Sentiment Analysis",
+             lambda: self.sentiment.analyze(indicators, recent_candles)),
+            ("News Analysis",
+             lambda: self.news_analyst.analyze(news_text, inst_id)),
+            ("Fundamentals Analysis",
+             lambda: self.fundamentals.analyze(indicators)),
+        ]
+
     def _run_analysts(
         self, indicators: dict, recent_candles: str, inst_id: str, news_text: str,
     ) -> dict[str, str]:
-        """并行运行 4 个分析师，返回 {name: report}"""
+        """并行运行全部分析师，返回 {display_name: report}"""
         reports: dict[str, str] = {}
         timeout = self.config.analyst_timeout
+        tasks = self._build_analyst_tasks(indicators, recent_candles, inst_id, news_text)
+        if not tasks:
+            return reports
 
-        # 每个 task 返回 (display_name, report)，display_name 用作 dict key
-        _DISPLAY_NAMES = {
-            "_technical": "Technical Analysis",
-            "_sentiment": "Sentiment Analysis",
-            "_news": "News Analysis",
-            "_fundamentals": "Fundamentals Analysis",
-        }
+        # 并发度默认等于任务数（全部并行）。写死 4 的话，分析师加到 8 个就会分两
+        # 波跑，墙钟时间翻倍。
+        configured = self.config.analyst_max_workers
+        max_workers = len(tasks) if configured <= 0 else min(configured, len(tasks))
 
-        def _technical():
-            return "Technical Analysis", self.technical.analyze(indicators, recent_candles)
+        # as_completed 的 timeout 是**所有** future 共享的墙钟预算，而
+        # future.result(timeout) 才是单个的。任务数 > max_workers 时排队时间会
+        # 计入这个共享预算：8 个任务 / 4 worker 最坏要 2×timeout，若只给
+        # timeout+5，后半批必然被判"超时"——哪怕每个 LLM 调用本身都没超时。
+        # 因此按实际波次数放大预算。注意 ThreadPoolExecutor 退出时 shutdown(wait=True)
+        # 本来就要等在跑的任务收尾（真正的时间上界是 llm.timeout），所以预算配小了
+        # 并不能提前返回，只会把**已经付过钱、也确实拿到了**的响应标成"超时"丢掉。
+        waves = math.ceil(len(tasks) / max_workers)
+        wall_clock_budget = timeout * waves + 5
 
-        def _sentiment():
-            return "Sentiment Analysis", self.sentiment.analyze(indicators, recent_candles)
-
-        def _news():
-            return "News Analysis", self.news_analyst.analyze(news_text, inst_id)
-
-        def _fundamentals():
-            return "Fundamentals Analysis", self.fundamentals.analyze(indicators)
-
-        tasks = [_technical, _sentiment, _news, _fundamentals]
-
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(fn): fn.__name__ for fn in tasks}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(fn): display for display, fn in tasks}
             try:
-                for future in as_completed(futures, timeout=timeout + 5):
-                    fn_name = futures[future]
-                    display = _DISPLAY_NAMES.get(fn_name, fn_name)
+                # as_completed 只产出已完成的 future，result() 不会再阻塞
+                for future in as_completed(futures, timeout=wall_clock_budget):
+                    display = futures[future]
                     try:
-                        name, report = future.result(timeout=timeout)
-                        reports[name] = report if report else "(分析师未返回结果)"
-                    except Exception as e:
+                        report = future.result()
+                        reports[display] = report if report else "(分析师未返回结果)"
+                    except Exception as e:  # noqa: BLE001
                         logger.warning("[Pipeline] 分析师 %s 异常: %s", display, e)
                         reports[display] = "(分析师调用失败)"
             except TimeoutError:
                 # 部分分析师超时，保留已完成的结果
-                for _future, fn_name in futures.items():
-                    display = _DISPLAY_NAMES.get(fn_name, fn_name)
-                    if display not in reports:
-                        logger.warning("[Pipeline] 分析师 %s 超时", display)
-                        reports[display] = "(分析师超时)"
+                for future, display in futures.items():
+                    if display in reports:
+                        continue
+                    future.cancel()  # 尚未开跑的任务直接取消，不再白花 token
+                    logger.warning("[Pipeline] 分析师 %s 超时", display)
+                    reports[display] = "(分析师超时)"
 
         return reports
 
@@ -300,17 +358,35 @@ class AgenticPipeline:
 
         return "\n\n".join(transcript_parts)
 
-    def _over_budget(self, stage: str) -> bool:
-        """检查当前 token 用量是否超过预算上限"""
+    def _over_session_budget(self) -> bool:
+        """会话级（进程生命周期累计）预算是否已耗尽"""
         cap = self.config.max_total_tokens
         if cap <= 0:
             return False
-        used = self.tracker.summary()["total_tokens"]
-        if used > cap:
-            logger.warning(
-                "[Pipeline] Token 用量 %d 超过上限 %d（%s后）",
-                used, cap, stage,
-            )
+        used = self.tracker.lifetime_tokens
+        if used >= cap:
+            logger.warning("[Pipeline] 会话 Token 用量 %d 已达上限 %d", used, cap)
+            return True
+        return False
+
+    def _over_budget(self, stage: str) -> bool:
+        """检查本次决策的 token 用量是否超过预算上限
+
+        两道闸：per-decision（每次决策重新计数，防单次失控）与会话级
+        （进程累计，防长期烧钱）。前者用 run-scoped 计数，因此不会出现
+        "跑几次之后永久触发、此后每个 tick 都直接 HOLD"。
+        """
+        decision_cap = self.config.max_decision_tokens
+        if decision_cap > 0:
+            used = self.tracker.run_tokens
+            if used > decision_cap:
+                logger.warning(
+                    "[Pipeline] 本次决策 Token 用量 %d 超过单次上限 %d（%s后）",
+                    used, decision_cap, stage,
+                )
+                return True
+        if self._over_session_budget():
+            logger.warning("[Pipeline] 会话 Token 预算在%s后耗尽", stage)
             return True
         return False
 

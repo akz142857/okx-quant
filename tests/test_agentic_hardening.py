@@ -240,3 +240,169 @@ def test_pipeline_result_carries_evidence_and_data_quality():
     assert result["data_quality"] == dq
     assert "evidence" in result
     assert result["evidence"]["trader"]["signal"] == "BUY"
+
+
+# ---------------------------------------------------------------------------
+# 6. 止损/止盈的代码级夹取
+#    min(交易员, 风控) 只保证"风控不得放宽"，不构成边界：0.5 等于把止损挂在
+#    入场价 50% 之下（形同没有止损），0.0005 则进场即被扫。
+# ---------------------------------------------------------------------------
+
+def test_absurdly_wide_stop_loss_is_clamped():
+    trader = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+              "stop_loss_pct": 0.5, "take_profit_pct": 0.04, "reason": "t"}
+    risk = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+            "stop_loss_pct": 0.5, "take_profit_pct": 0.04, "reason": "r"}
+    result = _run(_pipeline(trader, risk, confidence_threshold=0.6))
+    assert result["signal"] == "BUY"
+    assert result["stop_loss_pct"] == AgenticConfig().max_stop_loss_pct
+
+
+def test_absurdly_tight_stop_loss_is_clamped():
+    trader = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+              "stop_loss_pct": 0.0005, "take_profit_pct": 0.04, "reason": "t"}
+    risk = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+            "stop_loss_pct": 0.0005, "take_profit_pct": 0.04, "reason": "r"}
+    result = _run(_pipeline(trader, risk, confidence_threshold=0.6))
+    assert result["stop_loss_pct"] == AgenticConfig().min_stop_loss_pct
+
+
+def test_take_profit_is_clamped():
+    trader = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+              "stop_loss_pct": 0.02, "take_profit_pct": 99.0, "reason": "t"}
+    risk = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+            "stop_loss_pct": 0.02, "take_profit_pct": 99.0, "reason": "r"}
+    result = _run(_pipeline(trader, risk, confidence_threshold=0.6))
+    assert result["take_profit_pct"] == AgenticConfig().max_take_profit_pct
+
+
+def test_in_range_stop_loss_is_untouched():
+    trader = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+              "stop_loss_pct": 0.03, "take_profit_pct": 0.06, "reason": "t"}
+    risk = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+            "stop_loss_pct": 0.03, "take_profit_pct": 0.06, "reason": "r"}
+    result = _run(_pipeline(trader, risk, confidence_threshold=0.6))
+    assert result["stop_loss_pct"] == 0.03
+    assert result["take_profit_pct"] == 0.06
+
+
+# ---------------------------------------------------------------------------
+# 7. Token 预算：per-decision 每次重新计数，会话级在发起调用前拦截
+# ---------------------------------------------------------------------------
+
+def _buy_pipeline(**cfg):
+    trader = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+              "stop_loss_pct": 0.02, "take_profit_pct": 0.04, "reason": "t"}
+    risk = {"signal": "BUY", "confidence": 0.9, "size_pct": 0.5,
+            "stop_loss_pct": 0.02, "take_profit_pct": 0.04, "reason": "r"}
+    return _pipeline(trader, risk, confidence_threshold=0.6, **cfg)
+
+
+def test_decision_budget_resets_each_run():
+    """旧实现用 lifetime 计数做"单次运行上限"，跑几次后会永久触发 HOLD"""
+    pipe = _buy_pipeline(max_decision_tokens=1000)
+    for _ in range(5):
+        assert _run(pipe)["signal"] == "BUY"
+    assert pipe.tracker.lifetime_tokens > 0
+
+
+def test_decision_budget_aborts_within_one_run():
+    # FakeLLM 每次调用记 2 token；上限设 1 → 分析师阶段后即超限
+    result = _run(_buy_pipeline(max_decision_tokens=1))
+    assert result["signal"] == "HOLD"
+    assert "预算" in result["reason"]
+
+
+def test_session_budget_blocks_before_any_call():
+    # FakeLLM 每次调用记 2 token；debate_rounds=1 时一次决策 8 次调用 = 16 token
+    pipe = _buy_pipeline(max_total_tokens=16, max_decision_tokens=0)
+    assert _run(pipe)["signal"] == "BUY"      # 首次跑满，累计 token 恰好达上限
+    used = pipe.tracker.lifetime_tokens
+    assert used >= 16
+
+    result = _run(pipe)
+    assert result["signal"] == "HOLD"
+    assert "未发起调用" in result["reason"]
+    assert pipe.tracker.lifetime_tokens == used, "会话预算耗尽后不得再发起任何调用"
+
+
+def test_tracker_separates_quick_and_deep_tiers():
+    pipe = _buy_pipeline()
+    _run(pipe)
+    per_tier = pipe.tracker.summary()["per_tier_tokens"]
+    assert per_tier["quick"] > 0
+    assert per_tier["deep"] > 0
+
+
+# ---------------------------------------------------------------------------
+# 8. _run_analysts 的并发/命名机制
+#    三处硬编码（max_workers=4 / 共享墙钟预算 / fn.__name__ 反查显示名）在
+#    分析师数量超过 4 时会造成：并发度不足、后半批被误判超时、失败路径 key 退化。
+# ---------------------------------------------------------------------------
+
+def _extra_analyst_pipeline(n_extra: int, delay: float = 0.0, fail: bool = False):
+    """在标准 4 分析师之外再挂 n_extra 个假分析师"""
+    import time as _time
+
+    pipe = _buy_pipeline()
+    base = pipe._build_analyst_tasks
+
+    def patched(indicators, recent_candles, inst_id, news_text):
+        tasks = base(indicators, recent_candles, inst_id, news_text)
+
+        def make(i):
+            def fn():
+                if delay:
+                    _time.sleep(delay)
+                if fail:
+                    raise RuntimeError("boom")
+                return f"extra report {i}"
+            return fn
+
+        tasks += [(f"Extra Analysis {i}", make(i)) for i in range(n_extra)]
+        return tasks
+
+    pipe._build_analyst_tasks = patched
+    return pipe
+
+
+def test_all_analysts_run_in_parallel_regardless_of_count():
+    """并发度跟随任务数：8 个分析师不应分两波跑"""
+    import time as _time
+
+    pipe = _extra_analyst_pipeline(4, delay=0.1)
+    t0 = _time.perf_counter()
+    reports = pipe._run_analysts({"inst_id": "DOGE-USDT"}, "c", "DOGE-USDT", "")
+    elapsed = _time.perf_counter() - t0
+
+    assert len(reports) == 8
+    # 若并发度写死 4，8 个 0.1s 任务要跑两波 ≈ 0.2s
+    assert elapsed < 0.18, f"疑似分波执行，耗时 {elapsed:.3f}s"
+
+
+def test_extra_analysts_are_not_falsely_marked_timeout():
+    """共享墙钟预算按波次放大：不得把已完成的响应标成超时丢掉"""
+    pipe = _extra_analyst_pipeline(4)
+    reports = pipe._run_analysts({"inst_id": "DOGE-USDT"}, "c", "DOGE-USDT", "")
+    assert len(reports) == 8
+    assert not any("超时" in r for r in reports.values())
+
+
+def test_failure_path_uses_display_name_not_internal_name():
+    """失败路径的 key 必须与成功路径一致，否则 analyst_reports 出现两套 key"""
+    pipe = _extra_analyst_pipeline(2, fail=True)
+    reports = pipe._run_analysts({"inst_id": "DOGE-USDT"}, "c", "DOGE-USDT", "")
+
+    assert "Extra Analysis 0" in reports
+    assert reports["Extra Analysis 0"] == "(分析师调用失败)"
+    # 不得出现 lambda / 内部函数名之类的退化 key
+    assert all(k[0].isupper() for k in reports), reports.keys()
+    assert "<lambda>" not in reports
+
+
+def test_analyst_max_workers_can_be_pinned():
+    pipe = _buy_pipeline(analyst_max_workers=1)
+    reports = pipe._run_analysts({"inst_id": "DOGE-USDT"}, "c", "DOGE-USDT", "")
+    # 串行执行仍应拿到全部 4 份报告，且不被误判超时
+    assert len(reports) == 4
+    assert not any("超时" in r for r in reports.values())

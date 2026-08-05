@@ -304,6 +304,8 @@ uv run python scripts/non_live_validation.py \
 - [生产准入清单](docs/RELEASE_CHECKLIST.md)
 - [安全模型](docs/SECURITY.md)
 - [生产升级方案](docs/PRODUCTION_PLAN.md)
+- [LLM 策略的成本、超时与安全控制](docs/LLM_STRATEGY_CONTROLS.md)
+- [多 Agent 大脑升级方案评审报告](docs/agentic-brain-roadmap-review.md)
 
 生产使用彼此隔离的 `okxquant-trader`、`okxquant-watchdog`、`okxquant-backup`
 非 root 身份，以及 `/etc/okx-quant` 配置、`/var/lib/okx-quant` 交易状态和

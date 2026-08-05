@@ -109,6 +109,7 @@ SUITES: tuple[dict[str, Any], ...] = (
             "tests/test_indicators.py",
             "tests/test_indicator_cache.py",
             "tests/test_agentic_hardening.py",
+            "tests/test_llm_cache.py",
             "tests/test_live_trader_integration.py",
             "tests/test_review_fixes.py",
             "tests/test_research_gate.py",

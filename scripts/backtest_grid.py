@@ -148,8 +148,14 @@ def fetch_candles(
 # 单个回测执行
 # ============================================================================
 
-def build_strategy(name: str, llm_cfg: dict | None = None):
-    """按策略名实例化；LLM 类策略注入客户端（仅技术面模式，不接入新闻）"""
+def build_strategy(name: str, llm_cfg: dict | None = None,
+                   llm_cache_dir: str | None = None):
+    """按策略名实例化；LLM 类策略注入客户端（仅技术面模式，不接入新闻）
+
+    llm_cache_dir 非空时接入 record/replay 缓存：第一次跑真实调用并落盘，
+    之后同样的 (config, system, user) 直接命中，重跑同一评估集零成本。
+    注意缓存只降本、不消除采样噪声，且任何 prompt 改动都会全部 miss。
+    """
     entry = STRATEGY_REGISTRY.get(name)
     if not entry:
         raise ValueError(f"未知策略 {name}")
@@ -159,8 +165,11 @@ def build_strategy(name: str, llm_cfg: dict | None = None):
     if name in LLM_STRATEGIES:
         if not llm_cfg or not llm_cfg.get("api_key"):
             raise ValueError(f"策略 {name} 需要 LLM key；检查 config.yaml / env")
+        from okx_quant.llm.cache import LLMCache
         from okx_quant.llm.client import LLMClient, LLMConfig
         llm_client = LLMClient(LLMConfig.from_dict(llm_cfg))
+        if llm_cache_dir:
+            llm_client = LLMCache.wrap(llm_client, LLMCache(llm_cache_dir))
         ctx = StrategyContext(llm_client=llm_client, deep_llm_client=llm_client)
         # 回测不接入新闻（历史新闻 API 无法获取）—— 策略 prompt 中会用 "No news" 占位
 
@@ -176,9 +185,10 @@ def run_one(
     fee_rate: float,
     slippage: float,
     initial_capital: float,
+    llm_cache_dir: str | None = None,
 ) -> dict:
     """回测单个 (strategy, inst, bar) 组合，返回 metrics 字典。"""
-    strategy = build_strategy(strategy_name, llm_cfg)
+    strategy = build_strategy(strategy_name, llm_cfg, llm_cache_dir)
     engine = BacktestEngine(
         initial_capital=initial_capital,
         fee_rate=fee_rate,
@@ -226,10 +236,12 @@ def run_one(
 
 def run_one_safe(args_tuple) -> dict:
     """ProcessPoolExecutor 的 worker 入口，捕获所有异常"""
-    strategy_name, inst, bar, df_path, llm_cfg, fee_rate, slippage, initial_capital = args_tuple
+    (strategy_name, inst, bar, df_path, llm_cfg, fee_rate, slippage,
+     initial_capital, llm_cache_dir) = args_tuple
     try:
         df = pd.read_parquet(df_path)
-        return run_one(strategy_name, inst, bar, df, llm_cfg, fee_rate, slippage, initial_capital)
+        return run_one(strategy_name, inst, bar, df, llm_cfg, fee_rate, slippage,
+                       initial_capital, llm_cache_dir)
     except Exception as e:
         tb = traceback.format_exc().splitlines()[-3:]
         return {
@@ -299,6 +311,11 @@ def main() -> int:
     parser.add_argument("--initial-capital", type=float, default=10_000.0)
     parser.add_argument("--fee-rate", type=float, default=0.001, help="往返手续费率")
     parser.add_argument("--slippage", type=float, default=0.0005)
+    parser.add_argument(
+        "--llm-cache", default="",
+        help="LLM record/replay 缓存目录（如 state/llm_cache）。首次真实调用并落盘，"
+             "重跑同一评估集零成本。注意 prompt 一改就全部 miss",
+    )
     args = parser.parse_args()
 
     strategies = [s.strip() for s in args.strategies.split(",") if s.strip()]
@@ -374,6 +391,7 @@ def main() -> int:
             s, inst, bar, str(data_paths[(inst, bar)]),
             llm_cfg if s in LLM_STRATEGIES else None,
             args.fee_rate, args.slippage, args.initial_capital,
+            args.llm_cache or None,
         )
         if s in LLM_STRATEGIES:
             llm_tasks.append(args_tuple)
